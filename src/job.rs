@@ -39,6 +39,13 @@ const BUILD_FILES: &[&str] = &[
     "justfile",
 ];
 
+/// End a job as done with a summary.
+fn finish(ctx: &Ctx, j: &mut Job, summary: String) -> Result<()> {
+    j.summary = summary;
+    j.status = JobStatus::Done;
+    ctx.db(|d| d.update_job(j))
+}
+
 fn level(j: &Job) -> Level {
     match j.level.as_str() {
         "observe" => Level::Observe,
@@ -81,11 +88,8 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let where_ = format!("{}#{}", j.repo, j.number);
 
     if lvl == Level::Observe {
-        j.summary = format!("{} new event(s); observe only", events.len());
-        j.status = JobStatus::Done;
-        ctx.db(|d| d.update_job(&j))?;
-        ctx.notify(Kind::Done, &where_, &j.summary);
-        return Ok(());
+        ctx.notify(Kind::Done, &where_, &format!("{} new event(s)", events.len()));
+        return finish(ctx, &mut j, format!("{} new event(s); observe only", events.len()));
     }
 
     let clone = ctx.clone_for(&j.repo).with_context(|| format!("{} is not cloned under the code dir", j.repo))?;
@@ -104,10 +108,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         Target::Pr => {
             let pr = forge.lock().await.pr(&j.repo, j.number).await?;
             if pr.state != PrState::Open {
-                j.summary = format!("PR is {:?}; nothing to do", pr.state).to_lowercase();
-                j.status = JobStatus::Done;
-                ctx.db(|d| d.update_job(&j))?;
-                return Ok(());
+                return finish(ctx, &mut j, format!("PR is {:?}; nothing to do", pr.state).to_lowercase());
             }
             let url = git::same_scheme(&repo_url, &pr.head_repo_ssh, &pr.head_repo_https);
             j.meta.push_url = url.clone();
@@ -180,11 +181,8 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         let p = gate_prompt(&text, &events);
         let o = agent::run(s.agent, &s, &wt, &job_dir.join(format!("gate-{}", name.replace('/', "-"))), &p, true).await?;
         if o.verdict.as_deref() == Some("block") {
-            j.summary = format!("filtered by {name}: {}", o.summary);
-            j.status = JobStatus::Done;
-            ctx.db(|d| d.update_job(&j))?;
-            log(ctx, id, &j.summary);
-            return Ok(());
+            log(ctx, id, &format!("filtered by {name}"));
+            return finish(ctx, &mut j, format!("filtered by {name}: {}", o.summary));
         }
     }
 
@@ -278,12 +276,8 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     }
 
     if commits == 0 && j.replies.is_empty() {
-        j.status = JobStatus::Done;
-        if j.summary.is_empty() {
-            j.summary = "nothing to do".into();
-        }
-        ctx.db(|d| d.update_job(&j))?;
-        return Ok(());
+        let summary = if j.summary.is_empty() { "nothing to do".into() } else { j.summary.clone() };
+        return finish(ctx, &mut j, summary);
     }
     let clean = checks::all_ok(&j.checks);
     j.status = match lvl {

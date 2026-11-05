@@ -352,12 +352,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
-        let meta = JobMeta { verb, ..Default::default() };
-        ctx.db(|d| {
-            let mut j = d.job(id)?.context("job vanished")?;
-            j.meta = meta;
-            d.update_job(&j)
-        })?;
+        ctx.db(|d| d.set_meta(id, &JobMeta { verb, ..Default::default() }))?;
         tracing::info!("job {id}: {repo}#{n} ({} event(s), {})", ids.len(), level.as_str());
     }
     Ok(())

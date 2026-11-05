@@ -112,17 +112,17 @@ pub fn ignore(db: &Db, event_id: &str) -> Result<()> {
 
 /// Inbox: trust this author from now on (repo or global), and release their waiting events.
 pub fn allow_always(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
-    edit_file(&file_for(paths, &scope), None, |d| push_unique(d, &scope, "allow_users", user))?;
+    edit_file(&file_for(paths, &scope), |d| push_unique(d, &scope, "allow_users", user))?;
     db.set_author_disposition(user, scope.repo(), Disposition::Pending, "allowed")
 }
 
 pub fn deny(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
-    edit_file(&file_for(paths, &scope), None, |d| push_unique(d, &scope, "deny_users", user))?;
+    edit_file(&file_for(paths, &scope), |d| push_unique(d, &scope, "deny_users", user))?;
     db.set_author_disposition(user, scope.repo(), Disposition::Dropped, "denied")
 }
 
 pub fn set_subscribed(paths: &Paths, repo: &RepoId, on: bool) -> Result<()> {
-    edit_file(&paths.repo_file(repo), None, |d| d["subscribed"] = toml_edit::value(on))?;
+    edit_file(&paths.repo_file(repo), |d| d["subscribed"] = toml_edit::value(on))?;
     Ok(())
 }
 

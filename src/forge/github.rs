@@ -19,8 +19,8 @@ pub struct GitHub {
     /// per-thread API call, which keeps us well inside rate limits.
     pub subscribed: std::collections::HashSet<String>,
     pub sweep_every: std::time::Duration,
-    team_cache: std::sync::Mutex<HashMap<String, (i64, Vec<String>)>>,
-    perm_cache: std::sync::Mutex<HashMap<String, (i64, Role)>>,
+    team_cache: super::Ttl<String, Vec<String>>,
+    perm_cache: super::Ttl<String, Role>,
 }
 
 #[derive(Deserialize)]
@@ -334,11 +334,8 @@ impl GitHub {
     /// to check MEMBER/COLLABORATOR associations, which GitHub also gives read-only users.
     async fn role_of(&self, repo: &str, user: &str) -> Result<Role> {
         let key = format!("{repo}:{}", user.to_ascii_lowercase());
-        let now = crate::state::now();
-        if let Some((at, r)) = self.perm_cache.lock().unwrap().get(&key)
-            && now - at < 3600
-        {
-            return Ok(*r);
+        if let Some(r) = self.perm_cache.get(&key) {
+            return Ok(r);
         }
         #[derive(Deserialize)]
         struct P {
@@ -351,7 +348,7 @@ impl GitHub {
             "write" => Role::Collaborator,
             _ => Role::Contributor,
         };
-        self.perm_cache.lock().unwrap().insert(key, (now, r));
+        self.perm_cache.put(key, r);
         Ok(r)
     }
 
@@ -573,17 +570,14 @@ impl GitHub {
 
     /// `org/team` membership, cached for an hour.
     pub async fn in_team(&self, team: &str, user: &str) -> Result<bool> {
-        let now = crate::state::now();
-        if let Some((at, members)) = self.team_cache.lock().unwrap().get(team)
-            && now - at < 3600
-        {
+        if let Some(members) = self.team_cache.get(&team.to_string()) {
             return Ok(members.iter().any(|m| m.eq_ignore_ascii_case(user)));
         }
         let (org, slug) = team.split_once('/').context("team must be org/team")?;
         let members: Vec<User> = self.api.get(&format!("/orgs/{org}/teams/{slug}/members?per_page=100")).await?;
         let members: Vec<String> = members.into_iter().map(|u| u.login).collect();
         let hit = members.iter().any(|m| m.eq_ignore_ascii_case(user));
-        self.team_cache.lock().unwrap().insert(team.into(), (now, members));
+        self.team_cache.put(team.into(), members);
         Ok(hit)
     }
 }

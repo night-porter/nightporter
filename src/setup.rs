@@ -104,7 +104,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     let level = ask_valid("Level", "draft", parse_level)?;
     let sched = ask_valid("\n6. Active hours, e.g. `mon-fri 08:00-09:00,17:00-22:00` (empty = always)", "", parse_schedule)?;
 
-    edit_file(&paths.config_file(), None, |d| {
+    edit_file(&paths.config_file(), |d| {
         d["code_dir"] = toml_edit::value(&code_dir);
         // Keep accounts that are already there (and their token settings); add new ones.
         let accounts = d["accounts"].or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));

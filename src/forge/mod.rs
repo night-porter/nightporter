@@ -321,6 +321,25 @@ impl Forge {
     }
 }
 
+/// A small map whose entries expire after an hour (role and team lookups).
+pub struct Ttl<K, V>(std::sync::Mutex<std::collections::HashMap<K, (i64, V)>>);
+
+impl<K: std::hash::Hash + Eq, V: Clone> Default for Ttl<K, V> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<K: std::hash::Hash + Eq, V: Clone> Ttl<K, V> {
+    pub fn get(&self, k: &K) -> Option<V> {
+        let m = self.0.lock().unwrap();
+        m.get(k).filter(|(at, _)| crate::state::now() - at < 3600).map(|(_, v)| v.clone())
+    }
+    pub fn put(&self, k: K, v: V) {
+        self.0.lock().unwrap().insert(k, (crate::state::now(), v));
+    }
+}
+
 /// Opaque per-account poll cursor, stored as JSON in the state db.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cursor {

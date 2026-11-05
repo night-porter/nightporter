@@ -9,7 +9,6 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 
 pub struct GitLab {
     pub host: String,
@@ -19,8 +18,8 @@ pub struct GitLab {
     pub labels: HashMap<String, String>,
     pub subscribed: HashSet<String>,
     pub sweep_every: std::time::Duration,
-    roles: Mutex<HashMap<(String, u64), (i64, Role)>>,
-    groups: Mutex<HashMap<String, (i64, Vec<String>)>>,
+    roles: super::Ttl<(String, u64), Role>,
+    groups: super::Ttl<String, Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -325,14 +324,11 @@ impl GitLab {
         }
     }
 
-    /// Project membership (including inherited) → role. Cached for the daemon's lifetime.
+    /// Project membership (including inherited) → role, cached for an hour.
     async fn role(&self, project: &str, u: &User) -> Role {
         let key = (project.to_string(), u.id);
-        let now = crate::state::now();
-        if let Some((at, r)) = self.roles.lock().unwrap().get(&key)
-            && now - at < 3600
-        {
-            return *r;
+        if let Some(r) = self.roles.get(&key) {
+            return r;
         }
         #[derive(Deserialize)]
         struct M {
@@ -341,13 +337,13 @@ impl GitLab {
         match self.api.get::<M>(&format!("/projects/{project}/members/all/{}", u.id)).await {
             Ok(m) => {
                 let r = Role::from_gitlab(m.access_level);
-                self.roles.lock().unwrap().insert(key, (now, r));
+                self.roles.put(key, r);
                 r
             }
             // Not a member: cache. Other errors (5xx, rate limit): don't, so a hiccup doesn't
             // send maintainers to the inbox for an hour.
             Err(e) if e.to_string().contains("HTTP 404") => {
-                self.roles.lock().unwrap().insert(key, (now, Role::None));
+                self.roles.put(key, Role::None);
                 Role::None
             }
             Err(_) => Role::None,
@@ -474,16 +470,13 @@ impl GitLab {
     }
 
     pub async fn in_group(&self, group: &str, user: &str) -> Result<bool> {
-        let now = crate::state::now();
-        if let Some((at, m)) = self.groups.lock().unwrap().get(group)
-            && now - at < 3600
-        {
+        if let Some(m) = self.groups.get(&group.to_string()) {
             return Ok(m.iter().any(|x| x.eq_ignore_ascii_case(user)));
         }
         let members: Vec<User> = self.api.get(&format!("/groups/{}/members/all?per_page=100", enc(group))).await?;
         let names: Vec<String> = members.into_iter().map(|u| u.username).collect();
         let hit = names.iter().any(|x| x.eq_ignore_ascii_case(user));
-        self.groups.lock().unwrap().insert(group.into(), (now, names));
+        self.groups.put(group.into(), names);
         Ok(hit)
     }
 }

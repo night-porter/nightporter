@@ -396,7 +396,7 @@ async fn market(paths: &Paths, cmd: MarketCmd) -> Result<()> {
     match cmd {
         MarketCmd::Add { url } => {
             let m = packs::market_sync(paths, &url).await?;
-            config::edit_file(&paths.config_file(), None, |d| {
+            config::edit_file(&paths.config_file(), |d| {
                 let arr = d["marketplaces"].or_insert(toml_edit::value(toml_edit::Array::new()));
                 if let Some(a) = arr.as_array_mut()
                     && !a.iter().any(|v| v.as_str() == Some(&url))

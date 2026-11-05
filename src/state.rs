@@ -55,17 +55,7 @@ impl JobStatus {
         }
     }
     pub fn parse(s: &str) -> Self {
-        match s {
-            "queued" => JobStatus::Queued,
-            "running" => JobStatus::Running,
-            "awaiting_approval" => JobStatus::AwaitingApproval,
-            "approved" => JobStatus::Approved,
-            "ready" => JobStatus::Ready,
-            "awaiting_run_approval" => JobStatus::AwaitingRunApproval,
-            "done" => JobStatus::Done,
-            "rejected" => JobStatus::Rejected,
-            _ => JobStatus::Failed,
-        }
+        serde_json::from_value(serde_json::Value::String(s.into())).unwrap_or(JobStatus::Failed)
     }
     /// Human label for the TUI (never colour-only).
     pub fn label(self) -> &'static str {
@@ -301,6 +291,11 @@ impl Db {
         Ok(id)
     }
 
+    pub fn set_meta(&self, id: i64, meta: &JobMeta) -> Result<()> {
+        self.0.execute("UPDATE jobs SET meta=?2 WHERE id=?1", params![id, serde_json::to_string(meta)?])?;
+        Ok(())
+    }
+
     pub fn set_status(&self, id: i64, s: JobStatus) -> Result<()> {
         self.0.execute("UPDATE jobs SET status=?2, updated_at=?3 WHERE id=?1", params![id, s.as_str(), now()])?;
         Ok(())
@@ -507,6 +502,9 @@ mod tests {
         db.set_status(id, JobStatus::AwaitingApproval).unwrap();
         assert!(db.transition(id, JobStatus::AwaitingApproval, JobStatus::Approved).unwrap());
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Approved);
+        for s in [JobStatus::AwaitingRunApproval, JobStatus::Ready, JobStatus::Rejected] {
+            assert_eq!(JobStatus::parse(s.as_str()), s);
+        }
     }
 
     #[test]

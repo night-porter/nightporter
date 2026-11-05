@@ -8,7 +8,7 @@ use crate::paths::{Paths, expand_tilde};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub const VERSION: u32 = 1;
 
@@ -390,19 +390,15 @@ fn merge_at(base: &mut toml::Table, over: &toml::Table, prefix: &str) {
     }
 }
 
-/// Edit a TOML file in place, keeping comments and layout. Refuses if the file changed on disk
-/// since `loaded_at` (another TUI or an editor saved in between). Writes atomically.
-pub fn edit_file(path: &Path, loaded_at: Option<SystemTime>, f: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<SystemTime> {
-    let (text, mtime) = match std::fs::read_to_string(path) {
-        Ok(t) => (t, std::fs::metadata(path)?.modified().ok()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
+/// Edit a TOML file in place, keeping comments and layout. Every edit re-reads the file right
+/// before writing, so edits from several TUIs (or an editor) don't overwrite each other.
+/// Validates the result and writes atomically.
+pub fn edit_file(path: &Path, f: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
-    if let (Some(loaded), Some(now)) = (loaded_at, mtime)
-        && now > loaded
-    {
-        bail!("{} changed elsewhere; reload before saving", path.display());
-    }
     let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parse {}", path.display()))?;
     f(&mut doc);
     let out = doc.to_string();
@@ -412,8 +408,7 @@ pub fn edit_file(path: &Path, loaded_at: Option<SystemTime>, f: impl FnOnce(&mut
     } else {
         Config::parse("")?.resolve(Some(&out.parse::<toml::Table>()?))?;
     }
-    write_atomic(path, out.as_bytes())?;
-    Ok(std::fs::metadata(path)?.modified()?)
+    write_atomic(path, out.as_bytes())
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -642,20 +637,19 @@ mod tests {
     }
 
     #[test]
-    fn edit_file_preserves_comments_and_detects_conflicts() {
+    fn edit_file_preserves_comments_and_validates() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("x.toml");
         std::fs::write(&p, "# keep me\nlevel = \"draft\"\n").unwrap();
-        let t0 = std::fs::metadata(&p).unwrap().modified().unwrap();
-        let t1 = edit_file(&p, Some(t0), |d| d["subscribed"] = toml_edit::value(true)).unwrap();
+        edit_file(&p, |d| d["subscribed"] = toml_edit::value(true)).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("# keep me") && text.contains("subscribed = true"));
-        // Simulate another writer.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Another writer's change survives the next edit.
         std::fs::write(&p, "level = \"auto\"\n").unwrap();
-        assert!(edit_file(&p, Some(t1), |d| d["level"] = toml_edit::value("observe")).is_err());
+        edit_file(&p, |d| d["subscribed"] = toml_edit::value(false)).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("auto"));
         // Invalid edits are rejected before writing.
-        assert!(edit_file(&p, None, |d| d["level"] = toml_edit::value("yolo")).is_err());
+        assert!(edit_file(&p, |d| d["level"] = toml_edit::value("yolo")).is_err());
         assert!(std::fs::read_to_string(&p).unwrap().contains("auto"));
     }
 }
