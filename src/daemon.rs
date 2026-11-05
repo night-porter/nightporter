@@ -297,7 +297,7 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
 
 /// Batch pending events into jobs: debounce, schedule, one job per PR, caps.
 pub fn dispatch(ctx: &Ctx) -> Result<()> {
-    if ctx.db(|d| d.get("paused"))?.as_deref() == Some("1") {
+    if ctx.db(|d| Ok(crate::actions::paused(d)))? {
         return Ok(());
     }
     let cfg = ctx.cfg();

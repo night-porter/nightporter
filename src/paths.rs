@@ -56,6 +56,11 @@ impl Paths {
         self.data_dir.join("daemon.log")
     }
 
+    /// The daemon holds an exclusive lock on its lock file while it runs.
+    pub fn daemon_running(&self) -> bool {
+        std::fs::OpenOptions::new().write(true).open(self.lock()).is_ok_and(|f| f.try_lock().is_err())
+    }
+
     pub fn ensure(&self) -> Result<()> {
         for d in [&self.config_dir, &self.data_dir, &self.repos_dir(), &self.jobs_dir(), &self.worktrees_dir()] {
             std::fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;

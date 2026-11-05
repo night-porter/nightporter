@@ -107,46 +107,57 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum InboxCmd {
+    /// List events from unknown authors that are waiting for a decision.
     List,
-    AllowOnce {
-        event: String,
-    },
-    /// Trust the author from now on (`--global` for all repos).
+    /// Let this one event through (the author stays untrusted).
+    AllowOnce { event: String },
+    /// Trust the author from now on, on one repo (`--repo`) or everywhere (`--global`).
     Allow {
         user: String,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "global", conflicts_with = "global")]
         repo: Option<String>,
+        #[arg(long)]
+        global: bool,
     },
+    /// Never act on this author, on one repo (`--repo`) or everywhere (`--global`).
     Deny {
         user: String,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "global", conflicts_with = "global")]
         repo: Option<String>,
+        #[arg(long)]
+        global: bool,
     },
-    Ignore {
-        event: String,
-    },
+    /// Drop this one event.
+    Ignore { event: String },
 }
 
 #[derive(Subcommand)]
 enum TokenCmd {
+    /// Store a token for `github` or `gitlab` (optionally a self-hosted host) in the keychain.
     Set { forge: String, host: Option<String> },
 }
 
 #[derive(Subcommand)]
 enum ServiceCmd {
+    /// Start the daemon at login (launchd on macOS, systemd --user on Linux).
     Install,
+    /// Stop the daemon and remove the service.
     Uninstall,
 }
 
 #[derive(Subcommand)]
 enum MarketCmd {
+    /// Add a marketplace (a git repo with a marketplace.toml).
     Add { url: String },
+    /// List marketplaces and their packs.
     List,
+    /// Refresh all marketplaces.
     Update,
 }
 
 #[derive(Subcommand)]
 enum PackCmd {
+    /// List installed packs and their pinned commits.
     List,
     /// Install from a marketplace by name, or from a git URL (`url@rev`).
     Add {
@@ -159,13 +170,10 @@ enum PackCmd {
         #[arg(long)]
         yes: bool,
     },
-    Remove {
-        name: String,
-    },
+    /// Uninstall a pack.
+    Remove { name: String },
     /// Print an env preset (`pack/env`) to paste into a repo file.
-    Env {
-        name: String,
-    },
+    Env { name: String },
 }
 
 fn main() -> Result<()> {
@@ -178,6 +186,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::detect()?;
     let cmd = cli.cmd.unwrap_or(Cmd::Tui);
+    let cmd_name = match &cmd {
+        Cmd::Subscribe { .. } => "subscribe",
+        _ => "",
+    };
     let rt = || tokio::runtime::Builder::new_multi_thread().enable_all().build();
     match cmd {
         Cmd::Tui => {
@@ -207,20 +219,29 @@ fn main() -> Result<()> {
                 println!(
                     "{} {:<45} {:<8} {}",
                     if s.subscribed { "[on] " } else { "[off]" },
-                    format!("{}:{}", r.host, r.path),
+                    format!("{}/{}", r.host, r.path),
                     s.level.as_str(),
                     p.display()
                 );
             }
             Ok(())
         }
-        Cmd::Subscribe { repo } => actions::set_subscribed(&paths, &resolve_repo(&paths, &repo)?, true),
-        Cmd::Unsubscribe { repo } => actions::set_subscribed(&paths, &resolve_repo(&paths, &repo)?, false),
+        Cmd::Subscribe { repo } | Cmd::Unsubscribe { repo } => {
+            let on = matches!(cmd_name, "subscribe");
+            let r = resolve_repo(&paths, &repo)?;
+            actions::set_subscribed(&paths, &r, on)?;
+            println!("{} {}/{}", if on { "subscribed to" } else { "unsubscribed from" }, r.host, r.path);
+            Ok(())
+        }
         Cmd::Approve { id, override_blocking } => {
             println!("{}", actions::approve(&db(&paths)?, id, override_blocking)?);
             Ok(())
         }
-        Cmd::Reject { id } => actions::reject(&db(&paths)?, id),
+        Cmd::Reject { id } => {
+            actions::reject(&db(&paths)?, id)?;
+            println!("job {id} rejected: nothing will be pushed or posted");
+            Ok(())
+        }
         Cmd::Retry { id } => {
             println!("re-queued {} event(s)", actions::retry(&db(&paths)?, id)?);
             Ok(())
@@ -232,8 +253,16 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Inbox { cmd } => inbox(&paths, cmd),
-        Cmd::Pause => actions::set_paused(&db(&paths)?, true),
-        Cmd::Resume => actions::set_paused(&db(&paths)?, false),
+        Cmd::Pause => {
+            actions::set_paused(&db(&paths)?, true)?;
+            println!("paused: no new jobs will start (running jobs finish)");
+            Ok(())
+        }
+        Cmd::Resume => {
+            actions::set_paused(&db(&paths)?, false)?;
+            println!("resumed");
+            Ok(())
+        }
         Cmd::Gc { all } => rt()?.block_on(async {
             let cfg = config::Config::load(&paths)?;
             let ctx = daemon::offline_ctx(&paths, cfg).await?;
@@ -284,7 +313,11 @@ fn resolve_repo(paths: &Paths, s: &str) -> Result<RepoId> {
 
 fn status(paths: &Paths) -> Result<()> {
     let db = db(paths)?;
-    println!("Night Porter{}", if actions::paused(&db) { " (PAUSED)" } else { "" });
+    println!(
+        "Night Porter: daemon {}{}",
+        if paths.daemon_running() { "running" } else { "NOT RUNNING" },
+        if actions::paused(&db) { ", PAUSED" } else { "" }
+    );
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
@@ -310,17 +343,25 @@ fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
                 println!("{}  @{} ({:?}) on {}#{}\n    {}", e.id, e.author, e.role, e.repo, e.number, e.body.replace('\n', "\n    "));
             }
         }
-        InboxCmd::AllowOnce { event } => actions::allow_once(&db, &event)?,
-        InboxCmd::Ignore { event } => actions::ignore(&db, &event)?,
-        InboxCmd::Allow { user, repo } => {
-            let r = scope_repo(&repo)?;
-            let scope = r.as_ref().map_or(actions::Scope::Global, actions::Scope::Repo);
-            println!("released {} event(s)", actions::allow_always(paths, &db, &user, scope)?);
+        InboxCmd::AllowOnce { event } => {
+            actions::allow_once(&db, &event)?;
+            println!("{event} allowed once");
         }
-        InboxCmd::Deny { user, repo } => {
+        InboxCmd::Ignore { event } => {
+            actions::ignore(&db, &event)?;
+            println!("{event} ignored");
+        }
+        InboxCmd::Allow { user, repo, .. } => {
             let r = scope_repo(&repo)?;
             let scope = r.as_ref().map_or(actions::Scope::Global, actions::Scope::Repo);
-            println!("dropped {} event(s)", actions::deny(paths, &db, &user, scope)?);
+            let n = actions::allow_always(paths, &db, &user, scope)?;
+            println!("@{user} trusted {}; {n} waiting event(s) released", r.map_or("on all repos".into(), |r| format!("on {r}")));
+        }
+        InboxCmd::Deny { user, repo, .. } => {
+            let r = scope_repo(&repo)?;
+            let scope = r.as_ref().map_or(actions::Scope::Global, actions::Scope::Repo);
+            let n = actions::deny(paths, &db, &user, scope)?;
+            println!("@{user} denied {}; {n} waiting event(s) dropped", r.map_or("on all repos".into(), |r| format!("on {r}")));
         }
     }
     Ok(())
@@ -440,7 +481,10 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
             packs::commit(paths, &staging, &m, &l.url, &sha)?;
             println!("updated");
         }
-        PackCmd::Remove { name } => packs::remove(paths, &name)?,
+        PackCmd::Remove { name } => {
+            packs::remove(paths, &name)?;
+            println!("removed {name}");
+        }
         PackCmd::Env { name } => print!("{}", packs::env_preset(paths, &name)?),
     }
     Ok(())

@@ -128,7 +128,7 @@ pub fn run(paths: &Paths) -> bool {
             });
         }
     }
-    let running = std::fs::OpenOptions::new().write(true).open(paths.lock()).is_ok_and(|f| f.try_lock().is_err());
+    let running = paths.daemon_running();
     checks.push(Check {
         name: "daemon".into(),
         ok: running,
@@ -137,9 +137,13 @@ pub fn run(paths: &Paths) -> bool {
         fix: "nightporter service install   (or run `nightporter daemon`)".into(),
     });
 
-    let mut all_ok = true;
-    for c in &checks {
-        // Text markers, not colour, so it reads the same in any terminal or screen reader.
+    print(&checks);
+    checks.iter().all(|c| c.ok || c.optional)
+}
+
+/// Text markers, not colour, so it reads the same in any terminal or screen reader.
+pub fn print(checks: &[Check]) {
+    for c in checks {
         let mark = if c.ok {
             "[ok]  "
         } else if c.optional {
@@ -150,10 +154,8 @@ pub fn run(paths: &Paths) -> bool {
         println!("{mark} {:<22} {}", c.name, c.detail);
         if !c.ok {
             println!("       fix: {}", c.fix);
-            all_ok &= c.optional;
         }
     }
-    all_ok
 }
 
 pub fn walk_repo_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {

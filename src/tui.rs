@@ -43,6 +43,8 @@ struct App {
     inbox: Vec<Event>,
     repos: Vec<RepoRow>,
     detail: Option<i64>,
+    /// Rendered once per refresh, not per frame (a job can carry a large diff).
+    detail_text: String,
     scroll: u16,
     msg: String,
     confirm: Option<(String, Confirm)>,
@@ -72,6 +74,7 @@ impl App {
             inbox: vec![],
             repos: vec![],
             detail: None,
+            detail_text: String::new(),
             scroll: 0,
             msg: "Press ? for help.".into(),
             confirm: None,
@@ -101,25 +104,25 @@ impl App {
 
     fn refresh(&mut self, repos: bool) {
         let jobs = self.db.recent_jobs(500).unwrap_or_default();
-        self.queue = jobs.iter().filter(|j| j.status.needs_user() || j.status.is_active()).cloned().collect();
-        // Needs-you first.
-        self.queue.sort_by_key(|j| (!j.status.needs_user(), j.id));
+        let day_ago = crate::state::now() - 86400;
+        let recent_failure = |j: &Job| j.status == JobStatus::Failed && j.updated_at > day_ago;
+        self.queue = jobs.iter().filter(|j| j.status.needs_user() || j.status.is_active() || recent_failure(j)).cloned().collect();
+        // Needs-you first, then today's failures, then running.
+        self.queue.sort_by_key(|j| (!j.status.needs_user(), j.status != JobStatus::Failed, j.id));
+        if let Some(id) = self.detail {
+            self.detail_text = self.db.job(id).ok().flatten().map(|j| job_text(&self.db, &j)).unwrap_or_else(|| "job not found".into());
+        }
         self.history = jobs;
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
         self.paused = actions::paused(&self.db);
-        self.daemon_up = std::fs::OpenOptions::new().write(true).open(self.paths.lock()).is_ok_and(|f| f.try_lock().is_err());
+        self.daemon_up = self.paths.daemon_running();
         if repos {
             self.repos = match Config::load(&self.paths) {
                 Ok(cfg) => crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts)
                     .into_keys()
-                    .map(|id| {
-                        let s = cfg.settings_for(&self.paths, &id).ok();
-                        RepoRow {
-                            subscribed: s.as_ref().is_some_and(|s| s.subscribed),
-                            level: s.as_ref().map_or("?".into(), |s| s.level.as_str().into()),
-                            agent: s.as_ref().map_or("?".into(), |s| s.agent.label().into()),
-                            id,
-                        }
+                    .map(|id| match cfg.settings_for(&self.paths, &id) {
+                        Ok(s) => RepoRow { subscribed: s.subscribed, level: s.level.as_str().into(), agent: s.agent.label().into(), id },
+                        Err(e) => RepoRow { subscribed: false, level: "ERROR".into(), agent: format!("{e:#}"), id },
                     })
                     .collect(),
                 Err(e) => {
@@ -177,9 +180,9 @@ impl App {
                     self.detail = None;
                     self.scroll = 0;
                 }
-                KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
                 KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
-                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(20),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(20).min(self.max_scroll()),
                 KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(20),
                 _ => self.job_key(k),
             }
@@ -222,6 +225,7 @@ impl App {
             KeyCode::Enter if matches!(self.tab, Tab::Queue | Tab::History) => {
                 if let Some(j) = self.selected_job() {
                     self.detail = Some(j.id);
+                    self.refresh(false);
                 }
             }
             _ => match self.tab {
@@ -232,6 +236,10 @@ impl App {
             },
         }
         true
+    }
+
+    fn max_scroll(&self) -> u16 {
+        self.detail_text.lines().count().saturating_sub(5).min(u16::MAX as usize) as u16
     }
 
     fn switch(&mut self, t: Tab) {
@@ -252,12 +260,18 @@ impl App {
             KeyCode::Char('a') => actions::approve(&self.db, id, false).map(String::from),
             KeyCode::Char('A') => {
                 self.confirm = Some((
-                    format!("Override blocking checks and approve job {id}? Secrets/protected files/history rewrites will be pushed. y/N"),
+                    format!("Override blocking checks for job {id}? y/N"),
                     Box::new(move |a: &mut App| actions::approve(&a.db, id, true).map(String::from)),
                 ));
                 return;
             }
-            KeyCode::Char('r') => actions::reject(&self.db, id).map(|_| format!("job {id} rejected")),
+            KeyCode::Char('r') => {
+                self.confirm = Some((
+                    format!("Reject job {id}? Nothing is pushed or posted. y/N"),
+                    Box::new(move |a: &mut App| actions::reject(&a.db, id).map(|_| format!("job {id} rejected"))),
+                ));
+                return;
+            }
             KeyCode::Char('t') => actions::retry(&self.db, id).map(|n| format!("re-queued {n} event(s)")),
             KeyCode::Char('c') => {
                 let cmd = self.db.job(id).ok().flatten().map(|j| crate::job::manual_commands(&j)).unwrap_or_default();
@@ -297,8 +311,17 @@ impl App {
                 ));
                 return;
             }
-            KeyCode::Char('d') => actions::deny(&self.paths, &self.db, &e.author, Scope::Repo(&e.repo))
-                .map(|n| format!("@{} denied on {} ({n} dropped)", e.author, e.repo)),
+            KeyCode::Char('d') => {
+                let (author, repo, paths) = (e.author.clone(), e.repo.clone(), self.paths.clone());
+                self.confirm = Some((
+                    format!("Deny @{author} on {repo}? y/N"),
+                    Box::new(move |a: &mut App| {
+                        actions::deny(&paths, &a.db, &author, Scope::Repo(&repo))
+                            .map(|n| format!("@{author} denied on {repo} ({n} dropped)"))
+                    }),
+                ));
+                return;
+            }
             _ => return,
         };
         self.msg = r.unwrap_or_else(|e| format!("error: {e:#}"));
@@ -323,11 +346,13 @@ impl App {
         let [head, tabs, body, foot] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3), Constraint::Length(2)]).areas(f.area());
         let needs = self.queue.iter().filter(|j| j.status.needs_user()).count();
+        let failed = self.queue.iter().filter(|j| j.status == JobStatus::Failed).count();
         let status = format!(
-            " Night Porter — daemon {} — {} — {} need you — {} in inbox",
+            " Night Porter — daemon {} — {} — {} need you — {} failed today — {} in inbox",
             if self.daemon_up { "running" } else { "NOT RUNNING" },
             if self.paused { "PAUSED" } else { "active" },
             needs,
+            failed,
             self.inbox.len()
         );
         f.render_widget(Paragraph::new(status).style(self.style(Style::new().add_modifier(Modifier::BOLD))), head);
@@ -336,8 +361,7 @@ impl App {
         f.render_widget(Tabs::new(titles).select(idx).highlight_style(self.style(Style::new().add_modifier(Modifier::REVERSED))), tabs);
 
         if let Some(id) = self.detail {
-            let text = self.db.job(id).ok().flatten().map(|j| job_text(&self.db, &j)).unwrap_or_else(|| "job not found".into());
-            let p = Paragraph::new(text)
+            let p = Paragraph::new(self.detail_text.as_str())
                 .wrap(Wrap { trim: false })
                 .scroll((self.scroll, 0))
                 .block(Block::default().borders(Borders::ALL).title(format!(" Job {id} — Esc back ")));
@@ -407,17 +431,18 @@ impl App {
             }
         }
         let keys = match (self.detail.is_some(), self.tab) {
-            (true, _) => "↑↓ scroll  a approve  A override  r reject  t retry  c copy push cmd  y copy replies  Esc back",
-            (_, Tab::Queue | Tab::History) => "↑↓ move  Enter open  a approve  r reject  t retry  p pause  1-4 tabs  ? help  q quit",
-            (_, Tab::Inbox) => "o allow once  a trust (repo)  A trust (all)  i ignore  d deny  q quit",
-            (_, Tab::Repos) => "space subscribe/unsubscribe  R rescan  q quit",
-            (_, Tab::Help) => "1-4 tabs  q quit",
+            // Kept under 80 columns.
+            (true, _) => "↑↓ scroll a approve A override r reject t retry c/y copy Esc back",
+            (_, Tab::Queue | Tab::History) => "↑↓ move Enter open a approve r reject t retry p pause ? help q quit",
+            (_, Tab::Inbox) => "o once a trust A trust-all i ignore d deny ? help q quit",
+            (_, Tab::Repos) => "space subscribe/unsubscribe R rescan ? help q quit",
+            (_, Tab::Help) => "1-4 tabs q quit",
         };
         let line2 = match &self.confirm {
             Some((q, _)) => q.clone(),
             None => self.msg.clone(),
         };
-        f.render_widget(Paragraph::new(vec![Line::from(keys), Line::from(line2)]).style(self.style(Style::new().fg(Color::Gray))), foot);
+        f.render_widget(Paragraph::new(vec![Line::from(keys), Line::from(line2)]).style(Style::new().add_modifier(Modifier::DIM)), foot);
     }
 }
 
@@ -571,7 +596,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn screen(app: &mut App) -> String {
-        let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        screen_at(app, 140, 30)
+    }
+    fn screen_at(app: &mut App, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         t.backend()
             .buffer()
@@ -579,7 +607,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<Vec<_>>()
-            .chunks(140)
+            .chunks(w as usize)
             .map(|r| r.concat())
             .collect::<Vec<_>>()
             .join("\n")
@@ -620,10 +648,16 @@ mod tests {
         press(&mut app, KeyCode::Char('a'));
         assert!(screen(&mut app).contains("blocking check failures"));
         press(&mut app, KeyCode::Char('A'));
-        assert!(screen(&mut app).contains("Override blocking checks"));
+        let small = screen_at(&mut app, 80, 24);
+        assert!(small.contains("Override blocking checks") && small.contains("y/N"), "prompt must fit 80 columns: {small}");
         press(&mut app, KeyCode::Char('n'));
         assert_eq!(app.db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
         press(&mut app, KeyCode::Esc);
+        assert!(screen_at(&mut app, 80, 24).contains("q quit"), "footer must fit 80 columns");
+        // Reject asks first.
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
 
         for (k, want) in
             [('2', "No one is waiting"), ('3', "History"), ('4', "No clones found"), ('?', "Status words are always shown as text")]
