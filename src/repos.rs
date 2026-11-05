@@ -42,7 +42,7 @@ fn walk(dir: &Path, depth: usize, accounts: &[Account], out: &mut CloneMap) {
     }
 }
 
-fn remote_urls(cfg: &str) -> Vec<String> {
+pub fn remote_urls(cfg: &str) -> Vec<String> {
     let mut in_remote = false;
     let mut out = Vec::new();
     for l in cfg.lines().map(str::trim) {

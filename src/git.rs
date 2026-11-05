@@ -76,12 +76,12 @@ pub async fn is_ancestor(wt: &Path, a: &str, b: &str) -> bool {
 }
 
 /// The URL of the clone's remote that points at `repo`, in the clone's own scheme.
+/// Read from `.git/config` as written (not `git remote -v`, which applies `insteadOf` rewrites).
 pub async fn remote_url(clone: &Path, repo: &crate::forge::RepoId, accounts: &[crate::config::Account]) -> Result<String> {
-    let out = git(clone, &["remote", "-v"]).await?;
-    out.lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
+    let cfg = std::fs::read_to_string(clone.join(".git/config")).with_context(|| format!("read {}/.git/config", clone.display()))?;
+    crate::repos::remote_urls(&cfg)
+        .into_iter()
         .find(|u| crate::repos::parse_remote(u, accounts).as_ref() == Some(repo))
-        .map(String::from)
         .with_context(|| format!("no remote for {repo} in {}", clone.display()))
 }
 

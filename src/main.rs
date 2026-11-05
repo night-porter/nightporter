@@ -22,6 +22,9 @@ mod state;
 mod trust;
 mod tui;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use forge::{ForgeKind, RepoId};

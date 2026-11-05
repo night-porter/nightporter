@@ -171,7 +171,7 @@ fn watch(paths: &Paths, dirty: Arc<std::sync::atomic::AtomicBool>) -> Option<::n
 }
 
 /// Poll one account. Returns the server's minimum poll interval in seconds.
-async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
+pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
     let cfg = ctx.cfg();
     let subs = ctx.subscribed(&cfg);
     let mut forge = ctx.forges[key].lock().await;
