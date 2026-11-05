@@ -1,0 +1,633 @@
+//! Config: one global `config.toml` plus optional per-repo override files.
+//!
+//! Layering is done on raw TOML tables (`[defaults]` ⊕ repo file), then deserialised once into
+//! [`RepoSettings`], so every setting is automatically overridable per repo.
+
+use crate::forge::{ForgeKind, RepoId, Trigger};
+use crate::paths::{Paths, expand_tilde};
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+pub const VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    #[serde(default = "one")]
+    pub version: u32,
+    #[serde(default = "default_code_dir")]
+    pub code_dir: String,
+    #[serde(default = "three")]
+    pub scan_depth: usize,
+    #[serde(default = "two_min", with = "dur")]
+    pub poll_interval: Duration,
+    #[serde(default = "ten_min", with = "dur")]
+    pub sweep_interval: Duration,
+    #[serde(default = "five")]
+    pub min_free_gb: u64,
+    #[serde(default = "two_usize")]
+    pub max_concurrent_jobs: usize,
+    #[serde(default = "fifty")]
+    pub daily_job_cap: u32,
+    #[serde(default = "thirty")]
+    pub retention_days: u32,
+    #[serde(default = "fourteen")]
+    pub worktree_idle_days: u32,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub notifications: Notifications,
+    #[serde(default)]
+    pub marketplaces: Vec<String>,
+    /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
+    #[serde(default)]
+    pub defaults: toml::Table,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Account {
+    pub forge: ForgeKind,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `cli` (gh/glab auth token) or `keyring`.
+    #[serde(default)]
+    pub token: TokenSource,
+}
+
+impl Account {
+    pub fn host(&self) -> &str {
+        self.host.as_deref().unwrap_or(match self.forge {
+            ForgeKind::GitHub => "github.com",
+            ForgeKind::GitLab => "gitlab.com",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenSource {
+    #[default]
+    Cli,
+    Keyring,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notifications {
+    #[serde(default = "yes")]
+    pub needs_approval: bool,
+    #[serde(default = "yes")]
+    pub failed: bool,
+    #[serde(default = "yes")]
+    pub done: bool,
+    #[serde(default = "yes")]
+    pub new_author: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { needs_approval: true, failed: true, done: true, new_author: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Observe,
+    Suggest,
+    Draft,
+    Auto,
+}
+
+impl Level {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Observe => "observe",
+            Level::Suggest => "suggest",
+            Level::Draft => "draft",
+            Level::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentKind {
+    Claude,
+    OpenCode,
+}
+
+impl AgentKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude Code",
+            AgentKind::OpenCode => "OpenCode",
+        }
+    }
+    pub fn bin(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::OpenCode => "opencode",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Escalation {
+    Deps,
+    Size,
+}
+
+/// Effective settings for one repo (defaults with the repo file layered on top).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoSettings {
+    #[serde(default)]
+    pub subscribed: bool,
+    #[serde(default = "claude")]
+    pub agent: AgentKind,
+    /// Extra args for the agent CLI, e.g. `["--model", "opus"]`.
+    #[serde(default)]
+    pub agent_args: Vec<String>,
+    /// Shell commands the agent may run (e.g. `"npm test"`, `"ddev phpunit"`). Prefix match.
+    #[serde(default)]
+    pub allow_commands: Vec<String>,
+    #[serde(default = "draft")]
+    pub level: Level,
+    #[serde(default = "all_triggers")]
+    pub triggers: Vec<Trigger>,
+    #[serde(default = "two_min", with = "dur")]
+    pub debounce: Duration,
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
+    #[serde(default = "three_u32")]
+    pub max_ci_attempts: u32,
+    #[serde(default = "thirty_min", with = "dur")]
+    pub timeout: Duration,
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+    /// Extra instructions file (your own, outside the repo).
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub packs: Vec<String>,
+    #[serde(default)]
+    pub trust: Trust,
+    #[serde(default)]
+    pub schedule: Vec<Window>,
+    #[serde(default)]
+    pub reply: ReplySettings,
+    #[serde(default)]
+    pub checks: Checks,
+    #[serde(default)]
+    pub env: Env,
+    #[serde(default)]
+    pub maintainer: Maintainer,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trust {
+    #[serde(default = "default_roles")]
+    pub roles: Vec<crate::forge::Role>,
+    #[serde(default)]
+    pub allow_users: Vec<String>,
+    #[serde(default)]
+    pub deny_users: Vec<String>,
+    #[serde(default)]
+    pub allow_teams: Vec<String>,
+    #[serde(default)]
+    pub deny_teams: Vec<String>,
+    #[serde(default)]
+    pub allow_bots: Vec<String>,
+    /// Accept everyone. Capped at `suggest`.
+    #[serde(default)]
+    pub open: bool,
+}
+
+impl Default for Trust {
+    fn default() -> Self {
+        toml::from_str("").expect("defaults")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Window {
+    /// `mon-fri`, `sat,sun`, `daily`, `tue`.
+    pub days: String,
+    /// `HH:MM-HH:MM`; may cross midnight (`22:00-06:00`).
+    pub windows: Vec<String>,
+    /// IANA time zone; defaults to the system zone.
+    #[serde(default)]
+    pub tz: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplySettings {
+    /// `concise`, `detailed-tech-lead`, `non-technical`, a pack style, or a path to a `.md` file.
+    #[serde(default = "concise")]
+    pub style: String,
+    #[serde(default = "en")]
+    pub language: String,
+    #[serde(default = "yes")]
+    pub footer: bool,
+    #[serde(default)]
+    pub resolve_threads: bool,
+}
+
+impl Default for ReplySettings {
+    fn default() -> Self {
+        toml::from_str("").expect("defaults")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checks {
+    /// Extra protected globs, added to the built-in list (which can't be removed).
+    #[serde(default)]
+    pub protected: Vec<String>,
+    #[serde(default = "default_escalations")]
+    pub escalate_on: Vec<Escalation>,
+    #[serde(default = "five_hundred")]
+    pub max_diff_lines: usize,
+}
+
+impl Default for Checks {
+    fn default() -> Self {
+        toml::from_str("").expect("defaults")
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Env {
+    #[serde(default)]
+    pub setup: Vec<String>,
+    #[serde(default)]
+    pub teardown: Vec<String>,
+    #[serde(default)]
+    pub cleanup: Vec<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Maintainer {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "draft")]
+    pub level: Level,
+    #[serde(default = "np_label")]
+    pub label: String,
+}
+
+impl Default for Maintainer {
+    fn default() -> Self {
+        toml::from_str("").expect("defaults")
+    }
+}
+
+impl Config {
+    pub fn load(paths: &Paths) -> Result<Self> {
+        let file = paths.config_file();
+        let text = match std::fs::read_to_string(&file) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+        };
+        Self::parse(&text).with_context(|| format!("in {}", file.display()))
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        let cfg: Config = toml::from_str(text)?;
+        if cfg.version > VERSION {
+            bail!("config version {} is newer than this nightporter ({VERSION}); upgrade nightporter", cfg.version);
+        }
+        // Validate defaults eagerly so typos surface at load, not at the first event.
+        cfg.resolve(None)?;
+        Ok(cfg)
+    }
+
+    pub fn code_dir(&self) -> PathBuf {
+        expand_tilde(&self.code_dir)
+    }
+
+    /// Effective settings for `repo`, reading its override file if present.
+    pub fn settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
+        let file = paths.repo_file(repo);
+        let over = match std::fs::read_to_string(&file) {
+            Ok(t) => Some(t.parse::<toml::Table>().with_context(|| format!("in {}", file.display()))?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+        };
+        self.resolve(over.as_ref()).with_context(|| format!("settings for {repo}"))
+    }
+
+    pub fn resolve(&self, over: Option<&toml::Table>) -> Result<RepoSettings> {
+        let mut merged = self.defaults.clone();
+        // `subscribed` only makes sense per repo.
+        merged.remove("subscribed");
+        if let Some(o) = over {
+            merge(&mut merged, o);
+        }
+        let s: RepoSettings = merged.try_into()?;
+        crate::schedule::validate(&s.schedule)?;
+        Ok(s.clamped())
+    }
+}
+
+impl RepoSettings {
+    /// Apply the safety caps that config can't override.
+    fn clamped(mut self) -> Self {
+        if self.trust.open {
+            self.level = self.level.min(Level::Suggest);
+            self.maintainer.level = self.maintainer.level.min(Level::Suggest);
+        }
+        self.maintainer.level = self.maintainer.level.min(Level::Draft);
+        self
+    }
+
+    pub fn concurrency(&self) -> usize {
+        self.max_concurrent.unwrap_or(usize::MAX).max(1)
+    }
+}
+
+/// Deep-merge `over` into `base`: tables merge, everything else (including arrays) replaces.
+pub fn merge(base: &mut toml::Table, over: &toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// Edit a TOML file in place, keeping comments and layout. Refuses if the file changed on disk
+/// since `loaded_at` (another TUI or an editor saved in between). Writes atomically.
+pub fn edit_file(path: &Path, loaded_at: Option<SystemTime>, f: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<SystemTime> {
+    let (text, mtime) = match std::fs::read_to_string(path) {
+        Ok(t) => (t, std::fs::metadata(path)?.modified().ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
+        Err(e) => return Err(e.into()),
+    };
+    if let (Some(loaded), Some(now)) = (loaded_at, mtime)
+        && now > loaded
+    {
+        bail!("{} changed elsewhere; reload before saving", path.display());
+    }
+    let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parse {}", path.display()))?;
+    f(&mut doc);
+    let out = doc.to_string();
+    // Validate before writing, so a bad edit can't brick the daemon.
+    if path.file_name().is_some_and(|n| n == "config.toml") {
+        Config::parse(&out)?;
+    } else {
+        Config::parse("")?.resolve(Some(&out.parse::<toml::Table>()?))?;
+    }
+    write_atomic(path, out.as_bytes())?;
+    Ok(std::fs::metadata(path)?.modified()?)
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Parse `90s`, `2m`, `1h30m`, `1d`.
+pub fn parse_duration(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    let (mut total, mut num) = (0u64, String::new());
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+            continue;
+        }
+        let n: u64 = num.parse().with_context(|| format!("bad duration {s:?}"))?;
+        num.clear();
+        total += n * match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86400,
+            _ => bail!("bad duration unit {c:?} in {s:?} (use s, m, h, d)"),
+        };
+    }
+    if !num.is_empty() || s.is_empty() {
+        bail!("bad duration {s:?} (e.g. 90s, 2m, 1h30m)");
+    }
+    Ok(Duration::from_secs(total))
+}
+
+pub fn format_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        _ if s % 3600 == 0 && s > 0 => format!("{}h", s / 3600),
+        _ if s % 60 == 0 && s > 0 => format!("{}m", s / 60),
+        _ => format!("{s}s"),
+    }
+}
+
+mod dur {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        super::parse_duration(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+    #[allow(dead_code)]
+    pub fn serialize<S: Serializer>(v: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&super::format_duration(*v))
+    }
+}
+
+/// Starter config written by `nightporter setup`.
+pub const TEMPLATE: &str = include_str!("../assets/config.example.toml");
+
+fn one() -> u32 {
+    1
+}
+fn three() -> usize {
+    3
+}
+fn three_u32() -> u32 {
+    3
+}
+fn five() -> u64 {
+    5
+}
+fn two_usize() -> usize {
+    2
+}
+fn fifty() -> u32 {
+    50
+}
+fn thirty() -> u32 {
+    30
+}
+fn fourteen() -> u32 {
+    14
+}
+fn five_hundred() -> usize {
+    500
+}
+fn yes() -> bool {
+    true
+}
+fn two_min() -> Duration {
+    Duration::from_secs(120)
+}
+fn ten_min() -> Duration {
+    Duration::from_secs(600)
+}
+fn thirty_min() -> Duration {
+    Duration::from_secs(1800)
+}
+fn default_code_dir() -> String {
+    "~/coding".into()
+}
+fn claude() -> AgentKind {
+    AgentKind::Claude
+}
+fn draft() -> Level {
+    Level::Draft
+}
+fn concise() -> String {
+    "concise".into()
+}
+fn en() -> String {
+    "en".into()
+}
+fn np_label() -> String {
+    "nightporter".into()
+}
+fn all_triggers() -> Vec<Trigger> {
+    use Trigger::*;
+    vec![ReviewComment, Review, Comment, CiFailure, MergeConflict]
+}
+fn default_roles() -> Vec<crate::forge::Role> {
+    use crate::forge::Role::*;
+    vec![Owner, Maintainer, Member, Collaborator]
+}
+fn default_escalations() -> Vec<Escalation> {
+    vec![Escalation::Deps, Escalation::Size]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_config_has_sane_defaults() {
+        let c = Config::parse("").unwrap();
+        let s = c.resolve(None).unwrap();
+        assert!(!s.subscribed);
+        assert_eq!(s.level, Level::Draft);
+        assert_eq!(s.debounce, Duration::from_secs(120));
+        assert_eq!(s.trust.roles.len(), 4);
+        assert!(s.reply.footer);
+        assert!(!s.reply.resolve_threads);
+        assert_eq!(c.poll_interval, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn template_parses() {
+        Config::parse(TEMPLATE).unwrap();
+    }
+
+    #[test]
+    fn repo_overrides_merge_deeply() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            level = "auto"
+            [defaults.trust]
+            allow_users = ["alice"]
+            [defaults.reply]
+            style = "detailed-tech-lead"
+            "#,
+        )
+        .unwrap();
+        let over: toml::Table = toml::from_str(
+            r#"
+            subscribed = true
+            max_ci_attempts = 5
+            [reply]
+            footer = false
+            "#,
+        )
+        .unwrap();
+        let s = c.resolve(Some(&over)).unwrap();
+        assert!(s.subscribed);
+        assert_eq!(s.level, Level::Auto);
+        assert_eq!(s.max_ci_attempts, 5);
+        assert_eq!(s.reply.style, "detailed-tech-lead");
+        assert!(!s.reply.footer);
+        assert_eq!(s.trust.allow_users, vec!["alice"]);
+    }
+
+    #[test]
+    fn subscribed_cannot_be_set_globally() {
+        let c = Config::parse("[defaults]\nsubscribed = true").unwrap();
+        assert!(!c.resolve(None).unwrap().subscribed);
+    }
+
+    #[test]
+    fn caps_cannot_be_overridden() {
+        let c = Config::parse("[defaults]\nlevel = \"auto\"\n[defaults.maintainer]\nlevel = \"auto\"").unwrap();
+        let s = c.resolve(None).unwrap();
+        assert_eq!(s.maintainer.level, Level::Draft);
+        let open: toml::Table = toml::from_str("[trust]\nopen = true").unwrap();
+        let s = c.resolve(Some(&open)).unwrap();
+        assert_eq!(s.level, Level::Suggest);
+        assert_eq!(s.maintainer.level, Level::Suggest);
+    }
+
+    #[test]
+    fn typos_are_errors() {
+        assert!(Config::parse("[defaults]\nlevle = \"auto\"").is_err());
+        assert!(Config::parse("pol_interval = \"2m\"").is_err());
+        assert!(Config::parse("version = 99").is_err());
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+        assert!(parse_duration("5").is_err());
+        assert!(parse_duration("5x").is_err());
+        assert!(parse_duration("").is_err());
+        assert_eq!(format_duration(Duration::from_secs(120)), "2m");
+    }
+
+    #[test]
+    fn edit_file_preserves_comments_and_detects_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.toml");
+        std::fs::write(&p, "# keep me\nlevel = \"draft\"\n").unwrap();
+        let t0 = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let t1 = edit_file(&p, Some(t0), |d| d["subscribed"] = toml_edit::value(true)).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("# keep me") && text.contains("subscribed = true"));
+        // Simulate another writer.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, "level = \"auto\"\n").unwrap();
+        assert!(edit_file(&p, Some(t1), |d| d["level"] = toml_edit::value("observe")).is_err());
+        // Invalid edits are rejected before writing.
+        assert!(edit_file(&p, None, |d| d["level"] = toml_edit::value("yolo")).is_err());
+        assert!(std::fs::read_to_string(&p).unwrap().contains("auto"));
+    }
+}

@@ -1,0 +1,274 @@
+//! Running the coding agent: no forge credentials, restricted tools, bounded time.
+
+use crate::checks::BUILTIN_PROTECTED;
+use crate::config::{AgentKind, RepoSettings};
+use crate::forge::Reply;
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::json;
+use std::path::Path;
+use tokio::process::Command;
+
+/// What we got back from a run.
+#[derive(Debug, Default)]
+pub struct Outcome {
+    pub summary: String,
+    /// Gate steps answer `pass`, `block` or `needs_approval`.
+    pub verdict: Option<String>,
+    pub replies: Vec<Reply>,
+    pub cost_usd: Option<f64>,
+}
+
+/// Read-only git commands the agent may always run, plus `git add` / `git commit`.
+const GIT_ALLOWED: &[&str] = &[
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git add",
+    "git commit",
+    "git rev-parse",
+    "git ls-files",
+    "git grep",
+    "git blame",
+    "git merge",
+    "git checkout --",
+    "git restore",
+    "git stash",
+];
+/// Git commands that change the worktree; dropped for read-only steps.
+const WRITE_GIT: &[&str] = &["git add", "git commit", "git merge", "git checkout --", "git restore", "git stash"];
+const DENIED: &[&str] = &[
+    "git push",
+    "git remote",
+    "git config",
+    "git reset",
+    "git rebase",
+    "git commit --amend",
+    "git filter-branch",
+    "gh",
+    "glab",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "nc",
+    "rm -rf /",
+    "sudo",
+];
+
+/// Environment for the agent: everything from ours minus credentials, plus hardening.
+pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
+    let keep_keys = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    ];
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| {
+            let u = k.to_ascii_uppercase();
+            if keep_keys.contains(&u.as_str()) || u.starts_with("ANTHROPIC_") || u.starts_with("CLAUDE_") || u.starts_with("OPENCODE_") {
+                return true;
+            }
+            let forge = ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
+                .iter()
+                .any(|p| u.starts_with(p));
+            let secretish = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY"].iter().any(|p| u.contains(p));
+            !(forge || secretish)
+        })
+        .collect();
+    let empty = job_dir.join("empty-config");
+    let _ = std::fs::create_dir_all(&empty);
+    let e = empty.to_string_lossy().to_string();
+    env.extend(
+        [
+            ("GH_CONFIG_DIR", e.as_str()),
+            ("GLAB_CONFIG_DIR", e.as_str()),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", "/usr/bin/false"),
+            ("SSH_ASKPASS", "/usr/bin/false"),
+            ("GIT_SSH_COMMAND", "/usr/bin/false"),
+            // Clear credential helpers so `git push` over https has nothing to use.
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "credential.helper"),
+            ("GIT_CONFIG_VALUE_0", ""),
+            ("NIGHTPORTER_JOB", "1"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string())),
+    );
+    env
+}
+
+/// Claude Code settings: allow-list tools, deny pushes/network/forge CLIs and protected paths.
+pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
+    let mut allow: Vec<String> = ["Read", "Glob", "Grep", "LS", "TodoWrite"].map(String::from).to_vec();
+    let git = GIT_ALLOWED.iter().copied().filter(|c| !read_only || !WRITE_GIT.contains(c));
+    allow.extend(git.chain(s.allow_commands.iter().map(String::as_str)).map(|c| format!("Bash({c}:*)")));
+    let mut deny: Vec<String> = DENIED.iter().map(|c| format!("Bash({c}:*)")).collect();
+    if read_only {
+        deny.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"].map(String::from));
+    } else {
+        allow.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"].map(String::from));
+    }
+    deny.extend(["WebFetch", "WebSearch"].map(String::from));
+    for g in BUILTIN_PROTECTED.iter().copied().chain(s.checks.protected.iter().map(String::as_str)) {
+        deny.push(format!("Edit({g})"));
+        deny.push(format!("Write({g})"));
+    }
+    json!({ "permissions": { "allow": allow, "deny": deny }, "enableAllProjectMcpServers": false })
+}
+
+/// OpenCode config (passed via `OPENCODE_CONFIG`).
+pub fn opencode_config(s: &RepoSettings, read_only: bool) -> serde_json::Value {
+    let mut bash = serde_json::Map::new();
+    bash.insert("*".into(), json!("deny"));
+    let git = GIT_ALLOWED.iter().copied().filter(|c| !read_only || !WRITE_GIT.contains(c));
+    for c in git.chain(s.allow_commands.iter().map(String::as_str)) {
+        bash.insert(format!("{c}*"), json!("allow"));
+    }
+    for c in DENIED {
+        bash.insert(format!("{c}*"), json!("deny"));
+    }
+    json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": { "edit": if read_only { "deny" } else { "allow" }, "webfetch": "deny", "bash": bash },
+        "mcp": {},
+        "share": "disabled",
+        "autoupdate": false
+    })
+}
+
+pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, prompt: &str, read_only: bool) -> Result<Outcome> {
+    std::fs::create_dir_all(job_dir)?;
+    std::fs::write(job_dir.join("prompt.md"), prompt)?;
+    let bin = std::env::var("NIGHTPORTER_AGENT_BIN").unwrap_or_else(|_| kind.bin().into());
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(wt).env_clear().envs(agent_env(job_dir)).kill_on_drop(true).stdin(std::process::Stdio::null());
+    match kind {
+        AgentKind::Claude => {
+            let settings = job_dir.join("claude-settings.json");
+            std::fs::write(&settings, serde_json::to_vec_pretty(&claude_settings(s, read_only))?)?;
+            cmd.args(["-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk", "--strict-mcp-config", "--settings"])
+                .arg(&settings);
+            if let Some(b) = s.max_budget_usd {
+                cmd.args(["--max-budget-usd", &b.to_string()]);
+            }
+        }
+        AgentKind::OpenCode => {
+            let cfg = job_dir.join("opencode.json");
+            std::fs::write(&cfg, serde_json::to_vec_pretty(&opencode_config(s, read_only))?)?;
+            cmd.env("OPENCODE_CONFIG", &cfg).args(["run", "--pure", prompt]);
+        }
+    }
+    cmd.args(&s.agent_args);
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start `{bin}` (is it installed?)"))?;
+    let out = match tokio::time::timeout(s.timeout, child.wait_with_output()).await {
+        Ok(r) => r?,
+        Err(_) => bail!("agent timed out after {}", crate::config::format_duration(s.timeout)),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    std::fs::write(job_dir.join("agent.out"), format!("{stdout}\n--- stderr ---\n{stderr}"))?;
+    if !out.status.success() {
+        bail!("agent exited with {}: {}", out.status, tail(&stderr, 400).trim());
+    }
+    parse_output(kind, &stdout)
+}
+
+pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {
+    let (text, cost) = match kind {
+        AgentKind::Claude => {
+            #[derive(Deserialize)]
+            struct R {
+                #[serde(default)]
+                result: String,
+                #[serde(default)]
+                is_error: bool,
+                #[serde(default)]
+                total_cost_usd: Option<f64>,
+            }
+            let r: R = serde_json::from_str(stdout.trim()).context("claude output was not JSON")?;
+            if r.is_error {
+                bail!("agent reported an error: {}", tail(&r.result, 400));
+            }
+            (r.result, r.total_cost_usd)
+        }
+        AgentKind::OpenCode => (stdout.to_string(), None),
+    };
+    #[derive(Deserialize)]
+    struct Block {
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        replies: Vec<Reply>,
+        #[serde(default)]
+        verdict: Option<String>,
+    }
+    let block = last_block(&text).context("agent did not end with a ```nightporter block")?;
+    let b: Block = serde_json::from_str(block).context("bad JSON in the nightporter block")?;
+    Ok(Outcome { summary: b.summary, verdict: b.verdict, replies: b.replies, cost_usd: cost })
+}
+
+fn last_block(text: &str) -> Option<&str> {
+    let start = text.rfind("```nightporter")?;
+    let body = &text[start + "```nightporter".len()..];
+    let end = body.find("```")?;
+    Some(body[..end].trim())
+}
+
+fn tail(s: &str, n: usize) -> &str {
+    let i = s.len().saturating_sub(n);
+    let i = (i..s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(s.len());
+    &s[i..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_is_scrubbed() {
+        // SAFETY: tests in this module don't read these vars concurrently.
+        unsafe {
+            std::env::set_var("GH_TOKEN", "x");
+            std::env::set_var("MY_SERVICE_TOKEN", "x");
+            std::env::set_var("ANTHROPIC_API_KEY", "keep");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let env = agent_env(d.path());
+        let has = |k: &str| env.iter().any(|(n, _)| n == k);
+        assert!(!has("GH_TOKEN") && !has("MY_SERVICE_TOKEN") && !has("SSH_AUTH_SOCK"));
+        assert!(has("ANTHROPIC_API_KEY") && has("GH_CONFIG_DIR") && has("PATH"));
+        assert!(env.iter().any(|(k, v)| k == "GIT_SSH_COMMAND" && v == "/usr/bin/false"));
+    }
+
+    #[test]
+    fn claude_settings_deny_push_and_protect() {
+        let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
+        let v = claude_settings(&s, false).to_string();
+        assert!(v.contains("Bash(git push:*)") && v.contains("Edit(.github/workflows/**)") && v.contains("WebFetch"));
+        assert!(v.contains("Bash(git commit:*)"));
+        let ro = claude_settings(&s, true);
+        let allow = ro["permissions"]["allow"].to_string();
+        assert!(!allow.contains("git commit") && !allow.contains("\"Edit\""));
+    }
+
+    #[test]
+    fn parses_last_block() {
+        let out = r#"{"result":"did it\n```nightporter\n{\"summary\":\"old\"}\n```\nmore\n```nightporter\n{\"summary\":\"ok\",\"replies\":[{\"event\":\"gh-rc-1\",\"body\":\"Fixed in abc\"}]}\n```","total_cost_usd":0.12}"#;
+        let o = parse_output(AgentKind::Claude, out).unwrap();
+        assert_eq!(o.summary, "ok");
+        assert_eq!(o.replies[0].event.as_deref(), Some("gh-rc-1"));
+        assert_eq!(o.cost_usd, Some(0.12));
+        assert!(parse_output(AgentKind::OpenCode, "no block").is_err());
+        assert!(parse_output(AgentKind::Claude, r#"{"result":"x","is_error":true}"#).is_err());
+    }
+}
