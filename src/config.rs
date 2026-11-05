@@ -170,6 +170,14 @@ pub struct RepoSettings {
     pub timeout: Duration,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
+    /// Claude Code's OS sandbox for the agent's shell commands (Seatbelt on macOS, bubblewrap on
+    /// Linux). Fails closed: if it can't start, the job fails instead of running unsandboxed.
+    /// Turn off for repos whose test commands need Docker/DDEV sockets.
+    #[serde(default = "yes")]
+    pub sandbox: bool,
+    /// Domains sandboxed commands may reach (none by default).
+    #[serde(default)]
+    pub sandbox_domains: Vec<String>,
     /// Extra instructions file (your own, outside the repo).
     #[serde(default)]
     pub prompt: Option<String>,

@@ -135,7 +135,17 @@ pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
         deny.push(format!("Edit({g})"));
         deny.push(format!("Write({g})"));
     }
-    json!({ "permissions": { "allow": allow, "deny": deny }, "enableAllProjectMcpServers": false })
+    let mut v = json!({ "permissions": { "allow": allow, "deny": deny }, "enableAllProjectMcpServers": false });
+    if s.sandbox {
+        // Fail closed: no sandbox → Claude Code exits and the job fails visibly. Read denies
+        // above are merged into the sandbox, so they also bind the agent's shell commands.
+        let mut sb = json!({ "enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false });
+        if !s.sandbox_domains.is_empty() {
+            sb["network"] = json!({ "allowedDomains": s.sandbox_domains });
+        }
+        v["sandbox"] = sb;
+    }
+    v
 }
 
 /// OpenCode config (passed via `OPENCODE_CONFIG`).
@@ -291,6 +301,13 @@ mod tests {
         assert!(v.contains("Bash(git push:*)") && v.contains("Edit(.github/workflows/**)") && v.contains("WebFetch"));
         assert!(v.contains("Bash(git commit:*)") && v.contains("Read(~/.ssh/**)"));
         assert!(!v.contains("Bash(git log:*)"), "git log accepts --output");
+        let sb = &claude_settings(&s, false)["sandbox"];
+        assert_eq!(
+            (sb["enabled"].as_bool(), sb["failIfUnavailable"].as_bool(), sb["allowUnsandboxedCommands"].as_bool()),
+            (Some(true), Some(true), Some(false))
+        );
+        let off = crate::config::Config::parse("[defaults]\nsandbox = false").unwrap().resolve(None).unwrap();
+        assert!(claude_settings(&off, false).get("sandbox").is_none());
         let ro = claude_settings(&s, true);
         let allow = ro["permissions"]["allow"].to_string();
         assert!(!allow.contains("git commit") && !allow.contains("\"Edit\""));

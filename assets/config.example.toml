@@ -38,6 +38,8 @@ debounce = "2m"
 max_ci_attempts = 3
 timeout = "30m"
 # max_budget_usd = 2.0      # Claude Code only
+sandbox = true              # Claude Code OS sandbox for agent commands; fails closed
+# sandbox_domains = []      # domains sandboxed commands may reach
 # allow_commands = ["npm test", "cargo test"]
 
 [defaults.trust]

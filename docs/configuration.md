@@ -46,6 +46,8 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `max_ci_attempts` | `3` | automatic CI-fix attempts before giving up (reset when CI goes green) |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
+| `sandbox` | `true` | Claude Code's OS sandbox for the agent's shell commands (Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux). Fails closed. Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
+| `sandbox_domains` | `[]` | domains sandboxed commands may reach |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
 | `[trust]` | | `roles`, `allow_users`, `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`, `open` |
