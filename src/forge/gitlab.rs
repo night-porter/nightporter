@@ -1,7 +1,7 @@
 //! GitLab (gitlab.com and self-hosted). No notifications feed, so we poll the user's open MRs
 //! (`updated_after`) and, for maintainer mode, recently updated issues/MRs in subscribed projects.
 
-use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, parse_command};
+use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
 use crate::forge::ForgeKind;
 use crate::http::{Api, enc};
 use anyhow::{Context, Result};
@@ -140,9 +140,9 @@ impl GitLab {
 
     pub async fn poll(&mut self, cur: &mut Cursor) -> Result<Vec<Event>> {
         let since = cur.since.clone();
-        let started = jiff::Timestamp::now().to_string();
+        let started = now_iso();
         let upd = since.as_ref().map(|s| format!("&updated_after={s}")).unwrap_or_default();
-        let after = |ts: &str| since.as_deref().is_none_or(|s| ts > s);
+        let after = |ts: &str| newer(ts, since.as_deref());
         let mut out = Vec::new();
 
         // 1. My open MRs: new discussion notes.
@@ -332,7 +332,7 @@ impl GitLab {
             thread: None,
             path: None,
             line: None,
-            created_at: jiff::Timestamp::now().to_string(),
+            created_at: now_iso(),
             verb: None,
         };
         if mr.has_conflicts {

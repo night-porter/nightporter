@@ -1,6 +1,6 @@
 //! GitHub: notifications polling, PR details, replies, thread resolution, the open-PR sweep.
 
-use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, parse_command};
+use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
 use crate::forge::ForgeKind;
 use crate::http::{Api, Got};
 use anyhow::{Context, Result};
@@ -163,7 +163,7 @@ impl GitHub {
         if let Some(s) = &since {
             path.push_str(&format!("&since={s}"));
         }
-        let started = jiff::Timestamp::now().to_string();
+        let started = now_iso();
         let mut out = Vec::new();
         match self.api.get_cond::<Vec<Thread>>(&path, cur.last_modified.as_deref()).await? {
             Got::NotModified => {}
@@ -199,7 +199,7 @@ impl GitHub {
         let repo = self.repo(&t.repository.full_name);
         let r = &t.repository.full_name;
         let since_q = since.map(|s| format!("&since={s}")).unwrap_or_default();
-        let after = |ts: &str| since.is_none_or(|s| ts > s);
+        let after = |ts: &str| newer(ts, since);
         let (target, mine) = match t.subject.kind.as_str() {
             "PullRequest" => {
                 let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{number}")).await?;
@@ -408,7 +408,7 @@ impl GitHub {
             thread: None,
             path: None,
             line: None,
-            created_at: jiff::Timestamp::now().to_string(),
+            created_at: now_iso(),
             verb: None,
         }
     }

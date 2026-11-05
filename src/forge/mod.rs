@@ -172,6 +172,21 @@ impl Event {
     }
 }
 
+/// Current time as `YYYY-MM-DDTHH:MM:SSZ` (what both forge APIs accept in queries).
+pub fn now_iso() -> String {
+    jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// `ts` is strictly after `since`. Parses timestamps (forges mix `Z`, offsets and fractions);
+/// falls back to string comparison if either doesn't parse.
+pub fn newer(ts: &str, since: Option<&str>) -> bool {
+    let Some(since) = since else { return true };
+    match (ts.parse::<jiff::Timestamp>(), since.parse::<jiff::Timestamp>()) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => ts > since,
+    }
+}
+
 /// Parse a `/nightporter <verb>` command from the first line that starts with it.
 pub fn parse_command(body: &str) -> Option<Verb> {
     body.lines().find_map(|l| {
@@ -236,6 +251,12 @@ impl Forge {
     }
     /// New events since the last poll. `cursor` is opaque, persisted by the caller.
     pub async fn poll(&mut self, cursor: &mut Cursor) -> Result<Vec<Event>> {
+        if cursor.since.is_none() {
+            // First run: start from now. Never replay history (old comments, CI already red).
+            cursor.since = Some(now_iso());
+            cursor.last_sweep = Some(crate::state::now());
+            return Ok(vec![]);
+        }
         match self {
             Forge::GitHub(g) => g.poll(cursor).await,
             Forge::GitLab(g) => g.poll(cursor).await,
@@ -301,6 +322,15 @@ mod tests {
         let r = RepoId::new(ForgeKind::GitLab, "Git.DrupalCode.org", "project/token.git");
         assert_eq!(r.key(), "gitlab:git.drupalcode.org/project/token");
         assert_eq!(RepoId::parse_key(&r.key()), Some(r));
+    }
+
+    #[test]
+    fn timestamps() {
+        assert!(newer("2026-11-05T10:00:01Z", Some("2026-11-05T10:00:00Z")));
+        assert!(!newer("2026-11-05T10:00:00Z", Some("2026-11-05T10:00:00Z")));
+        assert!(newer("2026-11-05T11:30:00.000+01:00", Some("2026-11-05T10:00:00Z")));
+        assert!(!newer("2026-11-05T10:30:00.000+01:00", Some("2026-11-05T10:00:00Z")));
+        assert!(newer("x", None));
     }
 
     #[test]

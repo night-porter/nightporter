@@ -173,6 +173,8 @@ async fn world_with(repo_toml: &str, extra: Vec<(&'static str, &'static str, Str
         std::env::set_var("NIGHTPORTER_AGENT_BIN", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/stub-agent.sh"));
         std::env::set_var("NIGHTPORTER_NO_NOTIFY", "1");
     }
+    let seeded = crate::forge::Cursor { since: Some("2026-01-01T00:00:00Z".into()), ..Default::default() };
+    ctx.db(|db| db.set_json("cursor:github:github.com", &seeded)).unwrap();
     World { _d: d, bare, ctx: Arc::new(ctx), log, repo }
 }
 
@@ -317,7 +319,12 @@ async fn gitlab_poll_reply_and_resolve() {
     gl.subscribed.insert("grp/proj".into());
     let mut f = Forge::GitLab(gl);
     f.login().await.unwrap();
+    // First poll only records a baseline.
     let mut cur = crate::forge::Cursor::default();
+    assert!(f.poll(&mut cur).await.unwrap().is_empty());
+    assert!(log.lock().unwrap().iter().all(|(_, p, _)| p == "/user"));
+    cur.since = Some("2026-01-01T00:00:00Z".into());
+    cur.last_sweep = None;
     let evs = f.poll(&mut cur).await.unwrap();
     let rc: Vec<_> = evs.iter().filter(|e| e.trigger == Trigger::ReviewComment).collect();
     assert_eq!(rc.len(), 1);
