@@ -334,19 +334,19 @@ impl Db {
     }
 
     pub fn jobs_with(&self, s: JobStatus) -> Result<Vec<Job>> {
-        let mut st = self.0.prepare(&format!("{JOB_SELECT} WHERE status=?1 ORDER BY id"))?;
+        let mut st = self.0.prepare(&format!("{JOB_LIST} WHERE status=?1 ORDER BY id"))?;
         let rows = st.query_map([s.as_str()], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn recent_jobs(&self, limit: usize) -> Result<Vec<Job>> {
-        let mut st = self.0.prepare(&format!("{JOB_SELECT} ORDER BY id DESC LIMIT ?1"))?;
+        let mut st = self.0.prepare(&format!("{JOB_LIST} ORDER BY id DESC LIMIT ?1"))?;
         let rows = st.query_map([limit as i64], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn active_jobs(&self) -> Result<Vec<Job>> {
-        let mut st = self.0.prepare(&format!("{JOB_SELECT} WHERE status IN ('queued','running','approved') ORDER BY id"))?;
+        let mut st = self.0.prepare(&format!("{JOB_LIST} WHERE status IN ('queued','running','approved') ORDER BY id"))?;
         let rows = st.query_map([], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -404,6 +404,10 @@ impl Db {
 
 const JOB_SELECT: &str = "SELECT id, repo, target, number, mode, level, status, attempt, created_at, updated_at,
   branch, head_before, head_after, summary, diff, replies, checks, error, worktree, meta FROM jobs";
+/// Same columns without the diff (can be megabytes). For lists only: never pass a job loaded
+/// this way to `update_job`, it would clear the stored diff.
+const JOB_LIST: &str = "SELECT id, repo, target, number, mode, level, status, attempt, created_at, updated_at,
+  branch, head_before, head_after, summary, '' AS diff, replies, checks, error, worktree, meta FROM jobs";
 
 fn row_job(r: &rusqlite::Row) -> rusqlite::Result<Job> {
     let repo: String = r.get(1)?;

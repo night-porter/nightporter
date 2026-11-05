@@ -356,6 +356,14 @@ fn shell_quote(s: &str) -> String {
 pub async fn housekeeping(ctx: &Ctx) -> Result<()> {
     let cfg = ctx.cfg();
     ctx.db(|d| d.prune(cfg.retention_days))?;
+    // Job dirs (prompts, agent output) go with their pruned jobs.
+    for e in std::fs::read_dir(ctx.paths.jobs_dir())?.flatten() {
+        if let Some(id) = e.file_name().to_str().and_then(|n| n.parse::<i64>().ok())
+            && ctx.db(|d| d.job(id))?.is_none()
+        {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
     gc(ctx, false).await
 }
 
