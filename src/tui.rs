@@ -23,6 +23,9 @@ enum Tab {
 const TABS: [(Tab, &str); 5] =
     [(Tab::Queue, "1 Queue"), (Tab::Inbox, "2 Inbox"), (Tab::History, "3 History"), (Tab::Repos, "4 Repos"), (Tab::Help, "? Help")];
 
+/// A pending yes/no question and what to do on "y".
+type Confirm = Box<dyn FnOnce(&mut App) -> Result<String>>;
+
 struct RepoRow {
     id: crate::forge::RepoId,
     subscribed: bool,
@@ -42,7 +45,7 @@ struct App {
     detail: Option<i64>,
     scroll: u16,
     msg: String,
-    confirm: Option<(String, Box<dyn FnOnce(&mut App) -> Result<String>>)>,
+    confirm: Option<(String, Confirm)>,
     color: bool,
     daemon_up: bool,
     paused: bool,

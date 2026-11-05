@@ -40,3 +40,7 @@ tempfile = "3.27.0"
 lto = "thin"
 strip = true
 codegen-units = 1
+
+# Release builds made by cargo-dist (see dist-workspace.toml).
+[profile.dist]
+inherits = "release"

@@ -436,8 +436,8 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 pub fn format_duration(d: Duration) -> String {
     let s = d.as_secs();
     match s {
-        _ if s % 3600 == 0 && s > 0 => format!("{}h", s / 3600),
-        _ if s % 60 == 0 && s > 0 => format!("{}m", s / 60),
+        _ if s.is_multiple_of(3600) && s > 0 => format!("{}h", s / 3600),
+        _ if s.is_multiple_of(60) && s > 0 => format!("{}m", s / 60),
         _ => format!("{s}s"),
     }
 }

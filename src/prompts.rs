@@ -93,7 +93,7 @@ pub fn build(i: &Input) -> Result<String> {
     p.push_str("\n## Task\n");
     p.push_str(step(step_name).unwrap_or_default());
     for extra in i.pack_prompts {
-        p.push_str("\n");
+        p.push('\n');
         p.push_str(extra);
     }
 

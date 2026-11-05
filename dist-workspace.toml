@@ -1,0 +1,21 @@
+# Release config for cargo-dist (https://opensource.axo.dev/cargo-dist/).
+# Generate/refresh the release workflow with: `dist generate` (writes .github/workflows/release.yml)
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.34.0"
+ci = "github"
+installers = ["shell", "powershell", "homebrew"]
+tap = "dan2k3k4/homebrew-tap"
+publish-jobs = ["homebrew"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]
+install-path = "CARGO_HOME"
+install-updater = false
+pr-run-mode = "plan"

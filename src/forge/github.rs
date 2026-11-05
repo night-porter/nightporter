@@ -291,6 +291,7 @@ impl GitHub {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn event(&self, repo: &RepoId, target: Target, number: u64, trigger: Trigger, id: String, c: Comment, verb: Option<Verb>) -> Event {
         Event {
             id,
