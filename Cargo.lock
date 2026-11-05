@@ -1911,6 +1911,7 @@ dependencies = [
  "globset",
  "jiff",
  "keyring",
+ "libc",
  "notify",
  "notify-rust",
  "ratatui",

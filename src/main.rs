@@ -53,12 +53,9 @@ enum Cmd {
     /// List known repos and whether they are subscribed.
     Repos,
     /// Subscribe to a repo (`owner/name`, or `host/owner/name` for non-default hosts).
-    Subscribe {
-        repo: String,
-    },
-    Unsubscribe {
-        repo: String,
-    },
+    Subscribe { repo: String },
+    /// Stop watching a repo.
+    Unsubscribe { repo: String },
     /// Approve a job (push + post, or allow untrusted code to run).
     Approve {
         id: i64,
@@ -66,22 +63,20 @@ enum Cmd {
         #[arg(long)]
         override_blocking: bool,
     },
-    Reject {
-        id: i64,
-    },
-    Retry {
-        id: i64,
-    },
+    /// Reject a job: nothing is pushed or posted.
+    Reject { id: i64 },
+    /// Re-run a finished or failed job's requests as a new job.
+    Retry { id: i64 },
     /// Show a job: checks, replies, diff, log.
-    Show {
-        id: i64,
-    },
+    Show { id: i64 },
     /// Inbox decision for an untrusted author's event.
     Inbox {
         #[command(subcommand)]
         cmd: InboxCmd,
     },
+    /// Stop starting new jobs (running jobs finish).
     Pause,
+    /// Start new jobs again.
     Resume,
     /// Remove idle worktrees (`--all`: every worktree not in use).
     Gc {
@@ -174,6 +169,12 @@ enum PackCmd {
 }
 
 fn main() -> Result<()> {
+    // Behave like other CLIs when piped into `head`: exit quietly instead of panicking.
+    #[cfg(unix)]
+    // SAFETY: called before any threads exist; restores the default disposition.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let paths = Paths::detect()?;
     let cmd = cli.cmd.unwrap_or(Cmd::Tui);
@@ -283,7 +284,7 @@ fn resolve_repo(paths: &Paths, s: &str) -> Result<RepoId> {
 
 fn status(paths: &Paths) -> Result<()> {
     let db = db(paths)?;
-    println!("Night Porter {}", if actions::paused(&db) { "(PAUSED)" } else { "" });
+    println!("Night Porter{}", if actions::paused(&db) { " (PAUSED)" } else { "" });
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
