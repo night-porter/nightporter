@@ -19,23 +19,10 @@ pub struct Outcome {
     pub cost_usd: Option<f64>,
 }
 
-/// Read-only git commands the agent may always run, plus `git add` / `git commit`.
-const GIT_ALLOWED: &[&str] = &[
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git add",
-    "git commit",
-    "git rev-parse",
-    "git ls-files",
-    "git grep",
-    "git blame",
-    "git merge",
-    "git checkout --",
-    "git restore",
-    "git stash",
-];
+/// Git commands the agent may run. `git log/diff/show/blame/grep` are deliberately absent: they
+/// accept `--output=<file>`, which would let the agent write anywhere. It can read files instead.
+const GIT_ALLOWED: &[&str] =
+    &["git status", "git add", "git commit", "git rev-parse", "git ls-files", "git merge", "git checkout --", "git restore", "git stash"];
 /// Git commands that change the worktree; dropped for read-only steps.
 const WRITE_GIT: &[&str] = &["git add", "git commit", "git merge", "git checkout --", "git restore", "git stash"];
 const DENIED: &[&str] = &[
@@ -55,6 +42,23 @@ const DENIED: &[&str] = &[
     "nc",
     "rm -rf /",
     "sudo",
+];
+
+/// Home-relative credential locations the agent must not read.
+const SECRET_PATHS: &[&str] = &[
+    "~/.ssh/**",
+    "~/.gnupg/**",
+    "~/.aws/**",
+    "~/.config/gh/**",
+    "~/.config/glab-cli/**",
+    "~/.git-credentials",
+    "~/.netrc",
+    "~/.docker/config.json",
+    "~/.kube/**",
+    "~/.npmrc",
+    "~/.config/nightporter/**",
+    "~/.local/share/nightporter/**",
+    "~/Library/Keychains/**",
 ];
 
 /// Environment for the agent: everything from ours minus credentials, plus hardening.
@@ -77,7 +81,10 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
             let forge = ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
                 .iter()
                 .any(|p| u.starts_with(p));
-            let secretish = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY"].iter().any(|p| u.contains(p));
+            let secretish =
+                ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY", "AUTH", "COOKIE", "SESSION", "DSN", "DATABASE_URL"]
+                    .iter()
+                    .any(|p| u.contains(p));
             !(forge || secretish)
         })
         .collect();
@@ -92,10 +99,15 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
             ("GIT_ASKPASS", "/usr/bin/false"),
             ("SSH_ASKPASS", "/usr/bin/false"),
             ("GIT_SSH_COMMAND", "/usr/bin/false"),
-            // Clear credential helpers so `git push` over https has nothing to use.
-            ("GIT_CONFIG_COUNT", "1"),
+            // Clear credential helpers so `git push` over https has nothing to use, and don't run
+            // repo-controlled hooks (husky etc.) when the agent commits.
+            ("GIT_CONFIG_COUNT", "3"),
             ("GIT_CONFIG_KEY_0", "credential.helper"),
             ("GIT_CONFIG_VALUE_0", ""),
+            ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_1", "/dev/null"),
+            ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_2", "false"),
             ("NIGHTPORTER_JOB", "1"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string())),
@@ -115,6 +127,10 @@ pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
         allow.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"].map(String::from));
     }
     deny.extend(["WebFetch", "WebSearch"].map(String::from));
+    // Credentials on disk. (No OS sandbox yet: see docs/threat-model.md.)
+    for p in SECRET_PATHS {
+        deny.push(format!("Read({p})"));
+    }
     for g in BUILTIN_PROTECTED.iter().copied().chain(s.checks.protected.iter().map(String::as_str)) {
         deny.push(format!("Edit({g})"));
         deny.push(format!("Write({g})"));
@@ -135,7 +151,12 @@ pub fn opencode_config(s: &RepoSettings, read_only: bool) -> serde_json::Value {
     }
     json!({
         "$schema": "https://opencode.ai/config.json",
-        "permission": { "edit": if read_only { "deny" } else { "allow" }, "webfetch": "deny", "bash": bash },
+        "permission": {
+            "edit": if read_only { "deny" } else { "allow" },
+            "webfetch": "deny",
+            "external_directory": "deny",
+            "bash": bash
+        },
         "mcp": {},
         "share": "disabled",
         "autoupdate": false
@@ -152,8 +173,21 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
         AgentKind::Claude => {
             let settings = job_dir.join("claude-settings.json");
             std::fs::write(&settings, serde_json::to_vec_pretty(&claude_settings(s, read_only))?)?;
-            cmd.args(["-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk", "--strict-mcp-config", "--settings"])
-                .arg(&settings);
+            // `--setting-sources user`: ignore the repo's own .claude/settings*.json (hooks,
+            // permission allows) which an untrusted branch could plant.
+            cmd.args([
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--permission-mode",
+                "dontAsk",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "user",
+                "--settings",
+            ])
+            .arg(&settings);
             if let Some(b) = s.max_budget_usd {
                 cmd.args(["--max-budget-usd", &b.to_string()]);
             }
@@ -255,7 +289,8 @@ mod tests {
         let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
         let v = claude_settings(&s, false).to_string();
         assert!(v.contains("Bash(git push:*)") && v.contains("Edit(.github/workflows/**)") && v.contains("WebFetch"));
-        assert!(v.contains("Bash(git commit:*)"));
+        assert!(v.contains("Bash(git commit:*)") && v.contains("Read(~/.ssh/**)"));
+        assert!(!v.contains("Bash(git log:*)"), "git log accepts --output");
         let ro = claude_settings(&s, true);
         let allow = ro["permissions"]["allow"].to_string();
         assert!(!allow.contains("git commit") && !allow.contains("\"Edit\""));

@@ -168,12 +168,30 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Clone `url` at `rev` into a staging dir, audit it, and return (dir, manifest, resolved sha).
+/// URLs and revs come from marketplace files: never let them become git options or exotic
+/// transports.
+pub fn validate_source(url: &str, rev: &str) -> Result<()> {
+    let url_ok = (url.starts_with("https://") || url.starts_with("ssh://") || url.starts_with("git@"))
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    if !url_ok {
+        bail!("pack/marketplace URL must be https://, ssh:// or git@ (got {url:?})");
+    }
+    let rev_ok = !rev.is_empty() && !rev.starts_with('-') && rev.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
+    if !rev_ok {
+        bail!("invalid rev {rev:?}");
+    }
+    Ok(())
+}
+
 pub async fn fetch(paths: &Paths, url: &str, rev: &str) -> Result<(PathBuf, Manifest, String)> {
+    validate_source(url, rev)?;
     let staging = paths.packs_dir().join(format!(".staging-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
     git(&staging, &["init", "--quiet"]).await?;
-    git(&staging, &["fetch", "--quiet", "--depth", "1", url, rev]).await.with_context(|| format!("fetch {url} {rev}"))?;
+    git(&staging, &["fetch", "--quiet", "--depth", "1", "--end-of-options", url, rev])
+        .await
+        .with_context(|| format!("fetch {url} {rev}"))?;
     git(&staging, &["-c", "core.symlinks=false", "checkout", "--quiet", "FETCH_HEAD"]).await?;
     let sha = git(&staging, &["rev-parse", "HEAD"]).await?;
     audit(&staging)?;
@@ -275,13 +293,14 @@ pub fn market_dir(paths: &Paths, url: &str) -> PathBuf {
 }
 
 pub async fn market_sync(paths: &Paths, url: &str) -> Result<Market> {
+    validate_source(url, "HEAD")?;
     let dir = market_dir(paths, url);
     if dir.join(".git").exists() {
         git(&dir, &["pull", "--quiet", "--ff-only"]).await?;
     } else {
         std::fs::create_dir_all(dir.parent().unwrap_or(&dir))?;
         let parent = dir.parent().unwrap_or(&dir).to_path_buf();
-        git(&parent, &["clone", "--quiet", "--depth", "1", url, &dir.to_string_lossy()]).await?;
+        git(&parent, &["clone", "--quiet", "--depth", "1", "--end-of-options", url, &dir.to_string_lossy()]).await?;
     }
     market(paths, url)
 }
@@ -333,6 +352,15 @@ file = "pirate.md"
         assert!(describe(&m).contains("post_fix") || describe(&m).contains("PostFix"));
         std::fs::write(d.path().join("hook.sh"), "rm -rf ~").unwrap();
         assert!(audit(d.path()).is_err());
+    }
+
+    #[test]
+    fn sources_are_validated() {
+        assert!(validate_source("--upload-pack=touch /tmp/x", ".").is_err());
+        assert!(validate_source("ext::sh -c id", "HEAD").is_err());
+        assert!(validate_source("https://github.com/a/b", "--output=x").is_err());
+        assert!(validate_source("https://github.com/a/b", "3f2c9a0").is_ok());
+        assert!(validate_source("git@github.com:a/b.git", "main").is_ok());
     }
 
     #[test]

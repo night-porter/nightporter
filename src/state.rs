@@ -139,6 +139,9 @@ pub struct JobMeta {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub run_approved: bool,
+    /// The head SHA the run approval is for; any other head needs a new approval.
+    #[serde(default)]
+    pub run_approved_head: String,
     #[serde(default)]
     pub untrusted_code: bool,
     #[serde(default)]
@@ -236,10 +239,12 @@ impl Db {
     }
 
     /// Re-classify every inbox event by `author` (after "allow always" / "deny").
-    pub fn set_author_disposition(&self, author: &str, d: Disposition, reason: &str) -> Result<usize> {
+    /// `repo`: only that repo's events (a per-repo decision must not release other repos').
+    pub fn set_author_disposition(&self, author: &str, repo: Option<&RepoId>, d: Disposition, reason: &str) -> Result<usize> {
         Ok(self.0.execute(
-            "UPDATE events SET disposition=?2, reason=?3 WHERE disposition='inbox' AND author=?1 COLLATE NOCASE",
-            params![author, enum_str(&d), reason],
+            "UPDATE events SET disposition=?2, reason=?3 WHERE disposition='inbox' AND author=?1 COLLATE NOCASE
+               AND (?4 IS NULL OR repo=?4)",
+            params![author, enum_str(&d), reason, repo.map(RepoId::key)],
         )?)
     }
 
@@ -477,8 +482,10 @@ mod tests {
         let id = db.create_job(&e.repo, Target::Pr, 1, "my_prs", "draft", &["a".into()]).unwrap();
         assert!(db.pr_busy(&e.repo, 1).unwrap());
         assert_eq!(db.events_with(Disposition::Pending).unwrap().len(), 0);
-        assert_eq!(db.job_events(id).unwrap(), vec![e]);
-        assert_eq!(db.set_author_disposition("ALICE", Disposition::Pending, "allow").unwrap(), 1);
+        assert_eq!(db.job_events(id).unwrap(), vec![e.clone()]);
+        let other = RepoId::new(ForgeKind::GitHub, "github.com", "x/y");
+        assert_eq!(db.set_author_disposition("ALICE", Some(&other), Disposition::Pending, "allow").unwrap(), 0);
+        assert_eq!(db.set_author_disposition("ALICE", Some(&e.repo), Disposition::Pending, "allow").unwrap(), 1);
     }
 
     #[test]

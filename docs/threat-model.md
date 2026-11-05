@@ -30,8 +30,15 @@ security boundary is, and which protections cannot be turned off.
   2. an allowed user, team or bot is accepted
   3. a comment author whose role is in `trust.roles` is accepted
   4. everyone else is untrusted
+- GitHub reports `MEMBER`/`COLLABORATOR` for read-only users too, so Night Porter checks the
+  author's real repo permission (write or higher counts as collaborator).
 - Items from untrusted authors go to the TUI inbox and are not processed until you choose
-  allow always, allow once, ignore or deny.
+  allow always, allow once, ignore or deny. "Allow always" on a repo only releases that repo's
+  waiting items.
+- Global `allow_users` match a username on every configured host. Put host-specific trust in
+  repo files if you use several forges.
+- Night Porter's own replies carry a hidden marker and are never read back as requests, and
+  `/nightporter` in agent-written replies is neutralised.
 - When the context for a job is built, comments from untrusted authors are **removed**, not
   quoted.
 - Maintainer mode: the *request* must come from a trusted user (a label or a
@@ -42,15 +49,24 @@ security boundary is, and which protections cannot be turned off.
 
 ### B2. The agent holds no forge credentials
 
-- The agent process starts with `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN` and similar variables
-  removed. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
+- The agent process starts with forge tokens and anything that looks like a secret (`*TOKEN*`,
+  `*SECRET*`, `*KEY*`, `*AUTH*`, `*PASSWORD*`, `DATABASE_URL`, ...) removed, except the agent's
+  own API key. `SSH_AUTH_SOCK` is removed, `GIT_SSH_COMMAND` fails, credential helpers are
+  cleared and git hooks are disabled for the agent's commits. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
   inside the agent are logged out.
-- The generated agent settings deny `git push`, `gh`, `glab` and network commands.
+- The generated agent settings deny `git push`, `gh`, `glab` and network commands, deny
+  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, ...), and only
+  allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
+- Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
+  permission allows) is ignored.
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.
-- Known gap: the agent runs as your user and could read SSH keys or other files from disk. Agent
-  sandbox settings reduce this, but there is no full sandbox (VM or container) until after 1.0.
-  Treat `auto` mode with that in mind.
+- Known gap: there is **no OS-level sandbox**. Read denies cover Claude Code's own tools, but
+  any command you add to `allow_commands` runs as you and can read what you can. OpenCode has no
+  read denies. Keep `allow_commands` small, and treat `auto` mode with that in mind.
+- The agent can't redirect the daemon's git: the worktree's `.git` pointer is recorded before the
+  agent runs and checked afterwards. Diffs, checks and pushes run in your clone on fixed SHAs,
+  and every daemon git call disables hooks, fsmonitor and the `ext::` transport.
 
 ### B3. Pre-push checks
 
@@ -58,19 +74,24 @@ Run on every push, in every mode, including `auto`:
 
 | check | can be disabled? |
 |---|---|
-| secrets in the diff (gitleaks if installed, otherwise built-in patterns) | **no** |
-| protected paths (`.github/workflows/**`, `.gitlab-ci.yml`, plus your globs) | **no** (you can only add to the list) |
+| secrets in any commit's patch or message, and in replies (built-in patterns, plus gitleaks if installed) | **no** |
+| protected paths touched by any commit, not only the net diff (CI configs, `.git`, `.gitattributes`, agent instruction files, plus your globs) | **no** (you can only add to the list) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
 | diff size over the limit | yes (`escalate_on`), with a warning |
 
-A failed check never pushes. It sends the job back to manual approval in the TUI.
+A failed check never pushes. It sends the job back to manual approval in the TUI; approving
+past a blocking failure needs an explicit override. What is pushed is exactly the reviewed
+commit SHA.
 
 ### B4. Running other people's code
 
-Environment setup (`[env].setup`) and tests on code written by untrusted authors (their MRs, or
-reproducing issues that include their code) **always** need approval for each job. The TUI shows
+Any job on a branch written by an untrusted author (maintainer `review`/`fix` on their MR) needs
+your approval **before the agent starts at all**: the branch can carry agent configuration
+(CLAUDE.md, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
+saw; if they push again, Night Porter asks again. `reproduce` jobs that may run commands need
+the same approval. The TUI shows
 which build files changed (`composer.json`, `package.json`, `Makefile`, CI files) before you
 approve. Environment commands only ever come from your own config, never from the repository.
 
@@ -97,8 +118,13 @@ pre-push check rejects any commit containing Night Porter files.
 - Vulnerabilities in the agent CLIs, git, `gh` or `glab` themselves.
 - A machine that is already compromised.
 
+Pack and marketplace sources must be `https://`, `ssh://` or `git@` URLs, and revs can't
+look like options.
+
 ## Open items before 1.0
 
 - [ ] Independent review of B1–B5 against the implementation
 - [ ] Fuzz the trust and context-building code with crafted comments
-- [ ] Look into OS-level sandboxing for the agent (macOS `sandbox-exec`, Linux namespaces / bubblewrap)
+- [ ] OS-level sandboxing for the agent (Claude Code sandbox settings, macOS `sandbox-exec`,
+      Linux bubblewrap)
+- [x] First independent review (2026-11-05): findings fixed, see git history

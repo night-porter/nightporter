@@ -19,7 +19,7 @@ pub struct GitLab {
     pub labels: HashMap<String, String>,
     pub subscribed: HashSet<String>,
     pub sweep_every: std::time::Duration,
-    roles: Mutex<HashMap<(String, u64), Role>>,
+    roles: Mutex<HashMap<(String, u64), (i64, Role)>>,
     groups: Mutex<HashMap<String, (i64, Vec<String>)>>,
 }
 
@@ -300,7 +300,10 @@ impl GitLab {
     /// Project membership (including inherited) → role. Cached for the daemon's lifetime.
     async fn role(&self, project: &str, u: &User) -> Role {
         let key = (project.to_string(), u.id);
-        if let Some(r) = self.roles.lock().unwrap().get(&key) {
+        let now = crate::state::now();
+        if let Some((at, r)) = self.roles.lock().unwrap().get(&key)
+            && now - at < 3600
+        {
             return *r;
         }
         #[derive(Deserialize)]
@@ -311,7 +314,7 @@ impl GitLab {
             Ok(m) => Role::from_gitlab(m.access_level),
             Err(_) => Role::None,
         };
-        self.roles.lock().unwrap().insert(key, r);
+        self.roles.lock().unwrap().insert(key, (now, r));
         r
     }
 
@@ -382,6 +385,17 @@ impl GitLab {
             draft: m.draft,
             body: m.description.unwrap_or_default(),
         })
+    }
+
+    pub async fn issue(&self, repo: &RepoId, iid: u64) -> Result<super::IssueInfo> {
+        #[derive(Deserialize)]
+        struct I {
+            title: String,
+            description: Option<String>,
+            author: User,
+        }
+        let i: I = self.api.get(&format!("/projects/{}/issues/{iid}", enc(&repo.path))).await?;
+        Ok(super::IssueInfo { title: i.title, body: i.description.unwrap_or_default(), author: i.author.username })
     }
 
     pub async fn reply(&self, repo: &RepoId, target: Target, n: u64, to: Option<&Event>, body: &str) -> Result<()> {

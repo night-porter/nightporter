@@ -65,6 +65,15 @@ pub fn paused(db: &Db) -> bool {
     db.get("paused").ok().flatten().as_deref() == Some("1")
 }
 
+impl Scope<'_> {
+    fn repo(&self) -> Option<&RepoId> {
+        match self {
+            Scope::Repo(r) => Some(r),
+            Scope::Global => None,
+        }
+    }
+}
+
 fn file_for(paths: &Paths, scope: &Scope) -> std::path::PathBuf {
     match scope {
         Scope::Repo(r) => paths.repo_file(r),
@@ -104,12 +113,12 @@ pub fn ignore(db: &Db, event_id: &str) -> Result<()> {
 /// Inbox: trust this author from now on (repo or global), and release their waiting events.
 pub fn allow_always(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
     edit_file(&file_for(paths, &scope), None, |d| push_unique(d, &scope, "allow_users", user))?;
-    db.set_author_disposition(user, Disposition::Pending, "allowed")
+    db.set_author_disposition(user, scope.repo(), Disposition::Pending, "allowed")
 }
 
 pub fn deny(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
     edit_file(&file_for(paths, &scope), None, |d| push_unique(d, &scope, "deny_users", user))?;
-    db.set_author_disposition(user, Disposition::Dropped, "denied")
+    db.set_author_disposition(user, scope.repo(), Disposition::Dropped, "denied")
 }
 
 pub fn set_subscribed(paths: &Paths, repo: &RepoId, on: bool) -> Result<()> {

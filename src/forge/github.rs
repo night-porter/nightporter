@@ -20,6 +20,7 @@ pub struct GitHub {
     pub subscribed: std::collections::HashSet<String>,
     pub sweep_every: std::time::Duration,
     team_cache: std::sync::Mutex<HashMap<String, (i64, Vec<String>)>>,
+    perm_cache: std::sync::Mutex<HashMap<String, (i64, Role)>>,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +141,7 @@ impl GitHub {
             subscribed: Default::default(),
             sweep_every: std::time::Duration::from_secs(600),
             team_cache: Default::default(),
+            perm_cache: Default::default(),
         }
     }
 
@@ -196,6 +198,7 @@ impl GitHub {
         if number == 0 {
             return Ok(());
         }
+        let start = out.len();
         let repo = self.repo(&t.repository.full_name);
         let r = &t.repository.full_name;
         let since_q = since.map(|s| format!("&since={s}")).unwrap_or_default();
@@ -217,14 +220,14 @@ impl GitHub {
             if !mine && verb.is_none() {
                 continue;
             }
-            out.push(self.event(&repo, target, number, Trigger::Comment, format!("gh-ic-{}", c.id), c, verb));
+            out.push(self.event(&repo, target, number, Trigger::Comment, format!("gh-{}-ic-{}", self.host, c.id), c, verb));
         }
 
         if target == Target::Pr && mine {
             let rc: Vec<Comment> = self.api.get(&format!("/repos/{r}/pulls/{number}/comments?per_page=100{since_q}")).await?;
             for c in rc.into_iter().filter(|c| after(&c.created_at)) {
                 let thread = Some(c.in_reply_to_id.unwrap_or(c.id).to_string());
-                let mut e = self.event(&repo, target, number, Trigger::ReviewComment, format!("gh-rc-{}", c.id), c, None);
+                let mut e = self.event(&repo, target, number, Trigger::ReviewComment, format!("gh-{}-rc-{}", self.host, c.id), c, None);
                 e.thread = thread;
                 out.push(e);
             }
@@ -241,7 +244,7 @@ impl GitHub {
                 let body =
                     if rv.body.trim().is_empty() { format!("(review: {})", rv.state.to_lowercase().replace('_', " ")) } else { rv.body };
                 out.push(Event {
-                    id: format!("gh-rv-{}", rv.id),
+                    id: format!("gh-{}-rv-{}", self.host, rv.id),
                     repo: repo.clone(),
                     target,
                     number,
@@ -270,7 +273,7 @@ impl GitHub {
                 }
                 let role = self.role_of(r, &actor.login).await.unwrap_or(Role::None);
                 out.push(Event {
-                    id: format!("gh-label-{}", ev.id),
+                    id: format!("gh-{}-label-{}", self.host, ev.id),
                     repo: repo.clone(),
                     target,
                     number,
@@ -288,6 +291,7 @@ impl GitHub {
                 });
             }
         }
+        self.verify_roles(&t.repository.full_name, &mut out[start..]).await;
         Ok(())
     }
 
@@ -313,18 +317,36 @@ impl GitHub {
     }
 
     /// Collaborator permission → role (labels don't carry `author_association`).
+    /// Collaborator permission → role, cached for an hour. Used for labels (no association) and
+    /// to check MEMBER/COLLABORATOR associations, which GitHub also gives read-only users.
     async fn role_of(&self, repo: &str, user: &str) -> Result<Role> {
+        let key = format!("{repo}:{}", user.to_ascii_lowercase());
+        let now = crate::state::now();
+        if let Some((at, r)) = self.perm_cache.lock().unwrap().get(&key)
+            && now - at < 3600
+        {
+            return Ok(*r);
+        }
         #[derive(Deserialize)]
         struct P {
             permission: String,
         }
         let p: P = self.api.get(&format!("/repos/{repo}/collaborators/{user}/permission")).await?;
-        Ok(match p.permission.as_str() {
+        let r = match p.permission.as_str() {
             "admin" => Role::Owner,
             "maintain" => Role::Maintainer,
             "write" => Role::Collaborator,
-            _ => Role::None,
-        })
+            _ => Role::Contributor,
+        };
+        self.perm_cache.lock().unwrap().insert(key, (now, r));
+        Ok(r)
+    }
+
+    /// Replace association-based MEMBER/COLLABORATOR with the user's real permission.
+    async fn verify_roles(&self, repo: &str, events: &mut [Event]) {
+        for e in events.iter_mut().filter(|e| matches!(e.role, Role::Member | Role::Collaborator) && !e.is_bot) {
+            e.role = self.role_of(repo, &e.author).await.unwrap_or(Role::Contributor);
+        }
     }
 
     /// Slow sweep of the user's open PRs: merge conflicts and failing CI.
@@ -395,7 +417,7 @@ impl GitHub {
 
     fn state_event(&self, repo: &RepoId, n: u64, trigger: Trigger, sha: &str, body: String) -> Event {
         Event {
-            id: format!("gh-{}-{}#{n}-{sha}", crate::state::enum_str(&trigger), repo.path),
+            id: format!("gh-{}-{}-{}#{n}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path),
             repo: repo.clone(),
             target: Target::Pr,
             number: n,
@@ -453,6 +475,17 @@ impl GitHub {
             draft: p.draft,
             body: p.body.unwrap_or_default(),
         })
+    }
+
+    pub async fn issue(&self, repo: &RepoId, n: u64) -> Result<super::IssueInfo> {
+        #[derive(Deserialize)]
+        struct I {
+            title: String,
+            body: Option<String>,
+            user: User,
+        }
+        let i: I = self.api.get(&format!("/repos/{}/issues/{n}", repo.path)).await?;
+        Ok(super::IssueInfo { title: i.title, body: i.body.unwrap_or_default(), author: i.user.login })
     }
 
     pub async fn reply(&self, repo: &RepoId, _target: Target, n: u64, to: Option<&Event>, body: &str) -> Result<()> {

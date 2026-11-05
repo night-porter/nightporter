@@ -4,8 +4,13 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+/// Config overrides on every daemon git call: never run repo-controlled code (hooks, fsmonitor)
+/// and never use the `ext::` transport.
+const HARDEN: &[&str] = &["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never"];
+
 pub async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
+        .args(HARDEN)
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -17,9 +22,15 @@ pub async fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .await
         .context("run git")?;
     if !out.status.success() {
-        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!("git {}: {}", redact(&args.join(" ")), redact(String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// Hide credentials embedded in URLs (`https://user:token@host`) in messages and logs.
+pub fn redact(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"://[^/@\s]+@").expect("regex"));
+    RE.replace_all(s, "://***@").into_owned()
 }
 
 /// Local branch used for a job's worktree. Lives in the user's clone until cleanup.
@@ -30,10 +41,11 @@ pub fn branch_name(target: crate::forge::Target, n: u64) -> String {
     }
 }
 
-/// Create or reset the worktree at `wt` to `sha` (fetched from `url` `refspec`).
-pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &str, branch: &str) -> Result<String> {
+/// Create or reset the worktree at `wt` to the fetched head. Returns (sha, `.git` file content);
+/// the caller re-checks that file before trusting any git call in the worktree again.
+pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &str, branch: &str) -> Result<(String, String)> {
     let tmp_ref = format!("refs/nightporter/{}", branch.replace('/', "-"));
-    git(clone, &["fetch", "--no-tags", "--quiet", url, &format!("+{fetch_ref}:{tmp_ref}")]).await?;
+    git(clone, &["fetch", "--no-tags", "--quiet", "--end-of-options", url, &format!("+{fetch_ref}:{tmp_ref}")]).await?;
     let sha = git(clone, &["rev-parse", &tmp_ref]).await?;
     if wt.join(".git").exists() {
         git(wt, &["checkout", "--quiet", "-B", branch, &sha]).await?;
@@ -46,7 +58,19 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
         }
         git(clone, &["worktree", "add", "--quiet", "-B", branch, &wt.to_string_lossy(), &sha]).await?;
     }
-    Ok(sha)
+    let gitfile = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
+    Ok((sha, gitfile))
+}
+
+/// The agent must not be able to point the worktree at another git dir (its config could run
+/// commands in the daemon). Call before any git command in the worktree after the agent ran.
+pub fn verify_gitfile(wt: &Path, expected: &str) -> Result<()> {
+    let meta = std::fs::symlink_metadata(wt.join(".git"))?;
+    let now = std::fs::read_to_string(wt.join(".git")).unwrap_or_default();
+    if !meta.is_file() || now != expected {
+        bail!("the worktree's .git was modified during the job; refusing to continue");
+    }
+    Ok(())
 }
 
 pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()> {
@@ -62,9 +86,10 @@ pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()
     Ok(())
 }
 
-/// Plain push (never forced): a non-fast-forward is rejected by the server.
-pub async fn push(wt: &Path, url: &str, remote_branch: &str) -> Result<()> {
-    git(wt, &["push", "--quiet", "--no-verify", url, &format!("HEAD:refs/heads/{remote_branch}")]).await.map(|_| ())
+/// Push exactly `sha` from the clone (not the worktree). Never forced: a non-fast-forward is
+/// rejected by the server.
+pub async fn push(clone: &Path, url: &str, sha: &str, remote_branch: &str) -> Result<()> {
+    git(clone, &["push", "--quiet", "--no-verify", "--end-of-options", url, &format!("{sha}:refs/heads/{remote_branch}")]).await.map(|_| ())
 }
 
 pub async fn head(wt: &Path) -> Result<String> {
@@ -109,6 +134,12 @@ pub fn free_gb(p: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts() {
+        assert_eq!(redact("push https://x-token:ghp_abc@github.com/o/r"), "push https://***@github.com/o/r");
+        assert_eq!(redact("git@github.com:o/r"), "git@github.com:o/r");
+    }
 
     #[test]
     fn schemes() {

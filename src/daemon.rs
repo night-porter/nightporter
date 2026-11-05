@@ -226,6 +226,10 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     if !s.subscribed {
         return drop("not subscribed");
     }
+    // Night Porter's own replies are posted as you; never treat them as new requests.
+    if own && e.body.contains(crate::prompts::FOOTER_MARK) {
+        return drop("night porter reply");
+    }
     match e.mode() {
         Mode::MyPrs => {
             if !s.triggers.contains(&e.trigger) {

@@ -27,6 +27,12 @@ impl Api {
         let http = reqwest::Client::builder()
             .user_agent(concat!("nightporter/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
+            // Follow redirects only on the same host: GitLab's PRIVATE-TOKEN header is not
+            // stripped on cross-host redirects the way `Authorization` is.
+            .redirect(reqwest::redirect::Policy::custom(|a| {
+                let same = a.previous().first().and_then(|u| u.host_str()) == a.url().host_str();
+                if same && a.previous().len() < 5 { a.follow() } else { a.stop() }
+            }))
             .build()?;
         Ok(Self { http, base: base.trim_end_matches('/').into(), token, gitlab })
     }

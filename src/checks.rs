@@ -28,8 +28,12 @@ pub const BUILTIN_PROTECTED: &[&str] = &[
     ".opencode/**",
     "opencode.json",
     ".mcp.json",
+    ".git",
     ".git/**",
+    "**/.git",
+    "**/.git/**",
     ".gitmodules",
+    "**/.gitattributes",
 ];
 
 const DEP_FILES: &[&str] = &[
@@ -92,8 +96,12 @@ pub struct FileStat {
 
 #[derive(Clone, Debug, Default)]
 pub struct Diff {
+    /// Net change, for size and display.
     pub files: Vec<FileStat>,
-    pub patch: String,
+    /// Every path any commit in the range touched (catches add-then-revert and renames away).
+    pub touched: Vec<String>,
+    /// Per-commit patches with commit messages (`git log -p -U0 --text --format=%B`), for secrets.
+    pub scan: String,
     /// The pre-job head is an ancestor of the new HEAD (no rewrite).
     pub fast_forward: bool,
 }
@@ -102,9 +110,13 @@ impl Diff {
     pub fn lines(&self) -> usize {
         self.files.iter().map(|f| f.added + f.removed).sum()
     }
-    /// Only added lines (`+`), excluding file headers.
-    fn added_lines(&self) -> impl Iterator<Item = &str> {
-        self.patch.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).map(|l| &l[1..])
+    /// All paths to check: net files plus everything touched along the way.
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(|f| f.path.as_str()).chain(self.touched.iter().map(String::as_str))
+    }
+    /// Lines that can carry new content: added lines and commit messages, not removals.
+    fn scan_lines(&self) -> impl Iterator<Item = &str> {
+        self.scan.lines().filter(|l| !l.starts_with('-')).map(|l| l.strip_prefix('+').unwrap_or(l))
     }
 }
 
@@ -118,8 +130,9 @@ fn globs(extra: &[String]) -> GlobSet {
     b.build().unwrap_or_else(|_| GlobSet::empty())
 }
 
-/// Run all checks. `gitleaks`: `Some(findings)` if gitleaks ran.
-pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>) -> Vec<CheckResult> {
+/// Run all checks. `gitleaks`: `Some(findings)` if gitleaks ran. `texts`: other things that
+/// will be published (replies, PR body), scanned for secrets too.
+pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let mut push = |name: &str, ok: bool, blocking: bool, detail: String| out.push(CheckResult { name: name.into(), ok, blocking, detail });
 
@@ -131,9 +144,14 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>) -> Vec<CheckResult> {
     );
 
     let mut hits: Vec<String> = Vec::new();
-    for (i, l) in d.added_lines().enumerate() {
+    for l in d.scan_lines() {
         if SECRETS.is_match(l) {
-            hits.push(format!("added line {}: {}", i + 1, redact(l)));
+            hits.push(format!("in commits: {}", redact(l)));
+        }
+    }
+    for t in texts {
+        for l in t.lines().filter(|l| SECRETS.is_match(l)) {
+            hits.push(format!("in a reply: {}", redact(l)));
         }
     }
     if let Some(g) = gitleaks.filter(|g| !g.trim().is_empty()) {
@@ -142,23 +160,22 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>) -> Vec<CheckResult> {
     push("secrets", hits.is_empty(), true, hits.join("\n"));
 
     let set = globs(&cfg.protected);
-    let prot: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).filter(|p| set.is_match(p)).collect();
+    let mut prot: Vec<&str> = d.paths().filter(|p| set.is_match(p)).collect();
+    prot.dedup();
     push("protected paths", prot.is_empty(), true, prot.join(", "));
 
-    let np: Vec<&str> =
-        d.files.iter().map(|f| f.path.as_str()).filter(|p| p.split('/').any(|seg| seg.starts_with(".nightporter"))).collect();
+    let np: Vec<&str> = d.paths().filter(|p| p.split('/').any(|seg| seg.starts_with(".nightporter"))).collect();
     push("night porter files", np.is_empty(), true, np.join(", "));
 
     if cfg.escalate_on.contains(&Escalation::Deps) {
-        let deps: Vec<&str> = d
-            .files
-            .iter()
-            .map(|f| f.path.as_str())
+        let mut deps: Vec<&str> = d
+            .paths()
             .filter(|p| {
                 let name = p.rsplit('/').next().unwrap_or(p);
                 DEP_FILES.contains(&name) || (name.starts_with("requirements") && name.ends_with(".txt")) || name.ends_with(".csproj")
             })
             .collect();
+        deps.dedup();
         push("dependencies", deps.is_empty(), false, deps.join(", "));
     }
     if cfg.escalate_on.contains(&Escalation::Size) {
@@ -182,26 +199,23 @@ pub fn blocking_failed(r: &[CheckResult]) -> bool {
     r.iter().any(|c| !c.ok && c.blocking)
 }
 
-/// Parse `git diff --numstat` output.
-pub fn parse_numstat(s: &str) -> Vec<FileStat> {
-    s.lines()
-        .filter_map(|l| {
-            let mut it = l.splitn(3, '\t');
-            let a = it.next()?;
-            let r = it.next()?;
-            let p = it.next()?;
-            // Renames look like `old => new` or `dir/{a => b}`; check the new path.
-            let path = if let (Some(pre), Some(rest)) = (p.split_once('{').map(|x| x.0), p.split_once(" => ")) {
-                let new = rest.1.replace('}', "");
-                format!("{pre}{new}")
-            } else if let Some((_, new)) = p.split_once(" => ") {
-                new.to_string()
-            } else {
-                p.to_string()
-            };
-            Some(FileStat { path, added: a.parse().unwrap_or(0), removed: r.parse().unwrap_or(0) })
+/// Parse `git diff --numstat -z --no-renames` (NUL-separated, paths unquoted).
+pub fn parse_numstat_z(s: &str) -> Vec<FileStat> {
+    s.split('\0')
+        .filter_map(|rec| {
+            let mut it = rec.trim_start_matches('\n').splitn(3, '\t');
+            let (a, r, p) = (it.next()?, it.next()?, it.next()?);
+            (!p.is_empty()).then(|| FileStat { path: p.to_string(), added: a.parse().unwrap_or(0), removed: r.parse().unwrap_or(0) })
         })
         .collect()
+}
+
+/// Parse `git log --name-only -z --format=` (NUL-separated paths).
+pub fn parse_names_z(s: &str) -> Vec<String> {
+    let mut v: Vec<String> = s.split('\0').map(|p| p.trim_matches('\n')).filter(|p| !p.is_empty()).map(String::from).collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 #[cfg(test)]
@@ -214,7 +228,8 @@ mod tests {
     fn diff(files: &[(&str, usize)], patch: &str) -> Diff {
         Diff {
             files: files.iter().map(|(p, n)| FileStat { path: p.to_string(), added: *n, removed: 0 }).collect(),
-            patch: patch.into(),
+            touched: vec![],
+            scan: patch.into(),
             fast_forward: true,
         }
     }
@@ -224,59 +239,72 @@ mod tests {
 
     #[test]
     fn clean_diff_passes() {
-        let r = run(&cfg(), &diff(&[("src/main.rs", 10)], "+fn main() {}\n"), None);
+        let r = run(&cfg(), &diff(&[("src/main.rs", 10)], "+fn main() {}\n"), None, &[]);
         assert!(all_ok(&r), "{r:?}");
     }
 
     #[test]
     fn secrets_block_and_are_redacted() {
-        let r = run(&cfg(), &diff(&[("a.rs", 1)], "+let t = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789AB\";\n"), None);
+        let r = run(&cfg(), &diff(&[("a.rs", 1)], "+let t = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789AB\";\n"), None, &[]);
         assert_eq!(failed(&r), vec!["secrets"]);
         assert!(blocking_failed(&r));
         assert!(!r.iter().any(|c| c.detail.contains("0123456789")));
         // Removed lines and env-var references don't count.
-        let r = run(&cfg(), &diff(&[("a.rs", 1)], "-AKIAABCDEFGHIJKLMNOP\n+password = \"${DB_PASSWORD}\"\n"), None);
+        let r = run(&cfg(), &diff(&[("a.rs", 1)], "-AKIAABCDEFGHIJKLMNOP\n+password = \"${DB_PASSWORD}\"\n"), None, &[]);
         assert!(all_ok(&r), "{r:?}");
     }
 
     #[test]
     fn protected_and_agent_files() {
-        let r = run(&cfg(), &diff(&[(".github/workflows/ci.yml", 1), ("docs/CLAUDE.md", 1)], ""), None);
+        let r = run(&cfg(), &diff(&[(".github/workflows/ci.yml", 1), ("docs/CLAUDE.md", 1)], ""), None, &[]);
         assert_eq!(failed(&r), vec!["protected paths"]);
         let mut c = cfg();
         c.protected = vec!["migrations/**".into()];
-        assert_eq!(failed(&run(&c, &diff(&[("migrations/001.sql", 1)], ""), None)), vec!["protected paths"]);
+        assert_eq!(failed(&run(&c, &diff(&[("migrations/001.sql", 1)], ""), None, &[])), vec!["protected paths"]);
     }
 
     #[test]
     fn escalations_are_non_blocking_and_configurable() {
-        let r = run(&cfg(), &diff(&[("web/package.json", 1), ("big.rs", 600)], ""), None);
+        let r = run(&cfg(), &diff(&[("web/package.json", 1), ("big.rs", 600)], ""), None, &[]);
         assert_eq!(failed(&r), vec!["dependencies", "size"]);
         assert!(!blocking_failed(&r));
         let mut c = cfg();
         c.escalate_on.clear();
-        assert!(all_ok(&run(&c, &diff(&[("package.json", 1), ("big.rs", 600)], ""), None)));
+        assert!(all_ok(&run(&c, &diff(&[("package.json", 1), ("big.rs", 600)], ""), None, &[])));
     }
 
     #[test]
     fn history_rewrite_blocks() {
         let mut d = diff(&[("a.rs", 1)], "");
         d.fast_forward = false;
-        assert!(blocking_failed(&run(&cfg(), &d, None)));
+        assert!(blocking_failed(&run(&cfg(), &d, None, &[])));
     }
 
     #[test]
     fn np_files_block() {
-        assert!(blocking_failed(&run(&cfg(), &diff(&[(".nightporter/replies.json", 1)], ""), None)));
+        assert!(blocking_failed(&run(&cfg(), &diff(&[(".nightporter/replies.json", 1)], ""), None, &[])));
     }
 
     #[test]
-    fn numstat() {
-        let s = "3\t1\tsrc/a.rs\n-\t-\timg.png\n0\t0\tsrc/{old => new}/b.rs\n1\t1\told.rs => .github/workflows/x.yml\n";
-        let f = parse_numstat(s);
-        assert_eq!(f[0].added, 3);
+    fn numstat_z() {
+        let f = parse_numstat_z("3\t1\tsrc/a.rs\0-\t-\timg.png\0");
+        assert_eq!((f[0].path.as_str(), f[0].added), ("src/a.rs", 3));
         assert_eq!(f[1].path, "img.png");
-        assert_eq!(f[2].path, "src/new/b.rs");
-        assert_eq!(f[3].path, ".github/workflows/x.yml");
+        // Non-ASCII paths stay unquoted with -z, so globs still match.
+        let f = parse_numstat_z("1\t0\t.github/workflows/é.yml\0");
+        assert!(blocking_failed(&run(&cfg(), &Diff { files: f, ..Default::default() }, None, &[])));
+        assert_eq!(parse_names_z("\na.rs\0b.rs\0\na.rs\0"), vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn touched_paths_and_messages_count() {
+        // A workflow edited then reverted is still caught; a secret in a commit message too.
+        let mut d = diff(&[("src/a.rs", 1)], "");
+        d.touched = vec![".github/workflows/ci.yml".into(), ".git".into()];
+        assert!(blocking_failed(&run(&cfg(), &d, None, &[])));
+        let d = diff(&[("src/a.rs", 1)], "fix things\n\nkey AKIAABCDEFGHIJKLMNOP\n");
+        assert!(blocking_failed(&run(&cfg(), &d, None, &[])));
+        let d = diff(&[("src/a.rs", 1)], "");
+        assert!(blocking_failed(&run(&cfg(), &d, None, &["see ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"])));
     }
 }

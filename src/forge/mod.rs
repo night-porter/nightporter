@@ -212,6 +212,14 @@ pub struct PrInfo {
     pub body: String,
 }
 
+/// An issue's text, for maintainer mode. Always untrusted.
+#[derive(Clone, Debug, Default)]
+pub struct IssueInfo {
+    pub title: String,
+    pub body: String,
+    pub author: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
@@ -266,6 +274,12 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.pr(repo, number).await,
             Forge::GitLab(g) => g.mr(repo, number).await,
+        }
+    }
+    pub async fn issue(&self, repo: &RepoId, number: u64) -> Result<IssueInfo> {
+        match self {
+            Forge::GitHub(g) => g.issue(repo, number).await,
+            Forge::GitLab(g) => g.issue(repo, number).await,
         }
     }
     /// Reply in the event's thread when it has one, else a top-level comment on the PR/issue.
