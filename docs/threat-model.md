@@ -1,0 +1,104 @@
+# Night Porter threat model
+
+Night Porter reads text written by other people (review comments, issues, merge requests) and
+runs a coding agent on your machine because of it. This document says who is trusted, what each
+security boundary is, and which protections cannot be turned off.
+
+## Assets
+
+1. **Forge credentials**: GitHub/GitLab tokens, and your git SSH keys.
+2. **Your repositories**: their history, branches and the code that gets merged.
+3. **Your machine**: files, other projects and secrets in your home directory.
+4. **Your reputation**: comments and commits posted under your name.
+
+## Actors
+
+| actor | trusted? | how they reach Night Porter |
+|---|---|---|
+| You | yes | config files, TUI approvals |
+| Maintainers (role in `trust.roles`, or allow-listed user, team or bot) | for **requests** | comments and reviews on your PRs, `/nightporter` commands, labels |
+| Anyone else on the forge | **no** | comments, issues, MRs, fork code |
+| Pack authors | no (reviewed by you at install, pinned to a commit) | prompt files |
+| The agent (Claude Code / OpenCode) | **no**; treated as possibly confused or injected | runs in a worktree |
+
+## Boundaries and controls
+
+### B1. Untrusted text never reaches the agent unasked
+
+- Trust rules are checked in this order:
+  1. a denied user or team is rejected
+  2. an allowed user, team or bot is accepted
+  3. a comment author whose role is in `trust.roles` is accepted
+  4. everyone else is untrusted
+- Items from untrusted authors go to the TUI inbox and are not processed until you choose
+  allow always, allow once, ignore or deny.
+- When the context for a job is built, comments from untrusted authors are **removed**, not
+  quoted.
+- Maintainer mode: the *request* must come from a trusted user (a label or a
+  `/nightporter <verb>` command). Issue or MR content from others is passed to the agent inside
+  clearly marked `UNTRUSTED` blocks, and the job's autonomy is capped at `draft`.
+- `trust.open = true` (accept anyone) is capped at `suggest`, so nothing is posted or pushed
+  automatically.
+
+### B2. The agent holds no forge credentials
+
+- The agent process starts with `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN` and similar variables
+  removed. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
+  inside the agent are logged out.
+- The generated agent settings deny `git push`, `gh`, `glab` and network commands.
+- **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
+  and approve are not implemented at all.
+- Known gap: the agent runs as your user and could read SSH keys or other files from disk. Agent
+  sandbox settings reduce this, but there is no full sandbox (VM or container) until after 1.0.
+  Treat `auto` mode with that in mind.
+
+### B3. Pre-push checks
+
+Run on every push, in every mode, including `auto`:
+
+| check | can be disabled? |
+|---|---|
+| secrets in the diff (gitleaks if installed, otherwise built-in patterns) | **no** |
+| protected paths (`.github/workflows/**`, `.gitlab-ci.yml`, plus your globs) | **no** (you can only add to the list) |
+| force-push or history rewrite | **no** |
+| Night Porter files in a commit | **no** |
+| dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
+| diff size over the limit | yes (`escalate_on`), with a warning |
+
+A failed check never pushes. It sends the job back to manual approval in the TUI.
+
+### B4. Running other people's code
+
+Environment setup (`[env].setup`) and tests on code written by untrusted authors (their MRs, or
+reproducing issues that include their code) **always** need approval for each job. The TUI shows
+which build files changed (`composer.json`, `package.json`, `Makefile`, CI files) before you
+approve. Environment commands only ever come from your own config, never from the repository.
+
+### B5. Packs
+
+Packs contain only TOML and markdown: no executable code, pinned to a commit SHA. A pack step can
+block a job or require approval; it can never relax B1–B4. Updating a pack shows the prompt diff
+before it is applied. A step that needs write access shows a warning at install time.
+
+### B6. Credentials at rest
+
+Tokens come from `gh`/`glab` or from the OS keychain. They are never stored in config, logs, job
+directories or the state database, and they are kept in `secrecy` types in memory.
+
+### B7. Nothing left in your repos
+
+Job files live in `~/.local/share/nightporter/jobs/<id>/`. Worktrees live outside your clones. A
+pre-push check rejects any commit containing Night Porter files.
+
+## Out of scope
+
+- A trusted maintainer asking for something harmful on purpose. Trust is a decision you make;
+  the always-on checks still apply.
+- Vulnerabilities in the agent CLIs, git, `gh` or `glab` themselves.
+- A machine that is already compromised.
+
+## Open items before 1.0
+
+- [ ] Independent review of B1–B5 against the implementation
+- [ ] Fuzz the trust and context-building code with crafted comments
+- [ ] Look into OS-level sandboxing for the agent (macOS `sandbox-exec`, Linux namespaces / bubblewrap)
