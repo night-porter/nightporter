@@ -435,3 +435,42 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
     let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
     assert!(prompt.contains("written by someone untrusted"));
 }
+
+/// Real Claude Code, end to end (spends a few cents of the user's tokens). Run with:
+/// `cargo test real_agent_smoke -- --ignored --nocapture`
+/// Also checks the sandbox in headless mode: the agent is allowed `cat`, asked to read a probe
+/// file under a read-denied path, and must not get its content.
+#[tokio::test]
+#[ignore]
+async fn real_agent_smoke() {
+    let probe_dir = std::env::home_dir().unwrap().join(".local/share/nightporter");
+    std::fs::create_dir_all(&probe_dir).unwrap();
+    let probe = probe_dir.join("sandbox-probe.txt");
+    std::fs::write(&probe, "PROBE-7f3a9c-SHOULD-NOT-BE-READABLE").unwrap();
+
+    let w = world("allow_commands = [\"cat\"]\nprompt = \"smoke.md\"\ntimeout = \"10m\"").await;
+    std::fs::write(
+        w.ctx.paths.config_dir.join("smoke.md"),
+        "Before anything else, run exactly `cat ~/.local/share/nightporter/sandbox-probe.txt` with the Bash tool \
+         and put its exact output (or the exact error) in your summary.",
+    )
+    .unwrap();
+    // SAFETY: test-only; this ignored test runs on its own.
+    unsafe { std::env::remove_var("NIGHTPORTER_AGENT_BIN") };
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    let res = job::run(ctx, id).await;
+    let _ = std::fs::remove_file(&probe);
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    let out = std::fs::read_to_string(ctx.paths.job_dir(id).join("agent.out")).unwrap_or_default();
+    println!(
+        "result: {res:?}\nstatus: {:?}\nsummary: {}\nreplies: {:?}\nchecks: {:?}\ndiff:\n{}",
+        j.status, j.summary, j.replies, j.checks, j.diff
+    );
+    assert!(!out.contains("PROBE-7f3a9c"), "sandbox let the agent read a denied path:\n{out}");
+    res.unwrap();
+    assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
+    assert!(!j.replies.is_empty());
+}

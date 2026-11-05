@@ -63,8 +63,9 @@ security boundary is, and which protections cannot be turned off.
   and approve are not implemented at all.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
   (`sandbox = true`): no network unless you list domains, and the read denies above also apply
-  to commands. It fails closed: if the sandbox can't start, the job fails. Still to confirm with
-  a real run that this holds in headless `-p` mode.
+  to commands. It fails closed: if the sandbox can't start, the job fails. Verified in headless
+  `-p` mode on macOS (2026-11-05): an allowed `cat` of a read-denied path fails with
+  "Operation not permitted" (`cargo test real_agent_smoke -- --ignored`).
 - Gaps: OpenCode has no sandbox and no read denies, and repos with `sandbox = false` (e.g. for
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
@@ -129,6 +130,7 @@ look like options.
 
 - [ ] Independent review of B1–B5 against the implementation
 - [ ] Fuzz the trust and context-building code with crafted comments
-- [ ] Verify Claude Code's sandbox applies in `-p` mode with a real run (read `~/.ssh` must fail)
+- [x] Claude Code's sandbox applies in `-p` mode (macOS, real run, 2026-11-05)
+- [ ] Same check on Linux (bubblewrap)
 - [ ] Sandbox for OpenCode runs (macOS `sandbox-exec`, Linux bubblewrap)
 - [x] First independent review (2026-11-05): findings fixed, see git history
