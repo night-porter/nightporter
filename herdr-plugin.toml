@@ -1,0 +1,30 @@
+# herdr plugin: Night Porter's queue inside herdr. Install with
+#   herdr plugin install dan2k3k4/nightporter
+# Requires the `nightporter` binary on PATH (and its daemon running for live updates).
+id = "nightporter"
+name = "Night Porter"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Your PRs' night shift: review what Night Porter prepared while you were away, approve it, or take over with `h`"
+platforms = ["linux", "macos"]
+
+# The Night Porter TUI as a popup. Press `h` on a job to take it over in a new herdr workspace.
+[[panes]]
+id = "queue"
+title = "Night Porter"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["nightporter", "tui"]
+
+# Bind it in herdr's config, e.g.
+#   [[keys.command]]
+#   key = "prefix+n"
+#   type = "plugin_action"
+#   command = "nightporter.open-queue"
+#   description = "Night Porter queue"
+[[actions]]
+id = "open-queue"
+title = "Night Porter: open queue"
+contexts = ["workspace"]
+command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin nightporter --entrypoint queue"]

@@ -8,6 +8,7 @@ mod daemon;
 mod doctor;
 mod forge;
 mod git;
+mod herdr;
 mod http;
 mod job;
 mod notify;
@@ -67,6 +68,8 @@ enum Cmd {
     Reject { id: i64 },
     /// Re-run a finished or failed job's requests as a new job.
     Retry { id: i64 },
+    /// Take over a job interactively in herdr (opens a workspace with a briefed agent).
+    Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
     Show { id: i64 },
     /// Inbox decision for an untrusted author's event.
@@ -246,6 +249,12 @@ fn main() -> Result<()> {
             println!("re-queued {} event(s)", actions::retry(&db(&paths)?, id)?);
             Ok(())
         }
+        Cmd::Handoff { id } => {
+            let db = db(&paths)?;
+            let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+            println!("{}", herdr::handoff(&db, &j, agent_for(&paths, &j.repo))?);
+            Ok(())
+        }
         Cmd::Show { id } => {
             let db = db(&paths)?;
             let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
@@ -293,6 +302,11 @@ fn main() -> Result<()> {
         Cmd::Market { cmd } => rt()?.block_on(market(&paths, cmd)),
         Cmd::Pack { cmd } => rt()?.block_on(pack(&paths, cmd)),
     }
+}
+
+/// The agent configured for a repo (Claude Code if the config can't be read).
+pub fn agent_for(paths: &Paths, repo: &RepoId) -> config::AgentKind {
+    config::Config::load(paths).and_then(|c| c.settings_for(paths, repo)).map(|s| s.agent).unwrap_or(config::AgentKind::Claude)
 }
 
 fn db(paths: &Paths) -> Result<Db> {

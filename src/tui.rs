@@ -273,6 +273,10 @@ impl App {
                 return;
             }
             KeyCode::Char('t') => actions::retry(&self.db, id).map(|n| format!("re-queued {n} event(s)")),
+            KeyCode::Char('h') => match self.db.job(id) {
+                Ok(Some(j)) => crate::herdr::handoff(&self.db, &j, crate::agent_for(&self.paths, &j.repo)),
+                _ => Ok("job not found".into()),
+            },
             KeyCode::Char('c') => {
                 let cmd = self.db.job(id).ok().flatten().map(|j| crate::job::manual_commands(&j)).unwrap_or_default();
                 if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|_| format!("copied: {cmd}")) }
@@ -432,8 +436,8 @@ impl App {
         }
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
-            (true, _) => "↑↓ scroll a approve A override r reject t retry c/y copy Esc back",
-            (_, Tab::Queue | Tab::History) => "↑↓ move Enter open a approve r reject t retry p pause ? help q quit",
+            (true, _) => "↑↓ scroll a approve A override r reject t retry h herdr c/y copy Esc",
+            (_, Tab::Queue | Tab::History) => "↑↓ Enter open a approve r reject t retry h herdr p pause ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore d deny ? help q quit",
             (_, Tab::Repos) => "space subscribe/unsubscribe R rescan ? help q quit",
             (_, Tab::Help) => "1-4 tabs q quit",
@@ -581,6 +585,7 @@ Tabs
 Keys (everywhere): ↑/↓ or j/k move, Enter open, Tab/←/→ switch tab, p pause/resume, q quit
 Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t retry
        c copy the push command (suggest level)   y copy replies
+       h take over in herdr: opens a workspace at the job's worktree with a briefed agent
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   d deny
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.

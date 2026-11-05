@@ -60,6 +60,7 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
         out.push(tool(a.bin(), "--version", fix, false));
     }
     out.push(tool("gitleaks", "version", &install("gitleaks", "see https://github.com/gitleaks/gitleaks"), true));
+    out.push(tool("herdr", "--version", "optional, for `nightporter handoff`: see https://herdr.dev", true));
     // Claude Code's sandbox (on by default) needs these on Linux; macOS uses built-in Seatbelt.
     if cfg!(target_os = "linux") && agents.contains(&AgentKind::Claude) {
         out.push(tool("bwrap", "--version", "sudo apt-get install bubblewrap   (or set sandbox = false)", false));

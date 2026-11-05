@@ -6,6 +6,10 @@ Night Porter is like an IRC bouncer for your pull requests. It watches GitHub an
 review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
 (Claude Code or OpenCode) on your local clone to deal with them, within the rules you set.
 
+Most agent tools are cockpits: you start the agent and watch it. Night Porter is the night
+shift. It starts work **by itself** when something happens on your PRs, and it's built to be safe
+when that something was written by a stranger.
+
 > Status: early development (0.x). Expect breaking changes.
 
 ## How it works
@@ -46,6 +50,31 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
 - Leaves no files in your repositories
 
+## Works with herdr
+
+[herdr](https://herdr.dev) is where you run and watch agents; Night Porter is what runs while
+you're not there. They fit together:
+
+- **Take over a job in herdr.** On any job, press `h` in the TUI (or run
+  `nightporter handoff <id>`). Night Porter opens a herdr workspace at that job's worktree,
+  starts your agent, and briefs it: what was asked, what it changed, which checks need you,
+  and what is drafted but not posted. You continue from there, interactively.
+- **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
+
+  ```sh
+  herdr plugin install dan2k3k4/nightporter
+  ```
+
+  Then bind it to a key in herdr's config:
+
+  ```toml
+  [[keys.command]]
+  key = "prefix+n"
+  type = "plugin_action"
+  command = "nightporter.open-queue"
+  description = "Night Porter queue"
+  ```
+
 ## Install
 
 > Releases are not published yet. Build from source:
@@ -58,7 +87,7 @@ nightporter doctor     # check gh / glab / agents / git
 ```
 
 Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude` and/or `opencode`.
-`gitleaks` is optional but recommended.
+`gitleaks` is optional but recommended. `herdr` is optional, for taking over jobs interactively.
 
 ## Configuration
 
