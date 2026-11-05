@@ -52,24 +52,7 @@ struct App {
 }
 
 pub fn run(paths: &Paths) -> Result<()> {
-    let db = Db::open(&paths.db())?;
-    let mut app = App {
-        paths: paths.clone(),
-        db,
-        tab: Tab::Queue,
-        sel: ListState::default().with_selected(Some(0)),
-        queue: vec![],
-        history: vec![],
-        inbox: vec![],
-        repos: vec![],
-        detail: None,
-        scroll: 0,
-        msg: "Press ? for help.".into(),
-        confirm: None,
-        color: std::env::var_os("NO_COLOR").is_none(),
-        daemon_up: false,
-        paused: false,
-    };
+    let mut app = App::new(paths, Db::open(&paths.db())?);
     app.refresh(true);
     let mut term = ratatui::init();
     let res = app.main_loop(&mut term);
@@ -78,6 +61,26 @@ pub fn run(paths: &Paths) -> Result<()> {
 }
 
 impl App {
+    fn new(paths: &Paths, db: Db) -> Self {
+        App {
+            paths: paths.clone(),
+            db,
+            tab: Tab::Queue,
+            sel: ListState::default().with_selected(Some(0)),
+            queue: vec![],
+            history: vec![],
+            inbox: vec![],
+            repos: vec![],
+            detail: None,
+            scroll: 0,
+            msg: "Press ? for help.".into(),
+            confirm: None,
+            color: std::env::var_os("NO_COLOR").is_none(),
+            daemon_up: false,
+            paused: false,
+        }
+    }
+
     fn main_loop(&mut self, term: &mut ratatui::DefaultTerminal) -> Result<()> {
         let mut last = Instant::now();
         loop {
@@ -559,3 +562,78 @@ Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILE
 Checks: [ok] passed, [ASK] needs your approval, [BLOCK] blocking (secrets, protected paths, history).
 Set NO_COLOR=1 to turn colours off. Everything here is also available as CLI commands:
 `nightporter status`, `show <id>`, `approve <id>`, `inbox list`, ...";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forge::{ForgeKind, RepoId, Target};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+
+    fn screen(app: &mut App) -> String {
+        let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        t.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<_>>()
+            .chunks(140)
+            .map(|r| r.concat())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn press(app: &mut App, c: KeyCode) -> bool {
+        app.key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn renders_every_view_with_text_labels() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let mut db = Db::open(&paths.db()).unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 4, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::AwaitingApproval;
+        j.summary = "renamed foo".into();
+        j.checks = vec![crate::state::CheckResult { name: "secrets".into(), ok: false, blocking: true, detail: "x".into() }];
+        db.update_job(&j).unwrap();
+        // SAFETY: test-only env; no concurrent readers of NO_COLOR in this module.
+        unsafe { std::env::set_var("NO_COLOR", "1") };
+        let mut app = App::new(&paths, db);
+        unsafe { std::env::remove_var("NO_COLOR") };
+        assert!(!app.color);
+        app.refresh(true);
+
+        let s = screen(&mut app);
+        assert!(s.contains("NEEDS APPROVAL") && s.contains("renamed foo") && s.contains("1 need you"), "{s}");
+        assert!(s.contains("daemon NOT RUNNING"));
+        assert!(s.contains("> "), "selection marker must not rely on colour");
+
+        assert!(press(&mut app, KeyCode::Enter));
+        let s = screen(&mut app);
+        assert!(s.contains("[BLOCK] secrets") && s.contains("Esc back"), "{s}");
+        // Plain approve refuses a blocking failure; the override asks first.
+        press(&mut app, KeyCode::Char('a'));
+        assert!(screen(&mut app).contains("blocking check failures"));
+        press(&mut app, KeyCode::Char('A'));
+        assert!(screen(&mut app).contains("Override blocking checks"));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
+        press(&mut app, KeyCode::Esc);
+
+        for (k, want) in
+            [('2', "No one is waiting"), ('3', "History"), ('4', "No clones found"), ('?', "Status words are always shown as text")]
+        {
+            press(&mut app, KeyCode::Char(k));
+            let s = screen(&mut app);
+            assert!(s.contains(want), "tab {k}: {s}");
+        }
+        press(&mut app, KeyCode::Char('p'));
+        assert!(screen(&mut app).contains("PAUSED"));
+        assert!(!press(&mut app, KeyCode::Char('q')));
+    }
+}
