@@ -19,3 +19,5 @@ targets = [
 install-path = "CARGO_HOME"
 install-updater = false
 pr-run-mode = "plan"
+# release.yml is hand-pinned (actions by SHA, verified dist download); keep `dist` from rejecting it.
+allow-dirty = ["ci"]

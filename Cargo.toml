@@ -6,6 +6,7 @@ rust-version = "1.89"
 description = "Handles your PRs while you're away: an agentic night shift for GitHub and GitLab."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dan2k3k4/nightporter"
+homepage = "https://github.com/dan2k3k4/nightporter"
 readme = "README.md"
 keywords = ["github", "gitlab", "agent", "tui", "pull-request"]
 categories = ["command-line-utilities", "development-tools"]
