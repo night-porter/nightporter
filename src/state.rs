@@ -263,7 +263,13 @@ impl Db {
     }
 
     /// Put a job's events back in the queue (e.g. the branch moved under us).
+    /// A re-queued CI-fix doesn't count as a new attempt: give the attempt back.
     pub fn requeue_events(&self, job_id: i64) -> Result<usize> {
+        let evs = self.job_events(job_id)?;
+        if let Some(e) = evs.iter().find(|e| e.trigger == crate::forge::Trigger::CiFailure) {
+            let n = self.ci_attempts(&e.repo, e.number)?;
+            self.set_ci_attempts(&e.repo, e.number, n.saturating_sub(1))?;
+        }
         Ok(self.0.execute("UPDATE events SET disposition='pending', job_id=NULL, seen_at=?2 WHERE job_id=?1", params![job_id, now()])?)
     }
 
@@ -390,10 +396,11 @@ impl Db {
     /// Jobs left `running` died with the previous daemon: fail them and re-queue their events.
     /// (`approved` jobs are simply delivered again; delivery is idempotent.)
     pub fn recover(&self) -> Result<usize> {
-        self.0.execute(
-            "UPDATE events SET disposition='pending', job_id=NULL WHERE job_id IN (SELECT id FROM jobs WHERE status='running')",
-            [],
-        )?;
+        let ids: Vec<i64> =
+            self.0.prepare("SELECT id FROM jobs WHERE status='running'")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        for id in ids {
+            self.requeue_events(id)?;
+        }
         Ok(self.0.execute(
             "UPDATE jobs SET status='failed', error='daemon restarted while job was running; re-queued', updated_at=?1
              WHERE status='running'",
