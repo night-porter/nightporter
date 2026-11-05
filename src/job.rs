@@ -71,7 +71,10 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
     let s = cfg.settings_for(&ctx.paths, &j.repo)?;
-    ctx.db(|d| d.set_status(id, JobStatus::Running))?;
+    // Only start if still queued (the TUI may have rejected it a moment ago).
+    if !ctx.db(|d| d.transition(id, JobStatus::Queued, JobStatus::Running))? {
+        return Ok(());
+    }
     j.status = JobStatus::Running;
     let lvl = level(&j);
     let verb = j.meta.verb;
@@ -120,9 +123,12 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
             j.meta.push_ref = branch.clone();
             j.meta.base = base.clone();
             issue = Some(forge.lock().await.issue(&j.repo, j.number).await?);
+            // A later request on the same issue continues the branch from earlier work.
+            let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
             // Reproducing can mean running the reporter's snippet through allowed commands.
             j.meta.untrusted_code = verb == Some(Verb::Reproduce) && (!s.env.setup.is_empty() || !s.allow_commands.is_empty());
-            (None, repo_url.clone(), format!("refs/heads/{base}"))
+            let from = if continue_branch { branch.clone() } else { base };
+            (None, repo_url.clone(), format!("refs/heads/{from}"))
         }
     };
 
@@ -317,39 +323,40 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         if !git::is_ancestor(&clone, &j.head_before, &j.head_after).await {
             bail!("history rewrite detected; not pushing");
         }
-        if j.target == Target::Pr {
-            let pr = forge.lock().await.pr(&j.repo, j.number).await?;
-            if pr.head_sha != j.head_before {
-                ctx.db(|d| d.requeue_events(id))?;
-                j.status = JobStatus::Failed;
-                j.error = "the PR branch moved while we worked; re-queued on the new head".into();
-                ctx.db(|d| d.update_job(&j))?;
-                return Ok(());
-            }
+        let remote = git::remote_head(&clone, &j.meta.push_url, &j.meta.push_ref).await?;
+        let fresh_branch = j.target == Target::Issue && remote.is_none();
+        let already = remote.as_deref() == Some(j.head_after.as_str());
+        if !already && !fresh_branch && remote.as_deref() != Some(j.head_before.as_str()) {
+            // Someone pushed in the meantime: redo the work on the new head.
+            ctx.db(|d| d.requeue_events(id))?;
+            j.status = JobStatus::Failed;
+            j.error = "the branch moved while we worked; re-queued on the new head".into();
+            ctx.db(|d| d.update_job(&j))?;
+            return Ok(());
         }
-        log(ctx, id, &format!("pushing {} to {}", short(&j.head_after), j.meta.push_ref));
-        if let Err(e) = git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref).await {
-            let msg = format!("{e:#}");
-            if msg.contains("non-fast-forward") || msg.contains("rejected") || msg.contains("fetch first") {
-                ctx.db(|d| d.requeue_events(id))?;
-                j.status = JobStatus::Failed;
-                j.error = "push rejected (branch moved); re-queued".into();
-                ctx.db(|d| d.update_job(&j))?;
-                return Ok(());
-            }
-            return Err(e);
+        if already {
+            // A previous delivery attempt (before a restart) got this far.
+            log(ctx, id, "already pushed; continuing with replies");
+        } else {
+            log(ctx, id, &format!("pushing {} to {}", short(&j.head_after), j.meta.push_ref));
+            // Other push failures (protected branch, auth) are real failures, not a retry loop.
+            git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref).await?;
         }
     }
 
     let f = forge.lock().await;
-    if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) {
+    if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
         let pr_body = j.replies.iter().find(|r| r.event.is_none()).map(|r| r.body.clone()).unwrap_or_else(|| j.summary.clone());
         let title = format!("Fix #{}: {}", j.number, first_line(&j.summary));
         let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
         log(ctx, id, &format!("opened draft {url}"));
         j.meta.pr_url = url;
+        ctx.db(|d| d.update_job(&j))?;
     }
-    for r in &j.replies {
+    for (i, r) in j.replies.clone().iter().enumerate() {
+        if j.meta.posted.contains(&i) {
+            continue;
+        }
         let ev: Option<&Event> = r.event.as_deref().and_then(|eid| events.iter().find(|e| e.id == eid));
         // For issue fixes, the general reply became the PR body; post only event replies.
         if j.target == Target::Issue && has_code && ev.is_none() && verb == Some(Verb::Fix) {
@@ -358,6 +365,8 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         f.reply(&j.repo, j.target, j.number, ev, &r.body)
             .await
             .with_context(|| format!("post reply to {}", r.event.as_deref().unwrap_or("PR")))?;
+        j.meta.posted.push(i);
+        ctx.db(|d| d.update_job(&j))?;
         if s.reply.resolve_threads
             && has_code
             && let Some(t) = ev.and_then(|e| e.thread.as_deref())
@@ -379,7 +388,8 @@ pub fn manual_commands(j: &Job) -> String {
     if j.head_after.is_empty() || j.head_after == j.head_before {
         return String::new();
     }
-    format!("git -C {} push {} HEAD:refs/heads/{}", shell_quote(&j.worktree), shell_quote(&j.meta.push_url), j.meta.push_ref)
+    // From the clone, by SHA: the worktree may have been reused or cleaned up since.
+    format!("git -C {} push {} {}:refs/heads/{}", shell_quote(&j.meta.clone), shell_quote(&j.meta.push_url), j.head_after, j.meta.push_ref)
 }
 
 fn shell_quote(s: &str) -> String {

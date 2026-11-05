@@ -56,6 +56,24 @@ impl Api {
         }
     }
 
+    /// GET every page (follows `Link: <…>; rel="next"`, which GitHub and GitLab both send), up to
+    /// `max_pages`. Errors on any page fail the whole call so callers don't advance cursors.
+    pub async fn get_all<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        let mut next = Some(path.to_string());
+        for _ in 0..max_pages {
+            let Some(p) = next.take() else { break };
+            match self.get_cond::<Vec<T>>(&p, None).await? {
+                Got::Fresh(v, h) => {
+                    out.extend(v);
+                    next = next_link(&h);
+                }
+                Got::NotModified => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// GET with `If-Modified-Since`. 304s don't count against GitHub's rate limit.
     pub async fn get_cond<T: DeserializeOwned>(&self, path: &str, since: Option<&str>) -> Result<Got<T>> {
         let mut r = self.req(Method::GET, path);
@@ -87,6 +105,12 @@ async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response>
     let body = resp.text().await.unwrap_or_default();
     let body: String = body.chars().take(300).collect();
     bail!("{path}: HTTP {s}: {body}")
+}
+
+/// The `rel="next"` URL from a `Link` header.
+pub fn next_link(h: &header::HeaderMap) -> Option<String> {
+    let link = h.get(header::LINK)?.to_str().ok()?;
+    link.split(',').find(|p| p.contains("rel=\"next\"")).and_then(|p| Some(p.split_once('<')?.1.split_once('>')?.0.to_string()))
 }
 
 /// Get a token: from `gh`/`glab` (they refresh it themselves) or from the OS keychain.
@@ -137,6 +161,18 @@ pub fn enc(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn link_next() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::LINK,
+            r#"<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=9>; rel="last""#.parse().unwrap(),
+        );
+        assert_eq!(super::next_link(&h).as_deref(), Some("https://api.github.com/x?page=2"));
+        h.insert(reqwest::header::LINK, r#"<https://x?page=1>; rel="prev""#.parse().unwrap());
+        assert_eq!(super::next_link(&h), None);
+    }
+
     #[test]
     fn enc() {
         assert_eq!(super::enc("group/sub proj"), "group%2Fsub%20proj");

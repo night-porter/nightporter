@@ -148,6 +148,9 @@ pub struct JobMeta {
     pub build_files: Vec<String>,
     #[serde(default)]
     pub pr_url: String,
+    /// Indexes of replies already posted (delivery can be retried without double-posting).
+    #[serde(default)]
+    pub posted: Vec<usize>,
 }
 
 pub fn now() -> i64 {
@@ -350,12 +353,6 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    pub fn active_jobs(&self) -> Result<Vec<Job>> {
-        let mut st = self.0.prepare(&format!("{JOB_LIST} WHERE status IN ('queued','running','approved') ORDER BY id"))?;
-        let rows = st.query_map([], row_job)?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
     /// Any job on this PR that isn't finished (one job per PR at a time).
     pub fn pr_busy(&self, repo: &RepoId, number: u64) -> Result<bool> {
         Ok(self.0.query_row(
@@ -390,9 +387,15 @@ impl Db {
     }
 
     /// On daemon start: anything left `running` died with the previous daemon.
+    /// Jobs left `running` died with the previous daemon: fail them and re-queue their events.
+    /// (`approved` jobs are simply delivered again; delivery is idempotent.)
     pub fn recover(&self) -> Result<usize> {
+        self.0.execute(
+            "UPDATE events SET disposition='pending', job_id=NULL WHERE job_id IN (SELECT id FROM jobs WHERE status='running')",
+            [],
+        )?;
         Ok(self.0.execute(
-            "UPDATE jobs SET status='failed', error='daemon restarted while job was running', updated_at=?1
+            "UPDATE jobs SET status='failed', error='daemon restarted while job was running; re-queued', updated_at=?1
              WHERE status='running'",
             [now()],
         )?)
@@ -507,5 +510,12 @@ mod tests {
         db.set_status(id, JobStatus::Running).unwrap();
         assert_eq!(db.recover().unwrap(), 1);
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Failed);
+        // Its events are pending again.
+        let mut db2 = Db::memory().unwrap();
+        db2.add_event(&ev("x", 9), Disposition::Pending, "").unwrap();
+        let j = db2.create_job(&r, Target::Pr, 9, "my_prs", "draft", &["x".into()]).unwrap();
+        db2.set_status(j, JobStatus::Running).unwrap();
+        db2.recover().unwrap();
+        assert_eq!(db2.events_with(Disposition::Pending).unwrap().len(), 1);
     }
 }

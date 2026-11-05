@@ -214,6 +214,25 @@ async fn draft_flow_end_to_end() {
     assert!(posts[0].2.contains("via Night Porter"));
     // Nothing from Night Porter left in the worktree.
     assert!(!std::path::Path::new(&j.worktree).join(".nightporter").exists());
+
+    // A repeated delivery (e.g. after a daemon restart) neither re-pushes nor re-posts.
+    ctx.db(|d| d.set_status(id, JobStatus::Approved)).unwrap();
+    job::deliver(ctx, id).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Done);
+    assert_eq!(w.log.lock().unwrap().iter().filter(|(m, _, _)| m == "POST").count(), 1);
+}
+
+#[tokio::test]
+async fn rejected_job_never_starts() {
+    let w = world("").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    ctx.db(|d| actions::reject(d, id)).unwrap();
+    job::run(ctx, id).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Rejected);
+    assert!(!ctx.paths.job_dir(id).join("prompt.md").exists());
 }
 
 #[tokio::test]
@@ -243,7 +262,7 @@ async fn suggest_mode_never_posts() {
     job::run(ctx, id).await.unwrap();
     let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
     assert_eq!(j.status, JobStatus::Ready);
-    assert!(job::manual_commands(&j).contains("HEAD:refs/heads/feature"));
+    assert!(job::manual_commands(&j).contains(":refs/heads/feature") && !job::manual_commands(&j).contains("HEAD:"));
     assert!(!w.log.lock().unwrap().iter().any(|(m, _, _)| m == "POST"));
     let _ = &w.repo;
 }
@@ -305,6 +324,7 @@ async fn gitlab_poll_reply_and_resolve() {
     let (url, log) = mock(vec![
         ("GET", "/user", r#"{"id":1,"username":"me"}"#.into()),
         ("GET", "/merge_requests", mr.into()),
+        ("GET", "/projects/42/merge_requests/3", mr.trim().trim_start_matches('[').trim_end_matches(']').into()),
         (
             "GET",
             "/projects/42/merge_requests/3/discussions",
@@ -329,16 +349,22 @@ async fn gitlab_poll_reply_and_resolve() {
     assert!(f.poll(&mut cur).await.unwrap().is_empty());
     assert!(log.lock().unwrap().iter().all(|(_, p, _)| p == "/user"));
     cur.since = Some("2026-01-01T00:00:00Z".into());
+    // The next sweep only records state (MRs already red/conflicted at install don't fire)...
     cur.last_sweep = None;
     let evs = f.poll(&mut cur).await.unwrap();
+    assert!(!evs.iter().any(|e| e.trigger == Trigger::MergeConflict || e.trigger == Trigger::CiFailure));
+    assert_eq!(cur.seen_status.get("gitlab:git.example.org/grp/proj#3").map(String::as_str), Some("conflict,red"));
+    // ...after that, state changes fire.
+    cur.last_sweep = None;
+    let sweep = f.poll(&mut cur).await.unwrap();
+    assert!(sweep.iter().any(|e| e.trigger == Trigger::MergeConflict));
+    assert!(sweep.iter().any(|e| e.trigger == Trigger::CiFailure && e.body.contains("phpunit")));
     let rc: Vec<_> = evs.iter().filter(|e| e.trigger == Trigger::ReviewComment).collect();
     assert_eq!(rc.len(), 1);
     assert_eq!(rc[0].author, "bob");
     assert_eq!(rc[0].role, crate::forge::Role::Maintainer);
     assert_eq!(rc[0].thread.as_deref(), Some("d1"));
     assert_eq!(rc[0].repo.path, "grp/proj");
-    assert!(evs.iter().any(|e| e.trigger == Trigger::MergeConflict));
-    assert!(evs.iter().any(|e| e.trigger == Trigger::CiFailure && e.body.contains("phpunit")));
     // My own note is still reported (intake drops it); system notes never are.
     assert!(!evs.iter().any(|e| e.body == "merged"));
     f.reply(&rc[0].repo, Target::Pr, 3, Some(rc[0]), "done").await.unwrap();

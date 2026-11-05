@@ -139,14 +139,16 @@ impl GitLab {
     }
 
     pub async fn poll(&mut self, cur: &mut Cursor) -> Result<Vec<Event>> {
-        let since = cur.since.clone();
+        // Overlapping window (late indexing, clock drift); repeats are de-duplicated downstream.
+        let since = cur.since.as_deref().map(super::overlap);
         let started = now_iso();
         let upd = since.as_ref().map(|s| format!("&updated_after={s}")).unwrap_or_default();
         let after = |ts: &str| newer(ts, since.as_deref());
         let mut out = Vec::new();
+        let mut failed = false;
 
         // 1. My open MRs: new discussion notes.
-        let mrs: Vec<Mr> = self.api.get(&format!("/merge_requests?scope=created_by_me&state=opened&per_page=100{upd}")).await?;
+        let mrs: Vec<Mr> = self.api.get_all(&format!("/merge_requests?scope=created_by_me&state=opened&per_page=100{upd}"), 10).await?;
         for mr in &mrs {
             let repo = self.repo(&mr.references.full);
             if !self.subscribed.contains(&repo.path) {
@@ -154,35 +156,61 @@ impl GitLab {
             }
             if let Err(e) = self.mr_notes(&repo, mr.project_id, mr.iid, true, &after, &mut out).await {
                 tracing::warn!("{repo}!{}: {e:#}", mr.iid);
+                failed = true;
             }
         }
 
         // 2. Maintainer mode: commands and labels on others' issues/MRs in subscribed projects.
         for (path, label) in self.labels.clone() {
             let p = enc(&path);
-            let issues: Vec<Issue> = self.api.get(&format!("/projects/{p}/issues?state=opened&per_page=50{upd}")).await.unwrap_or_default();
-            for i in issues {
-                let repo = self.repo(&i.references.full);
-                let _ = self.issue_requests(&repo, &p, "issues", i.iid, Target::Issue, &label, &after, &mut out).await;
-            }
-            let others: Vec<Mr> =
-                self.api.get(&format!("/projects/{p}/merge_requests?state=opened&per_page=50{upd}")).await.unwrap_or_default();
-            for mr in others.into_iter().filter(|m| !m.author.username.eq_ignore_ascii_case(&self.me)) {
-                let repo = self.repo(&mr.references.full);
-                let _ = self.issue_requests(&repo, &p, "merge_requests", mr.iid, Target::Pr, &label, &after, &mut out).await;
+            let scan = async {
+                let issues: Vec<Issue> = self.api.get_all(&format!("/projects/{p}/issues?state=opened&per_page=100{upd}"), 5).await?;
+                for i in issues {
+                    let repo = self.repo(&i.references.full);
+                    self.issue_requests(&repo, &p, "issues", i.iid, Target::Issue, &label, &after, &mut out).await?;
+                }
+                let others: Vec<Mr> = self.api.get_all(&format!("/projects/{p}/merge_requests?state=opened&per_page=100{upd}"), 5).await?;
+                for mr in others.into_iter().filter(|m| !m.author.username.eq_ignore_ascii_case(&self.me)) {
+                    let repo = self.repo(&mr.references.full);
+                    self.issue_requests(&repo, &p, "merge_requests", mr.iid, Target::Pr, &label, &after, &mut out).await?;
+                }
+                anyhow::Ok(())
+            };
+            if let Err(e) = scan.await {
+                tracing::warn!("{path}: {e:#}");
+                failed = true;
             }
         }
-        cur.since = Some(started);
+        if !failed {
+            cur.since = Some(started);
+        }
 
         let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= self.sweep_every.as_secs() as i64);
         if due {
             cur.last_sweep = Some(crate::state::now());
-            for mr in self.api.get::<Vec<Mr>>("/merge_requests?scope=created_by_me&state=opened&per_page=100").await? {
+            // All open MRs, not just the ones updated since the last poll: CI can go red without
+            // the MR itself changing.
+            let open: Vec<Mr> = match self.api.get_all("/merge_requests?scope=created_by_me&state=opened&per_page=100", 10).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("sweep: {e:#}");
+                    vec![]
+                }
+            };
+            for mr in open.iter().filter(|m| self.subscribed.contains(&self.repo(&m.references.full).path)) {
                 let repo = self.repo(&mr.references.full);
-                if self.subscribed.contains(&repo.path) {
-                    out.extend(self.sweep_one(&repo, &mr).await?);
+                match self.sweep_one(&repo, mr.project_id, mr.iid).await {
+                    Ok((evs, status)) => {
+                        // First sweep only records state (see GitHub).
+                        if cur.swept {
+                            out.extend(evs);
+                        }
+                        cur.seen_status.insert(format!("{}#{}", repo.key(), mr.iid), status);
+                    }
+                    Err(e) => tracing::warn!("sweep {repo}!{}: {e:#}", mr.iid),
                 }
             }
+            cur.swept = true;
         }
         Ok(out)
     }
@@ -196,7 +224,7 @@ impl GitLab {
         after: &impl Fn(&str) -> bool,
         out: &mut Vec<Event>,
     ) -> Result<()> {
-        let ds: Vec<Discussion> = self.api.get(&format!("/projects/{pid}/merge_requests/{iid}/discussions?per_page=100")).await?;
+        let ds: Vec<Discussion> = self.api.get_all(&format!("/projects/{pid}/merge_requests/{iid}/discussions?per_page=100"), 20).await?;
         for d in ds {
             for n in d.notes.into_iter().filter(|n| !n.system && after(&n.created_at)) {
                 let verb = parse_command(&n.body);
@@ -239,13 +267,13 @@ impl GitLab {
         after: &impl Fn(&str) -> bool,
         out: &mut Vec<Event>,
     ) -> Result<()> {
-        let notes: Vec<Note> = self.api.get(&format!("/projects/{p}/{kind}/{iid}/notes?per_page=100&sort=desc")).await?;
+        let notes: Vec<Note> = self.api.get_all(&format!("/projects/{p}/{kind}/{iid}/notes?per_page=100&sort=desc"), 3).await?;
         for n in notes.into_iter().filter(|n| !n.system && after(&n.created_at)) {
             let Some(verb) = parse_command(&n.body) else { continue };
             let role = self.role(p, &n.author).await;
             out.push(self.request(repo, target, iid, format!("gl-{}-n{}", self.host, n.id), &n.author, role, n.body, n.created_at, verb));
         }
-        let evs: Vec<LabelEvent> = self.api.get(&format!("/projects/{p}/{kind}/{iid}/resource_label_events?per_page=100")).await?;
+        let evs: Vec<LabelEvent> = self.api.get_all(&format!("/projects/{p}/{kind}/{iid}/resource_label_events?per_page=100"), 5).await?;
         for e in evs.into_iter().filter(|e| e.action == "add" && after(&e.created_at)) {
             if e.label.as_ref().is_some_and(|l| l.name.eq_ignore_ascii_case(label)) {
                 let role = self.role(p, &e.user).await;
@@ -310,15 +338,26 @@ impl GitLab {
         struct M {
             access_level: u32,
         }
-        let r = match self.api.get::<M>(&format!("/projects/{project}/members/all/{}", u.id)).await {
-            Ok(m) => Role::from_gitlab(m.access_level),
+        match self.api.get::<M>(&format!("/projects/{project}/members/all/{}", u.id)).await {
+            Ok(m) => {
+                let r = Role::from_gitlab(m.access_level);
+                self.roles.lock().unwrap().insert(key, (now, r));
+                r
+            }
+            // Not a member: cache. Other errors (5xx, rate limit): don't, so a hiccup doesn't
+            // send maintainers to the inbox for an hour.
+            Err(e) if e.to_string().contains("HTTP 404") => {
+                self.roles.lock().unwrap().insert(key, (now, Role::None));
+                Role::None
+            }
             Err(_) => Role::None,
-        };
-        self.roles.lock().unwrap().insert(key, (now, r));
-        r
+        }
     }
 
-    async fn sweep_one(&self, repo: &RepoId, mr: &Mr) -> Result<Vec<Event>> {
+    /// One MR's conflict/CI state. The list endpoint has no `head_pipeline`, so GET the MR.
+    async fn sweep_one(&self, repo: &RepoId, pid: u64, iid: u64) -> Result<(Vec<Event>, String)> {
+        let mr: Mr = self.api.get(&format!("/projects/{pid}/merge_requests/{iid}")).await?;
+        let mr = &mr;
         let sha = mr.sha.clone().unwrap_or_default();
         let mut out = Vec::new();
         let ev = |trigger: Trigger, body: String| Event {
@@ -356,7 +395,13 @@ impl GitLab {
             }
             out.push(ev(Trigger::CiFailure, body));
         }
-        Ok(out)
+        let status = match mr.head_pipeline.as_ref().map(|p| p.status.as_str()) {
+            Some("failed") => "red",
+            Some("success") => "green",
+            _ => "",
+        };
+        let conflict = if mr.has_conflicts { "conflict," } else { "" };
+        Ok((out, format!("{conflict}{status}")))
     }
 
     pub async fn mr(&self, repo: &RepoId, iid: u64) -> Result<PrInfo> {

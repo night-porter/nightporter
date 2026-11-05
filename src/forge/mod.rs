@@ -177,6 +177,17 @@ pub fn now_iso() -> String {
     jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// How far back each poll re-reads, to cover late indexing and clock drift.
+pub const OVERLAP_SECS: i64 = 300;
+
+/// `since` moved back by [`OVERLAP_SECS`].
+pub fn overlap(since: &str) -> String {
+    match since.parse::<jiff::Timestamp>() {
+        Ok(t) => (t - jiff::SignedDuration::from_secs(OVERLAP_SECS)).strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        Err(_) => since.to_string(),
+    }
+}
+
 /// `ts` is strictly after `since`. Parses timestamps (forges mix `Z`, offsets and fractions);
 /// falls back to string comparison if either doesn't parse.
 pub fn newer(ts: &str, since: Option<&str>) -> bool {
@@ -325,6 +336,9 @@ pub struct Cursor {
     /// Mergeable / CI status seen last sweep, per `repo#n`, so we only fire on change.
     #[serde(default)]
     pub seen_status: std::collections::BTreeMap<String, String>,
+    /// A first (record-only) sweep has happened.
+    #[serde(default)]
+    pub swept: bool,
 }
 
 #[cfg(test)]
@@ -345,6 +359,7 @@ mod tests {
         assert!(newer("2026-11-05T11:30:00.000+01:00", Some("2026-11-05T10:00:00Z")));
         assert!(!newer("2026-11-05T10:30:00.000+01:00", Some("2026-11-05T10:00:00Z")));
         assert!(newer("x", None));
+        assert_eq!(overlap("2026-11-05T10:05:00Z"), "2026-11-05T10:00:00Z");
     }
 
     #[test]

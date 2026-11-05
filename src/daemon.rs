@@ -19,7 +19,10 @@ pub struct Ctx {
     db: Mutex<Db>,
     pub forges: HashMap<(ForgeKind, String), tokio::sync::Mutex<Forge>>,
     clones: RwLock<Arc<CloneMap>>,
-    running: Mutex<HashSet<i64>>,
+    /// Jobs with a task in flight, and their repo (for per-repo limits).
+    running: Mutex<HashMap<i64, RepoId>>,
+    /// Last time a recurring warning was logged, so the 5s loop doesn't spam.
+    warned: Mutex<HashMap<String, i64>>,
 }
 
 impl Ctx {
@@ -38,6 +41,15 @@ impl Ctx {
     }
     pub fn clones(&self) -> Arc<CloneMap> {
         self.clones.read().unwrap().clone()
+    }
+    /// Log a warning at most once per `secs` for the same key.
+    pub fn warn_every(&self, key: &str, secs: i64, msg: &str) {
+        let now = crate::state::now();
+        let mut w = self.warned.lock().unwrap();
+        if w.get(key).is_none_or(|t| now - t >= secs) {
+            w.insert(key.into(), now);
+            tracing::warn!("{msg}");
+        }
     }
     pub fn notify(&self, kind: Kind, title: &str, body: &str) {
         notify::send(&self.cfg().notifications, kind, title, body);
@@ -82,7 +94,8 @@ pub async fn run(paths: Paths) -> Result<()> {
     let db = Db::open(&paths.db())?;
     let n = db.recover()?;
     if n > 0 {
-        tracing::warn!("{n} job(s) were interrupted by a restart and marked failed");
+        tracing::warn!("{n} job(s) were interrupted by a restart; their requests are queued again");
+        notify::send(&cfg.notifications, Kind::Failed, "restarted", &format!("{n} interrupted job(s) re-queued"));
     }
     let forges = connect(&cfg).await?;
     let clones = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts);
@@ -93,7 +106,8 @@ pub async fn run(paths: Paths) -> Result<()> {
         db: Mutex::new(db),
         forges,
         clones: RwLock::new(Arc::new(clones)),
-        running: Mutex::new(HashSet::new()),
+        running: Mutex::new(HashMap::new()),
+        warned: Mutex::new(HashMap::new()),
     });
 
     // Reload config when files change.
@@ -207,14 +221,17 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
             ctx.db(|d| d.set_ci_attempts(&r, n, 0))?;
         }
     }
-    ctx.db(|d| d.set_json(&ckey, &cursor))?;
-    let min = cursor.poll_interval_secs.unwrap_or(0);
     drop(forge);
+    // Intake first, cursor second: a crash in between re-reads (de-duplicated) instead of losing.
     for e in events {
-        if let Err(err) = intake(ctx, &cfg, &me, e).await {
-            tracing::warn!("intake: {err:#}");
+        if let Err(err) = intake(ctx, &cfg, &me, e.clone()).await {
+            // Keep it visible rather than dropping it (e.g. a broken repo file).
+            tracing::warn!("intake {}: {err:#}", e.id);
+            ctx.db(|d| d.add_event(&e, Disposition::Inbox, &format!("could not classify: {err:#}")).map(|_| ()))?;
         }
     }
+    ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    let min = cursor.poll_interval_secs.unwrap_or(0);
     Ok(min)
 }
 
@@ -310,7 +327,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             continue;
         }
         if ctx.db(|d| d.jobs_since(now - 86400))? >= cfg.daily_job_cap {
-            tracing::warn!("daily job cap ({}) reached; waiting", cfg.daily_job_cap);
+            ctx.warn_every("cap", 3600, &format!("daily job cap ({}) reached; waiting", cfg.daily_job_cap));
             return Ok(());
         }
         let verb = evs.iter().find_map(|(e, _)| e.verb);
@@ -356,22 +373,28 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
         if running >= cfg.max_concurrent_jobs {
             break;
         }
-        if ctx.running.lock().unwrap().contains(&j.id) {
+        if ctx.running.lock().unwrap().contains_key(&j.id) {
             continue;
         }
-        let s = cfg.settings_for(&ctx.paths, &j.repo)?;
-        let same_repo = ctx.db(|d| d.active_jobs())?.iter().filter(|a| a.repo == j.repo && a.status == JobStatus::Running).count();
+        let s = match cfg.settings_for(&ctx.paths, &j.repo) {
+            Ok(s) => s,
+            Err(e) => {
+                ctx.warn_every(&format!("settings:{}", j.repo.key()), 3600, &format!("job {} waits: {e:#}", j.id));
+                continue;
+            }
+        };
+        let same_repo = ctx.running.lock().unwrap().values().filter(|r| **r == j.repo).count();
         if j.status == JobStatus::Queued && same_repo >= s.concurrency() {
             continue;
         }
         if j.status == JobStatus::Queued {
             let free = crate::git::free_gb(&ctx.paths.worktrees_dir()).unwrap_or(u64::MAX);
             if free < cfg.min_free_gb {
-                tracing::warn!("only {free} GB free (min {}); job {} waits", cfg.min_free_gb, j.id);
+                ctx.warn_every("disk", 3600, &format!("only {free} GB free (min {}); jobs wait", cfg.min_free_gb));
                 continue;
             }
         }
-        ctx.running.lock().unwrap().insert(j.id);
+        ctx.running.lock().unwrap().insert(j.id, j.repo.clone());
         let c = ctx.clone();
         tokio::spawn(async move {
             let id = j.id;
@@ -400,7 +423,8 @@ pub async fn offline_ctx(paths: &Paths, cfg: Config) -> Result<Ctx> {
         db: Mutex::new(Db::open(&paths.db())?),
         forges,
         clones: RwLock::new(Arc::new(clones)),
-        running: Mutex::new(HashSet::new()),
+        running: Mutex::new(HashMap::new()),
+        warned: Mutex::new(HashMap::new()),
     })
 }
 
@@ -412,7 +436,8 @@ pub fn test_ctx(paths: Paths, cfg: Config, clones: CloneMap) -> Ctx {
         db: Mutex::new(Db::memory().unwrap()),
         forges: HashMap::new(),
         clones: RwLock::new(Arc::new(clones)),
-        running: Mutex::new(HashSet::new()),
+        running: Mutex::new(HashMap::new()),
+        warned: Mutex::new(HashMap::new()),
     }
 }
 

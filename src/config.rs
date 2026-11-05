@@ -360,11 +360,29 @@ impl RepoSettings {
     }
 }
 
-/// Deep-merge `over` into `base`: tables merge, everything else (including arrays) replaces.
+/// Arrays that combine (global ∪ repo) instead of being replaced: a repo file adding one trusted
+/// user must not drop the global lists, and must never be able to drop a global deny.
+const UNION: &[&str] =
+    &["trust.allow_users", "trust.deny_users", "trust.allow_teams", "trust.deny_teams", "trust.allow_bots", "checks.protected"];
+
+/// Deep-merge `over` into `base`: tables merge, [`UNION`] arrays combine, everything else
+/// (including other arrays) replaces.
 pub fn merge(base: &mut toml::Table, over: &toml::Table) {
+    merge_at(base, over, "");
+}
+
+fn merge_at(base: &mut toml::Table, over: &toml::Table, prefix: &str) {
     for (k, v) in over {
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
         match (base.get_mut(k), v) {
-            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge_at(b, o, &path),
+            (Some(toml::Value::Array(b)), toml::Value::Array(o)) if UNION.contains(&path.as_str()) => {
+                for x in o {
+                    if !b.contains(x) {
+                        b.push(x.clone());
+                    }
+                }
+            }
             _ => {
                 base.insert(k.clone(), v.clone());
             }
@@ -577,6 +595,16 @@ mod tests {
         assert_eq!(s.reply.style, "detailed-tech-lead");
         assert!(!s.reply.footer);
         assert_eq!(s.trust.allow_users, vec!["alice"]);
+    }
+
+    #[test]
+    fn trust_lists_combine() {
+        let c = Config::parse("[defaults.trust]\nallow_users = [\"alice\"]\ndeny_users = [\"mallory\"]\nroles = [\"owner\"]").unwrap();
+        let over: toml::Table = toml::from_str("[trust]\nallow_users = [\"carol\"]\ndeny_users = []\nroles = [\"maintainer\"]").unwrap();
+        let s = c.resolve(Some(&over)).unwrap();
+        assert_eq!(s.trust.allow_users, vec!["alice", "carol"]);
+        assert_eq!(s.trust.deny_users, vec!["mallory"], "a repo can't drop a global deny");
+        assert_eq!(s.trust.roles, vec![crate::forge::Role::Maintainer], "other arrays still replace");
     }
 
     #[test]

@@ -55,7 +55,10 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`) |
 
-Arrays replace rather than merge: a repo's `allow_users` replaces the default list.
+Arrays in a repo file replace the default, except the trust lists (`allow_users`,
+`deny_users`, `allow_teams`, `deny_teams`, `allow_bots`) and `checks.protected`, which combine
+with the global ones. A repo file can add trusted people or protected paths but can't remove a
+global deny.
 
 ## Limits that config cannot change
 

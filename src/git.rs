@@ -56,6 +56,8 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
         if let Some(p) = wt.parent() {
             std::fs::create_dir_all(p)?;
         }
+        // A worktree dir deleted by hand leaves stale metadata that blocks `add`.
+        git(clone, &["worktree", "prune"]).await?;
         git(clone, &["worktree", "add", "--quiet", "-B", branch, &wt.to_string_lossy(), &sha]).await?;
     }
     let gitfile = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
@@ -84,6 +86,12 @@ pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()
     git(clone, &["branch", "-D", branch]).await.ok();
     git(clone, &["update-ref", "-d", &format!("refs/nightporter/{}", branch.replace('/', "-"))]).await.ok();
     Ok(())
+}
+
+/// The remote branch's current SHA, or `None` if it doesn't exist.
+pub async fn remote_head(clone: &Path, url: &str, branch: &str) -> Result<Option<String>> {
+    let out = git(clone, &["ls-remote", "--end-of-options", url, &format!("refs/heads/{branch}")]).await?;
+    Ok(out.split_whitespace().next().map(String::from))
 }
 
 /// Push exactly `sha` from the clone (not the worktree). Never forced: a non-fast-forward is

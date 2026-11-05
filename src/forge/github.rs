@@ -160,7 +160,8 @@ impl GitHub {
     }
 
     pub async fn poll(&mut self, cur: &mut Cursor) -> Result<Vec<Event>> {
-        let since = cur.since.clone();
+        // Overlapping window: forges index late and clocks drift. Repeats are de-duplicated.
+        let since = cur.since.as_deref().map(super::overlap);
         let mut path = "/notifications?all=true&per_page=50".to_string();
         if let Some(s) = &since {
             path.push_str(&format!("&since={s}"));
@@ -169,25 +170,37 @@ impl GitHub {
         let mut out = Vec::new();
         match self.api.get_cond::<Vec<Thread>>(&path, cur.last_modified.as_deref()).await? {
             Got::NotModified => {}
-            Got::Fresh(threads, headers) => {
-                cur.last_modified = headers.get("last-modified").and_then(|v| v.to_str().ok()).map(String::from);
+            Got::Fresh(mut threads, headers) => {
                 cur.poll_interval_secs = headers.get("x-poll-interval").and_then(|v| v.to_str().ok()?.parse().ok());
-                // ponytail: first page only (50 threads per poll interval); paginate if anyone gets more.
-                for t in threads {
-                    if !self.subscribed.contains(&t.repository.full_name) {
-                        continue;
-                    }
-                    if let Err(e) = self.thread_events(&t, since.as_deref(), &mut out).await {
-                        tracing::warn!("{}: {e:#}", t.repository.full_name);
+                let mut next = crate::http::next_link(&headers);
+                for _ in 0..10 {
+                    let Some(p) = next.take() else { break };
+                    if let Got::Fresh(more, h) = self.api.get_cond::<Vec<Thread>>(&p, None).await? {
+                        threads.extend(more);
+                        next = crate::http::next_link(&h);
                     }
                 }
-                cur.since = Some(started.clone());
+                let mut failed = false;
+                for t in threads.iter().filter(|t| self.subscribed.contains(&t.repository.full_name)) {
+                    if let Err(e) = self.thread_events(t, since.as_deref(), &mut out).await {
+                        tracing::warn!("{}: {e:#}", t.repository.full_name);
+                        failed = true;
+                    }
+                }
+                // Only move the window forward when everything was read; otherwise retry it.
+                if !failed {
+                    cur.last_modified = headers.get("last-modified").and_then(|v| v.to_str().ok()).map(String::from);
+                    cur.since = Some(started);
+                }
             }
         }
         let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= self.sweep_every.as_secs() as i64);
         if due {
             cur.last_sweep = Some(crate::state::now());
-            out.extend(self.sweep(cur).await?);
+            match self.sweep(cur).await {
+                Ok(evs) => out.extend(evs),
+                Err(e) => tracing::warn!("sweep: {e:#}"),
+            }
         }
         Ok(out)
     }
@@ -214,7 +227,7 @@ impl GitHub {
         tracing::debug!("{r}#{number} reason={} updated={}", t.reason, t.updated_at);
 
         // Conversation comments (PRs and issues).
-        let comments: Vec<Comment> = self.api.get(&format!("/repos/{r}/issues/{number}/comments?per_page=100{since_q}")).await?;
+        let comments: Vec<Comment> = self.api.get_all(&format!("/repos/{r}/issues/{number}/comments?per_page=100{since_q}"), 10).await?;
         for c in comments.into_iter().filter(|c| after(&c.created_at)) {
             let verb = parse_command(&c.body);
             if !mine && verb.is_none() {
@@ -224,14 +237,14 @@ impl GitHub {
         }
 
         if target == Target::Pr && mine {
-            let rc: Vec<Comment> = self.api.get(&format!("/repos/{r}/pulls/{number}/comments?per_page=100{since_q}")).await?;
+            let rc: Vec<Comment> = self.api.get_all(&format!("/repos/{r}/pulls/{number}/comments?per_page=100{since_q}"), 10).await?;
             for c in rc.into_iter().filter(|c| after(&c.created_at)) {
                 let thread = Some(c.in_reply_to_id.unwrap_or(c.id).to_string());
                 let mut e = self.event(&repo, target, number, Trigger::ReviewComment, format!("gh-{}-rc-{}", self.host, c.id), c, None);
                 e.thread = thread;
                 out.push(e);
             }
-            let reviews: Vec<Review> = self.api.get(&format!("/repos/{r}/pulls/{number}/reviews?per_page=100")).await?;
+            let reviews: Vec<Review> = self.api.get_all(&format!("/repos/{r}/pulls/{number}/reviews?per_page=100"), 20).await?;
             for rv in reviews {
                 let Some(at) = rv.submitted_at.clone() else { continue };
                 // Approvals without text need no action; empty COMMENTED reviews are just
@@ -265,7 +278,7 @@ impl GitHub {
 
         // Maintainer label requests (on issues or others' PRs).
         if !mine && let Some(label) = self.labels.get(r) {
-            let evs: Vec<IssueEvent> = self.api.get(&format!("/repos/{r}/issues/{number}/events?per_page=100")).await?;
+            let evs: Vec<IssueEvent> = self.api.get_all(&format!("/repos/{r}/issues/{number}/events?per_page=100"), 10).await?;
             for ev in evs.into_iter().filter(|e| e.event == "labeled" && after(&e.created_at)) {
                 let (Some(l), Some(actor)) = (&ev.label, &ev.actor) else { continue };
                 if !l.name.eq_ignore_ascii_case(label) {
@@ -351,15 +364,34 @@ impl GitHub {
 
     /// Slow sweep of the user's open PRs: merge conflicts and failing CI.
     /// Events are keyed by head SHA so each state fires once per push.
+    /// The first sweep after install only records state, so PRs that were already red or
+    /// conflicted don't all start jobs at once.
     async fn sweep(&self, cur: &mut Cursor) -> Result<Vec<Event>> {
         let mut out = Vec::new();
         for (repo, n) in self.my_open().await? {
             if !self.subscribed.contains(&repo.path) {
                 continue;
             }
+            match self.sweep_pr(&repo, n).await {
+                Ok((evs, status)) => {
+                    if cur.swept {
+                        out.extend(evs);
+                    }
+                    cur.seen_status.insert(format!("{}#{n}", repo.key()), status);
+                }
+                Err(e) => tracing::warn!("sweep {repo}#{n}: {e:#}"),
+            }
+        }
+        cur.swept = true;
+        Ok(out)
+    }
+
+    async fn sweep_pr(&self, repo: &RepoId, n: u64) -> Result<(Vec<Event>, String)> {
+        let mut out = Vec::new();
+        {
             let r = &repo.path;
+            let repo = repo.clone();
             let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{n}")).await?;
-            let key = format!("{}#{n}", repo.key());
             let mut status = Vec::new();
             if p.mergeable_state.as_deref() == Some("dirty") {
                 status.push("conflict".to_string());
@@ -410,9 +442,8 @@ impl GitHub {
                 }
                 out.push(self.state_event(&repo, n, Trigger::CiFailure, &p.head.sha, body));
             }
-            cur.seen_status.insert(key, status.join(","));
+            Ok((out, status.join(",")))
         }
-        Ok(out)
     }
 
     fn state_event(&self, repo: &RepoId, n: u64, trigger: Trigger, sha: &str, body: String) -> Event {
