@@ -166,6 +166,11 @@ pub struct RepoSettings {
     pub max_concurrent: Option<usize>,
     #[serde(default = "three_u32")]
     pub max_ci_attempts: u32,
+    /// Let CI-failure jobs run at `auto`. CI output is text from builds and tools that may print
+    /// anything (including a stranger's test names or logs), so by default those jobs stop at
+    /// `draft` and wait for you.
+    #[serde(default)]
+    pub ci_auto: bool,
     #[serde(default = "thirty_min", with = "dur")]
     pub timeout: Duration,
     #[serde(default)]
@@ -178,6 +183,10 @@ pub struct RepoSettings {
     /// Domains sandboxed commands may reach (none by default).
     #[serde(default)]
     pub sandbox_domains: Vec<String>,
+    /// Extra paths under your home folder that sandboxed commands may read (on top of the
+    /// worktree and common toolchain folders). `["~/"]` lifts the home-folder restriction.
+    #[serde(default)]
+    pub sandbox_read_allow: Vec<String>,
     /// Extra instructions file (your own, outside the repo).
     #[serde(default)]
     pub prompt: Option<String>,

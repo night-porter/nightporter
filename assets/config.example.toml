@@ -36,6 +36,8 @@ level = "draft"             # observe | suggest | draft | auto
 triggers = ["review_comment", "review", "comment", "ci_failure", "merge_conflict"]
 debounce = "2m"
 max_ci_attempts = 3
+# CI-failure jobs stop at draft unless you set this (CI output is untrusted text).
+# ci_auto = false
 timeout = "30m"
 # max_budget_usd = 2.0      # Claude Code only
 sandbox = true              # Claude Code OS sandbox for agent commands; fails closed

@@ -114,7 +114,10 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
             j.meta.push_url = url.clone();
             j.meta.push_ref = pr.head_ref.clone();
             j.meta.base = pr.base_ref.clone();
-            j.meta.untrusted_code = verb.is_some() && !pr.author.eq_ignore_ascii_case(&me);
+            // Someone else's code: a maintainer request on their PR, or your PR whose head branch
+            // lives in someone else's fork.
+            j.meta.untrusted_code =
+                (verb.is_some() && !pr.author.eq_ignore_ascii_case(&me)) || foreign_fork(&pr.head_repo_https, &j.repo.path, &me);
             let r = format!("refs/heads/{}", pr.head_ref);
             (Some(pr), url, r)
         }
@@ -151,7 +154,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
                 "--no-tags",
                 "--end-of-options",
                 &repo_url,
-                &format!("+refs/heads/{}:refs/nightporter/base", j.meta.base),
+                &format!("+refs/heads/{}:{}", j.meta.base, git::base_ref(&branch)),
             ],
         )
         .await?;
@@ -161,7 +164,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     // .opencode plugins) and build scripts. Nothing runs on it until the user approves this exact
     // head; a new push needs a new approval.
     if j.meta.untrusted_code {
-        j.meta.build_files = changed_build_files(&clone, &repo_url, &j.meta.base, &j.head_before).await;
+        j.meta.build_files = changed_build_files(&clone, &repo_url, &j.meta.base, &git::base_ref(&branch), &j.head_before).await;
         if !j.meta.run_approved || j.meta.run_approved_head != j.head_before {
             j.meta.run_approved = false;
             j.meta.run_approved_head = j.head_before.clone();
@@ -589,16 +592,21 @@ async fn default_branch(clone: &Path, url: &str) -> Result<String> {
         .context("no default branch")
 }
 
+/// The head repo (from its https clone URL) is a fork that isn't the base repo and isn't yours.
+fn foreign_fork(head_https: &str, base_path: &str, me: &str) -> bool {
+    let path = head_https.split_once("://").and_then(|(_, r)| r.split_once('/')).map(|(_, p)| p.trim_end_matches(".git")).unwrap_or("");
+    if path.is_empty() || path.eq_ignore_ascii_case(base_path) {
+        return false;
+    }
+    !path.split('/').next().unwrap_or("").eq_ignore_ascii_case(me)
+}
+
 /// Files on an untrusted head (vs its base) that can run code or steer the agent.
-async fn changed_build_files(clone: &Path, url: &str, base: &str, head: &str) -> Vec<String> {
-    if git(clone, &["fetch", "--quiet", "--no-tags", "--end-of-options", url, &format!("+refs/heads/{base}:refs/nightporter/base")])
-        .await
-        .is_err()
-    {
+async fn changed_build_files(clone: &Path, url: &str, base: &str, base_ref: &str, head: &str) -> Vec<String> {
+    if git(clone, &["fetch", "--quiet", "--no-tags", "--end-of-options", url, &format!("+refs/heads/{base}:{base_ref}")]).await.is_err() {
         return vec!["(could not compare with base; treat everything as changed)".into()];
     }
-    let names =
-        git(clone, &["diff", "--name-only", "-z", "--no-renames", &format!("refs/nightporter/base...{head}")]).await.unwrap_or_default();
+    let names = git(clone, &["diff", "--name-only", "-z", "--no-renames", &format!("{base_ref}...{head}")]).await.unwrap_or_default();
     names
         .split('\0')
         .filter(|p| !p.is_empty())
@@ -744,6 +752,15 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("compose.yaml")).unwrap(), "services: {}\n");
         // Only env files are touched: the agent's real work stays.
         assert_eq!(std::fs::read_to_string(wt.join("src.rs")).unwrap(), "fn main() { changed() }\n");
+    }
+
+    #[test]
+    fn foreign_fork_heads_count_as_untrusted() {
+        assert!(!foreign_fork("https://github.com/acme/api.git", "acme/api", "me"), "same repo");
+        assert!(!foreign_fork("https://github.com/Me/api.git", "acme/api", "me"), "my own fork");
+        assert!(foreign_fork("https://github.com/mallory/api.git", "acme/api", "me"), "someone else's fork");
+        assert!(foreign_fork("https://gitlab.example.com/mallory/sub/api.git", "group/api", "me"));
+        assert!(!foreign_fork("", "acme/api", "me"), "unknown head repo: rely on the author rule");
     }
 
     #[test]

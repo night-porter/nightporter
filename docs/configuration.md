@@ -49,10 +49,12 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
 | `max_concurrent` | unlimited | running jobs for this repo |
 | `max_ci_attempts` | `3` | automatic CI-fix attempts before giving up (reset when CI goes green) |
+| `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
 | `sandbox` | `true` | Claude Code's OS sandbox for the agent's shell commands (Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux). Fails closed. Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
 | `sandbox_domains` | `[]` | domains sandboxed commands may reach |
+| `sandbox_read_allow` | `[]` | extra folders in your home folder that sandboxed commands may read, e.g. `["~/.config/mytool"]`; `["~/"]` lifts the home-folder restriction. The worktree and common toolchain folders (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache`, …) are always readable. |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
 | `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |

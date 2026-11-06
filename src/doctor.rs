@@ -134,6 +134,9 @@ pub fn run(paths: &Paths) -> bool {
             });
         }
     }
+    if let Some(c) = claude_user_settings_check() {
+        checks.push(c);
+    }
     let running = paths.daemon_running();
     checks.push(Check {
         name: "daemon".into(),
@@ -145,6 +148,39 @@ pub fn run(paths: &Paths) -> bool {
 
     print(&checks);
     checks.iter().all(|c| c.ok || c.optional)
+}
+
+/// Your own Claude Code settings also load for Night Porter's jobs (hooks are switched off, and
+/// Night Porter's denies always win). Broad allow rules or plugins widen what the unattended
+/// agent may do, so say so.
+fn claude_user_settings_check() -> Option<Check> {
+    let dir =
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).or_else(|| std::env::home_dir().map(|h| h.join(".claude")))?;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).ok()?).ok()?;
+    Some(claude_settings_finding(&v))
+}
+
+fn claude_settings_finding(v: &serde_json::Value) -> Check {
+    let allows = v["permissions"]["allow"].as_array().map_or(0, Vec::len);
+    let plugins = v["enabledPlugins"].as_object().map_or(0, |m| m.values().filter(|x| x.as_bool() == Some(true)).count());
+    let mut found = Vec::new();
+    if allows > 0 {
+        found.push(format!("{allows} allow rule(s)"));
+    }
+    if plugins > 0 {
+        found.push(format!("{plugins} plugin(s)"));
+    }
+    Check {
+        name: "claude settings".into(),
+        ok: found.is_empty(),
+        optional: true,
+        detail: if found.is_empty() {
+            "no extra allows or plugins".into()
+        } else {
+            format!("~/.claude/settings.json has {} that also apply to jobs", found.join(" and "))
+        },
+        fix: "keep personal allow rules narrow; see https://docs.night-porter.com/threat-model".into(),
+    }
 }
 
 /// Text markers, not colour, so it reads the same in any terminal or screen reader.
@@ -178,4 +214,15 @@ pub fn walk_repo_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn flags_personal_claude_allows_and_plugins() {
+        let v = serde_json::json!({"permissions": {"allow": ["Bash(npm:*)"]}, "enabledPlugins": {"x@y": true, "z@y": false}});
+        let c = super::claude_settings_finding(&v);
+        assert!(!c.ok && c.optional && c.detail.contains("1 allow rule(s) and 1 plugin(s)"), "{}", c.detail);
+        assert!(super::claude_settings_finding(&serde_json::json!({})).ok);
+    }
 }

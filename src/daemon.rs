@@ -294,7 +294,8 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
         trust::Decision::Denied => (Disposition::Dropped, "denied".into()),
     };
     let new = ctx.db(|d| d.add_event(&e, disp, &reason))?;
-    if new && disp == Disposition::Inbox {
+    // One notification per waiting author, not one per comment (a stranger can post a lot).
+    if new && disp == Disposition::Inbox && ctx.db(|d| d.inbox_count(&e.repo, &e.author))? == 1 {
         ctx.notify(
             Kind::NewAuthor,
             &format!("@{} on {}#{}", e.author, e.repo, e.number),
@@ -358,6 +359,8 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             Mode::MyPrs => s.level,
             Mode::Maintainer => s.maintainer.level,
         };
+        // CI output is untrusted text: such jobs wait for you unless the repo opts in.
+        let level = if !s.ci_auto && evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure) { level.min(Level::Draft) } else { level };
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
@@ -531,6 +534,20 @@ mod tests {
         intake(&ctx, &cfg, "me", ev(&repo, "5", "me", Role::Owner, Trigger::CiFailure)).await.unwrap();
         dispatch(&ctx).unwrap();
         assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ci_failure_jobs_stop_at_draft_unless_opted_in() {
+        for (toml, want) in
+            [("subscribed = true\nlevel = \"auto\"", Level::Draft), ("subscribed = true\nlevel = \"auto\"\nci_auto = true", Level::Auto)]
+        {
+            let (_d, ctx, repo) = setup(toml);
+            let cfg = ctx.cfg();
+            intake(&ctx, &cfg, "me", ev(&repo, "1", "me", Role::Owner, Trigger::CiFailure)).await.unwrap();
+            dispatch(&ctx).unwrap();
+            let jobs = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+            assert_eq!(jobs[0].level, want.as_str(), "{toml}");
+        }
     }
 
     #[tokio::test]

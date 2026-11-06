@@ -92,6 +92,12 @@ pub fn verify_gitfile(wt: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where a PR's base branch is fetched for merges and comparisons. One per PR, so concurrent jobs
+/// in the same clone never see each other's base.
+pub fn base_ref(branch: &str) -> String {
+    format!("refs/nightporter/base-{}", branch.replace('/', "-"))
+}
+
 pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()> {
     if wt.exists() {
         git(clone, &["worktree", "remove", "--force", &wt.to_string_lossy()]).await.ok();
@@ -102,6 +108,7 @@ pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()
     git(clone, &["worktree", "prune"]).await.ok();
     git(clone, &["branch", "-D", branch]).await.ok();
     git(clone, &["update-ref", "-d", &format!("refs/nightporter/{}", branch.replace('/', "-"))]).await.ok();
+    git(clone, &["update-ref", "-d", &base_ref(branch)]).await.ok();
     Ok(())
 }
 

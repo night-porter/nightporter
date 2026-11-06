@@ -59,6 +59,61 @@ const SECRET_PATHS: &[&str] = &[
     "~/Library/Keychains/**",
 ];
 
+/// Folders under `~` that sandboxed commands may read: git identity and the usual toolchains and
+/// package caches. Everything else in your home folder is off limits to the agent's commands.
+const TOOLCHAIN_READS: &[&str] = &[
+    "~/.claude/shell-snapshots",
+    "~/.cargo",
+    "~/.rustup",
+    "~/.npm",
+    "~/.nvm",
+    "~/.volta",
+    "~/.fnm",
+    "~/.bun",
+    "~/.deno",
+    "~/.yarn",
+    "~/.pnpm-store",
+    "~/Library/pnpm",
+    "~/.local/share/pnpm",
+    "~/.cache",
+    "~/Library/Caches",
+    "~/go",
+    "~/.composer",
+    "~/.config/composer",
+    "~/.pyenv",
+    "~/.local/bin",
+    "~/.local/lib",
+    "~/.local/share/mise",
+    "~/.asdf",
+    "~/.sdkman",
+    "~/.gradle",
+    "~/.m2",
+    "~/.rbenv",
+    "~/.gem",
+    "~/.dotnet",
+    "~/.nuget",
+];
+
+/// Credential files inside the allowed toolchain folders: still denied.
+const TOOLCHAIN_SECRETS: &[&str] = &[
+    "~/.cargo/credentials",
+    "~/.cargo/credentials.toml",
+    "~/.composer/auth.json",
+    "~/.config/composer/auth.json",
+    "~/.gradle/gradle.properties",
+    "~/.m2/settings.xml",
+    "~/.m2/settings-security.xml",
+    "~/.gem/credentials",
+];
+
+/// The git dir shared by the clone and its worktrees (`<clone>/.git`), read from `wt/.git`.
+/// Sandboxed `git` needs it; it's the same repository the agent is working on.
+fn common_git_dir(wt: &Path) -> Option<std::path::PathBuf> {
+    let text = std::fs::read_to_string(wt.join(".git")).ok()?;
+    let dir = Path::new(text.trim_end().strip_prefix("gitdir: ")?);
+    Some(dir.parent()?.parent()?.to_path_buf())
+}
+
 /// Night Porter's own files the agent must not read: other jobs' prompts and diffs, the state db,
 /// the log and the config. Built from the real paths (they move with XDG dirs and
 /// `NIGHTPORTER_HOME`); worktrees, where the agent works, stay readable. `//` = absolute path.
@@ -88,7 +143,31 @@ fn is_model_key(k: &str) -> bool {
 /// Environment for the user's env hooks (setup/teardown/cleanup): the agent's, minus model
 /// credentials. Those commands run outside the sandbox and can read repo-controlled files.
 pub fn hook_env(job_dir: &Path) -> Vec<(String, String)> {
-    agent_env(job_dir).into_iter().filter(|(k, _)| !is_model_key(k)).collect()
+    agent_env(job_dir).into_iter().filter(|(k, _)| !is_model_key(k) && k != "GIT_CONFIG_GLOBAL").collect()
+}
+
+/// The agent's own global git config: just the name and email you'd commit with in this repo
+/// (including `includeIf` rules). Your real `~/.gitconfig` (credential helpers, URL rewrites,
+/// includes) stays out of the sandbox's reach.
+fn write_agent_git_config(job_dir: &Path, wt: &Path) {
+    let dir = job_dir.join("git");
+    let repo = common_git_dir(wt).and_then(|d| d.parent().map(Path::to_path_buf)).unwrap_or_else(|| wt.to_path_buf());
+    let get = |k: &str| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--get", k])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let quote = |v: String| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join("config"),
+        format!("[user]\n\tname = {}\n\temail = {}\n[commit]\n\tgpgsign = false\n", quote(get("user.name")), quote(get("user.email"))),
+    );
 }
 
 /// Environment for the agent: everything from ours minus credentials, plus hardening.
@@ -112,6 +191,7 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
     let empty = job_dir.join("empty-config");
     let _ = std::fs::create_dir_all(&empty);
     let e = empty.to_string_lossy().to_string();
+    let git_cfg = job_dir.join("git").join("config").to_string_lossy().to_string();
     env.extend(
         [
             ("GH_CONFIG_DIR", e.as_str()),
@@ -129,6 +209,7 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
             ("GIT_CONFIG_VALUE_1", "/dev/null"),
             ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
             ("GIT_CONFIG_VALUE_2", "false"),
+            ("GIT_CONFIG_GLOBAL", git_cfg.as_str()),
             ("NIGHTPORTER_JOB", "1"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string())),
@@ -137,7 +218,7 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
 }
 
 /// Claude Code settings: allow-list tools, deny pushes/network/forge CLIs and protected paths.
-pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
+pub fn claude_settings(s: &RepoSettings, wt: &Path, job_dir: &Path, read_only: bool) -> serde_json::Value {
     let mut allow: Vec<String> = ["Read", "Glob", "Grep", "LS", "TodoWrite"].map(String::from).to_vec();
     let git = GIT_ALLOWED.iter().copied().filter(|c| !read_only || !WRITE_GIT.contains(c));
     allow.extend(git.chain(s.allow_commands.iter().map(String::as_str)).map(|c| format!("Bash({c}:*)")));
@@ -157,7 +238,13 @@ pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
         deny.push(format!("Edit({g})"));
         deny.push(format!("Write({g})"));
     }
-    let mut v = json!({ "permissions": { "allow": allow, "deny": deny }, "enableAllProjectMcpServers": false });
+    // The file tools only read inside the worktree; your own Claude hooks don't run for Night
+    // Porter's unattended jobs.
+    let mut v = json!({
+        "permissions": { "allow": allow, "deny": deny, "blockReadsOutsideWorkingDirectories": true },
+        "enableAllProjectMcpServers": false,
+        "disableAllHooks": true
+    });
     if s.sandbox {
         // Fail closed: no sandbox → Claude Code exits and the job fails visibly. Read denies
         // above are merged into the sandbox, so they also bind the agent's shell commands.
@@ -165,6 +252,15 @@ pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
         if !s.sandbox_domains.is_empty() {
             sb["network"] = json!({ "allowedDomains": s.sandbox_domains });
         }
+        // Commands can't read your home folder, apart from the worktree, its git dir, the
+        // toolchain folders and what you allow. A narrower deny still wins inside an allow.
+        let mut allow_read: Vec<String> = vec![wt.to_string_lossy().into()];
+        allow_read.extend(common_git_dir(wt).map(|d| d.to_string_lossy().to_string()));
+        allow_read.push(job_dir.join("git").to_string_lossy().into());
+        allow_read.extend(TOOLCHAIN_READS.iter().map(|p| p.to_string()));
+        allow_read.extend(s.sandbox_read_allow.iter().cloned());
+        let deny_read: Vec<String> = std::iter::once("~/".to_string()).chain(TOOLCHAIN_SECRETS.iter().map(|p| p.to_string())).collect();
+        sb["filesystem"] = json!({ "denyRead": deny_read, "allowRead": allow_read });
         v["sandbox"] = sb;
     }
     v
@@ -198,6 +294,7 @@ pub fn opencode_config(s: &RepoSettings, read_only: bool) -> serde_json::Value {
 pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, prompt: &str, read_only: bool) -> Result<Outcome> {
     std::fs::create_dir_all(job_dir)?;
     std::fs::write(job_dir.join("prompt.md"), prompt)?;
+    write_agent_git_config(job_dir, wt);
     let bin = std::env::var("NIGHTPORTER_AGENT_BIN").unwrap_or_else(|_| kind.bin().into());
     let mut cmd = Command::new(&bin);
     cmd.current_dir(wt).env_clear().envs(agent_env(job_dir)).kill_on_drop(true).stdin(std::process::Stdio::null());
@@ -208,12 +305,14 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
     match kind {
         AgentKind::Claude => {
             let settings = job_dir.join("claude-settings.json");
-            std::fs::write(&settings, serde_json::to_vec_pretty(&claude_settings(s, read_only))?)?;
+            std::fs::write(&settings, serde_json::to_vec_pretty(&claude_settings(s, wt, job_dir, read_only))?)?;
             // `--setting-sources user`: ignore the repo's own .claude/settings*.json (hooks,
             // permission allows) which an untrusted branch could plant.
+            // The prompt goes in on stdin: not visible in `ps`, and no argv size limit.
+            cmd.stdin(std::process::Stdio::piped());
             cmd.args([
                 "-p",
-                prompt,
+                "Follow the instructions given on standard input.",
                 "--output-format",
                 "json",
                 "--permission-mode",
@@ -235,11 +334,18 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
         }
     }
     cmd.args(&s.agent_args);
-    let child = cmd
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("start `{bin}` (is it installed?)"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let p = prompt.to_string();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(p.as_bytes()).await;
+        });
+    }
     let pid = child.id();
     let res = tokio::time::timeout(s.timeout, child.wait_with_output()).await;
     kill_group(pid);
@@ -337,18 +443,31 @@ mod tests {
     #[test]
     fn claude_settings_deny_push_and_protect() {
         let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
-        let v = claude_settings(&s, false).to_string();
+        let v = claude_settings(&s, Path::new("/w"), Path::new("/j"), false).to_string();
         assert!(v.contains("Bash(git push:*)") && v.contains("Edit(.github/workflows/**)") && v.contains("WebFetch"));
         assert!(v.contains("Bash(git commit:*)") && v.contains("Read(~/.ssh/**)"));
         assert!(!v.contains("Bash(git log:*)"), "git log accepts --output");
-        let sb = &claude_settings(&s, false)["sandbox"];
+        let sb = &claude_settings(&s, Path::new("/w"), Path::new("/j"), false)["sandbox"];
         assert_eq!(
             (sb["enabled"].as_bool(), sb["failIfUnavailable"].as_bool(), sb["allowUnsandboxedCommands"].as_bool()),
             (Some(true), Some(true), Some(false))
         );
         let off = crate::config::Config::parse("[defaults]\nsandbox = false").unwrap().resolve(None).unwrap();
-        assert!(claude_settings(&off, false).get("sandbox").is_none());
-        let ro = claude_settings(&s, true);
+        assert!(claude_settings(&off, Path::new("/w"), Path::new("/j"), false).get("sandbox").is_none());
+        let fs = &claude_settings(&s, Path::new("/w"), Path::new("/j"), false)["sandbox"]["filesystem"];
+        assert_eq!(fs["denyRead"][0], "~/", "home folder closed to commands by default");
+        assert!(
+            fs["allowRead"].to_string().contains("\"/w\"")
+                && fs["allowRead"].to_string().contains("~/.cargo")
+                && fs["allowRead"].to_string().contains("/j/git")
+        );
+        assert!(fs["denyRead"].to_string().contains("~/.cargo/credentials.toml"), "secrets inside allowed toolchains stay denied");
+        let v = claude_settings(&s, Path::new("/w"), Path::new("/j"), false);
+        assert_eq!(
+            (v["disableAllHooks"].as_bool(), v["permissions"]["blockReadsOutsideWorkingDirectories"].as_bool()),
+            (Some(true), Some(true))
+        );
+        let ro = claude_settings(&s, Path::new("/w"), Path::new("/j"), true);
         let allow = ro["permissions"]["allow"].to_string();
         assert!(!allow.contains("git commit") && !allow.contains("\"Edit\""));
     }

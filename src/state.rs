@@ -207,6 +207,16 @@ impl Db {
 
     // ---- events ----
     /// Insert if new. Returns false when the event was already seen.
+    /// How many events from `author` on `repo` are waiting in the inbox.
+    pub fn inbox_count(&self, repo: &RepoId, author: &str) -> Result<usize> {
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM events WHERE disposition = 'inbox' AND repo = ?1 AND author = ?2 COLLATE NOCASE",
+            params![repo.key(), author],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     pub fn add_event(&self, e: &Event, d: Disposition, reason: &str) -> Result<bool> {
         let n = self.0.execute(
             "INSERT OR IGNORE INTO events(id,repo,target,number,author,disposition,reason,seen_at,json)
@@ -407,7 +417,7 @@ impl Db {
         let cutoff = now() - retention_days as i64 * 86400;
         self.0.execute("DELETE FROM job_log WHERE ts < ?1", [cutoff])?;
         self.0.execute("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ('done','failed','rejected','ready')", [cutoff])?;
-        self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped')", [cutoff])?;
+        self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped','inbox')", [cutoff])?;
         Ok(())
     }
 }

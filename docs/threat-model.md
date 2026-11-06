@@ -49,6 +49,8 @@ security boundary is, and which protections cannot be turned off.
   clearly marked `UNTRUSTED` blocks, and the job's autonomy is capped at `draft`.
 - `trust.open = true` (accept anyone) is capped at `suggest`, so nothing is posted or pushed
   automatically.
+- Jobs triggered by failing CI stop at `draft` (unless `ci_auto = true`): CI output is text from
+  builds and tools that a PR's code or a third-party check can control.
 - Team rules read every page of a team's members. If a `deny_teams` lookup fails, the author goes
   to the inbox instead of being trusted.
 
@@ -64,7 +66,15 @@ security boundary is, and which protections cannot be turned off.
   Porter's own config, state database, log and other jobs' files, and only
   allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
 - Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
-  permission allows) is ignored.
+  permission allows) is ignored. Your own `~/.claude/settings.json` still loads (that's where
+  your login comes from), but hooks are switched off for jobs (`disableAllHooks`) and Night
+  Porter's denies always win over your allows. Your personal allow rules and plugins do apply:
+  keep them narrow. `nightporter doctor` warns when you have any.
+- The file tools can't read outside the worktree (`blockReadsOutsideWorkingDirectories`), and
+  sandboxed commands can't read your home folder except the worktree, its git dir and common
+  toolchain folders (`sandbox_read_allow` adds more). The agent's git uses its own config with
+  only your name and email.
+- The prompt reaches Claude Code on stdin, not as a command-line argument (visible in `ps`).
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
@@ -72,7 +82,7 @@ security boundary is, and which protections cannot be turned off.
   to commands. It fails closed: if the sandbox can't start, the job fails. Verified in headless
   `-p` mode on macOS (2026-11-05): an allowed `cat` of a read-denied path fails with
   "Operation not permitted" (`cargo test real_agent_smoke -- --ignored`).
-- Gaps: OpenCode has no sandbox and no read denies, and repos with `sandbox = false` (e.g. for
+- Gaps: OpenCode has no sandbox and no read denies (and its prompt is still an argument), and repos with `sandbox = false` (e.g. for
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
 - The agent can't redirect the daemon's git: the worktree's `.git` pointer is recorded before the
@@ -107,7 +117,9 @@ Any job on a branch you didn't write (any maintainer request on someone else's P
 `reproduce` that runs an environment or allowed commands, needs
 your approval **before the agent starts at all**: the branch can carry agent configuration
 (CLAUDE.md, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
-saw; if they push again, Night Porter asks again. `reproduce` jobs that may run commands need
+saw; if they push again, Night Porter asks again. The same applies to your own PR when its head
+branch lives in someone else's fork. Commits someone else pushed to your own branch are not
+detected. `reproduce` jobs that may run commands need
 the same approval. The TUI shows
 which build files changed (`composer.json`, `package.json`, `Makefile`, CI files) before you
 approve. Environment commands only ever come from your own config, never from the repository.

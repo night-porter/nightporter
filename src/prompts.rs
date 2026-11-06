@@ -93,7 +93,9 @@ pub fn build(i: &Input) -> Result<String> {
 
     let step_name = step_for(i.events, i.verb, i.is_issue);
     p.push_str("\n## Task\n");
-    p.push_str(step(step_name).unwrap_or_default());
+    // The conflict step names the base ref; each PR has its own (see `git::base_ref`).
+    let base_ref = i.pr.map(|pr| crate::git::base_ref(&crate::git::branch_name(crate::forge::Target::Pr, pr.number))).unwrap_or_default();
+    p.push_str(&step(step_name).unwrap_or_default().replace("refs/nightporter/base", &base_ref));
     for extra in i.pack_prompts {
         p.push('\n');
         p.push_str(extra);

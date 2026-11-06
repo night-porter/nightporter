@@ -2,7 +2,8 @@
 # Stand-in for `claude -p ... --output-format json`. Makes a predictable commit and replies to
 # every event id found in the prompt. Pass `--leak` (via agent_args) to add a fake token.
 set -e
-prompt="$2"
+# The prompt arrives on stdin (like `claude -p` reading standard input).
+prompt="$(cat)"
 echo "stub change" >> stub.txt
 case " $* " in *" --leak "*) leak=1;; esac
 if [ -n "$leak" ]; then echo 'token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"' >> stub.txt; fi

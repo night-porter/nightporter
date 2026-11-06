@@ -103,6 +103,19 @@ prompt = "prompts/house-style.md"               # relative to the config dir
 With Claude Code, every shell command the agent runs goes in the OS sandbox (Seatbelt on macOS,
 bubblewrap on Linux). If the sandbox can’t start, the job doesn’t run.
 
+Commands can't read your home folder, apart from the worktree and common toolchain folders
+(`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache` and similar).
+Credential files inside those (`~/.cargo/credentials.toml`, `~/.composer/auth.json`, …) stay
+blocked. If a build needs something else, allow that folder:
+
+```toml
+[defaults]
+sandbox_read_allow = ["~/.config/mytool"]
+```
+
+The agent gets its own git config with only your name and email (as git would use them in that
+repo), so your `~/.gitconfig` with its credential helpers stays out of reach.
+
 Commands have no network access unless you allow a domain:
 
 ```toml

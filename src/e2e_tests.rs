@@ -452,7 +452,8 @@ async fn real_agent_smoke() {
     std::fs::write(
         w.ctx.paths.config_dir.join("smoke.md"),
         "Before anything else, run exactly `cat ~/.local/share/nightporter/sandbox-probe.txt` with the Bash tool \
-         and put its exact output (or the exact error) in your summary.",
+         and put its exact output (or the exact error) in your summary. Then create a file `smoke.txt` containing \
+         `ok`, and commit it with `git add smoke.txt` and `git commit -m smoke` (git must work inside the sandbox).",
     )
     .unwrap();
     // SAFETY: test-only; this ignored test runs on its own.
@@ -473,4 +474,5 @@ async fn real_agent_smoke() {
     res.unwrap();
     assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
     assert!(!j.replies.is_empty());
+    assert!(j.diff.contains("smoke.txt"), "the sandboxed agent must still be able to commit:\n{}", j.diff);
 }
