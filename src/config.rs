@@ -89,6 +89,7 @@ pub enum TokenSource {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools, reason = "mirrors the [notifications] TOML table")]
 pub struct Notifications {
     #[serde(default = "yes")]
     pub needs_approval: bool,
@@ -605,12 +606,12 @@ mod tests {
         )
         .unwrap();
         let over: toml::Table = toml::from_str(
-            r#"
+            r"
             subscribed = true
             max_ci_attempts = 5
             [reply]
             footer = false
-            "#,
+            ",
         )
         .unwrap();
         let s = c.resolve(Some(&over)).unwrap();

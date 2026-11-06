@@ -326,7 +326,7 @@ pub struct Ttl<K, V>(std::sync::Mutex<std::collections::HashMap<K, (i64, V)>>);
 
 impl<K: std::hash::Hash + Eq, V: Clone> Default for Ttl<K, V> {
     fn default() -> Self {
-        Self(Default::default())
+        Self(std::sync::Mutex::default())
     }
 }
 

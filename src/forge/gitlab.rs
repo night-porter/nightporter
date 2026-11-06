@@ -9,6 +9,7 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 pub struct GitLab {
     pub host: String,
@@ -116,8 +117,8 @@ impl GitLab {
             labels: HashMap::new(),
             subscribed: HashSet::new(),
             sweep_every: std::time::Duration::from_secs(600),
-            roles: Default::default(),
-            groups: Default::default(),
+            roles: super::Ttl::default(),
+            groups: super::Ttl::default(),
         }
     }
 
@@ -184,7 +185,7 @@ impl GitLab {
             cur.since = Some(started);
         }
 
-        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= self.sweep_every.as_secs() as i64);
+        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= i64::try_from(self.sweep_every.as_secs()).unwrap_or(i64::MAX));
         if due {
             cur.last_sweep = Some(crate::state::now());
             // All open MRs, not just the ones updated since the last poll: CI can go red without
@@ -270,13 +271,13 @@ impl GitLab {
         for n in notes.into_iter().filter(|n| !n.system && after(&n.created_at)) {
             let Some(verb) = parse_command(&n.body) else { continue };
             let role = self.role(p, &n.author).await;
-            out.push(self.request(repo, target, iid, format!("gl-{}-n{}", self.host, n.id), &n.author, role, n.body, n.created_at, verb));
+            out.push(Self::request(repo, target, iid, format!("gl-{}-n{}", self.host, n.id), &n.author, role, n.body, n.created_at, verb));
         }
         let evs: Vec<LabelEvent> = self.api.get_all(&format!("/projects/{p}/{kind}/{iid}/resource_label_events?per_page=100"), 5).await?;
         for e in evs.into_iter().filter(|e| e.action == "add" && after(&e.created_at)) {
             if e.label.as_ref().is_some_and(|l| l.name.eq_ignore_ascii_case(label)) {
                 let role = self.role(p, &e.user).await;
-                out.push(self.request(
+                out.push(Self::request(
                     repo,
                     target,
                     iid,
@@ -293,18 +294,7 @@ impl GitLab {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn request(
-        &self,
-        repo: &RepoId,
-        target: Target,
-        n: u64,
-        id: String,
-        u: &User,
-        role: Role,
-        body: String,
-        at: String,
-        verb: Verb,
-    ) -> Event {
+    fn request(repo: &RepoId, target: Target, n: u64, id: String, u: &User, role: Role, body: String, at: String, verb: Verb) -> Event {
         Event {
             id,
             repo: repo.clone(),
@@ -326,13 +316,13 @@ impl GitLab {
 
     /// Project membership (including inherited) → role, cached for an hour.
     async fn role(&self, project: &str, u: &User) -> Role {
-        let key = (project.to_string(), u.id);
-        if let Some(r) = self.roles.get(&key) {
-            return r;
-        }
         #[derive(Deserialize)]
         struct M {
             access_level: u32,
+        }
+        let key = (project.to_string(), u.id);
+        if let Some(r) = self.roles.get(&key) {
+            return r;
         }
         match self.api.get::<M>(&format!("/projects/{project}/members/all/{}", u.id)).await {
             Ok(m) => {
@@ -352,6 +342,12 @@ impl GitLab {
 
     /// One MR's conflict/CI state. The list endpoint has no `head_pipeline`, so GET the MR.
     async fn sweep_one(&self, repo: &RepoId, pid: u64, iid: u64) -> Result<(Vec<Event>, String)> {
+        #[derive(Deserialize)]
+        struct Job {
+            name: String,
+            web_url: String,
+            stage: String,
+        }
         let mr: Mr = self.api.get(&format!("/projects/{pid}/merge_requests/{iid}")).await?;
         let mr = &mr;
         let sha = mr.sha.clone().unwrap_or_default();
@@ -377,17 +373,11 @@ impl GitLab {
             out.push(ev(Trigger::MergeConflict, format!("This MR has merge conflicts with `{}`.", mr.target_branch)));
         }
         if let Some(p) = mr.head_pipeline.as_ref().filter(|p| p.status == "failed") {
-            #[derive(Deserialize)]
-            struct Job {
-                name: String,
-                web_url: String,
-                stage: String,
-            }
             let jobs: Vec<Job> =
                 self.api.get(&format!("/projects/{}/pipelines/{}/jobs?scope[]=failed&per_page=50", mr.project_id, p.id)).await?;
             let mut body = String::from("CI pipeline failed:\n");
             for j in jobs {
-                body.push_str(&format!("- {} (stage {}) {}\n", j.name, j.stage, j.web_url));
+                let _ = writeln!(body, "- {} (stage {}) {}", j.name, j.stage, j.web_url);
             }
             out.push(ev(Trigger::CiFailure, body));
         }
@@ -401,13 +391,13 @@ impl GitLab {
     }
 
     pub async fn mr(&self, repo: &RepoId, iid: u64) -> Result<PrInfo> {
-        let p = enc(&repo.path);
-        let m: Mr = self.api.get(&format!("/projects/{p}/merge_requests/{iid}")).await?;
         #[derive(Deserialize)]
         struct Proj {
             ssh_url_to_repo: String,
             http_url_to_repo: String,
         }
+        let p = enc(&repo.path);
+        let m: Mr = self.api.get(&format!("/projects/{p}/merge_requests/{iid}")).await?;
         let src: Proj = self.api.get(&format!("/projects/{}", m.source_project_id)).await?;
         Ok(PrInfo {
             number: m.iid,

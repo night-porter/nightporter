@@ -53,16 +53,8 @@ fn parse_schedule(a: &str) -> Result<Option<Window>> {
     Ok(Some(w))
 }
 
-pub fn run(paths: &Paths) -> Result<()> {
-    paths.ensure()?;
-    println!("Night Porter setup. Press Enter to accept the [default].\n");
-    if paths.config_file().exists() && !yes(&format!("{} exists. Update it?", paths.config_file().display()), true)? {
-        return Ok(());
-    }
-    if !paths.config_file().exists() {
-        std::fs::write(paths.config_file(), TEMPLATE)?;
-    }
-
+/// Step 1: which forges and hosts.
+fn ask_forges() -> Result<Vec<(ForgeKind, String)>> {
     // 1. Forges
     println!("\n1. Which forges?  1) GitHub  2) GitLab  3) both");
     let f = ask_valid("Choose", "1", |a| if matches!(a, "1" | "2" | "3") { Ok(a.to_string()) } else { bail!("choose 1, 2 or 3") })?;
@@ -80,6 +72,48 @@ pub fn run(paths: &Paths) -> Result<()> {
         })?;
         forges.extend(hosts.into_iter().map(|h| (ForgeKind::GitLab, h)));
     }
+    Ok(forges)
+}
+
+/// Step 7: subscribe to some of the clones found under the code dir.
+fn subscribe_repos(paths: &Paths) -> Result<()> {
+    // 7. Subscribe
+    let cfg = Config::load(paths)?;
+    let clones = crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts);
+    let list: Vec<_> = clones.iter().collect();
+    println!("\n7. Found {} repos. Subscribe to which? (numbers, comma-separated; empty = none, add later in the TUI)", list.len());
+    for (i, (r, p)) in list.iter().enumerate() {
+        println!("  {:>3}) {:<50} {}", i + 1, format!("{}/{}", r.host, r.path), p.display());
+    }
+    let picks = ask_valid("Subscribe", "", |a| {
+        a.split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(|x| match x.parse::<usize>() {
+                Ok(n) if (1..=list.len()).contains(&n) => Ok(n - 1),
+                _ => bail!("{x:?} is not a number between 1 and {}", list.len()),
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    for i in picks {
+        let (r, _) = list[i];
+        crate::actions::set_subscribed(paths, r, true)?;
+        println!("  subscribed {}/{}", r.host, r.path);
+    }
+    Ok(())
+}
+
+pub fn run(paths: &Paths) -> Result<()> {
+    paths.ensure()?;
+    println!("Night Porter setup. Press Enter to accept the [default].\n");
+    if paths.config_file().exists() && !yes(&format!("{} exists. Update it?", paths.config_file().display()), true)? {
+        return Ok(());
+    }
+    if !paths.config_file().exists() {
+        std::fs::write(paths.config_file(), TEMPLATE)?;
+    }
+
+    let forges = ask_forges()?;
 
     // 2. Agents
     println!("\n2. Which agent by default?  1) Claude Code  2) OpenCode");
@@ -140,29 +174,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         }
     })?;
 
-    // 7. Subscribe
-    let cfg = Config::load(paths)?;
-    let clones = crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts);
-    let list: Vec<_> = clones.iter().collect();
-    println!("\n7. Found {} repos. Subscribe to which? (numbers, comma-separated; empty = none, add later in the TUI)", list.len());
-    for (i, (r, p)) in list.iter().enumerate() {
-        println!("  {:>3}) {:<50} {}", i + 1, format!("{}/{}", r.host, r.path), p.display());
-    }
-    let picks = ask_valid("Subscribe", "", |a| {
-        a.split(',')
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-            .map(|x| match x.parse::<usize>() {
-                Ok(n) if (1..=list.len()).contains(&n) => Ok(n - 1),
-                _ => bail!("{x:?} is not a number between 1 and {}", list.len()),
-            })
-            .collect::<Result<Vec<_>>>()
-    })?;
-    for i in picks {
-        let (r, _) = list[i];
-        crate::actions::set_subscribed(paths, r, true)?;
-        println!("  subscribed {}/{}", r.host, r.path);
-    }
+    subscribe_repos(paths)?;
 
     // 8. Service
     if yes("\n8. Install the background service now?", true)? {

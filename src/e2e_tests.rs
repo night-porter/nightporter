@@ -56,8 +56,7 @@ async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log
                 let (code, resp) = routes
                     .iter()
                     .find(|(m, p, _)| *m == method && bare == *p)
-                    .map(|(_, _, r)| ("200 OK", r.clone()))
-                    .unwrap_or(("404 Not Found", r#"{"message":"not found"}"#.into()));
+                    .map_or(("404 Not Found", r#"{"message":"not found"}"#.into()), |(_, _, r)| ("200 OK", r.clone()));
                 let out = format!(
                     "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp}",
                     resp.len()
@@ -346,7 +345,7 @@ async fn gitlab_poll_reply_and_resolve() {
     f.login().await.unwrap();
     // First poll only records a baseline.
     let mut cur = crate::forge::Cursor::default();
-    assert!(f.poll(&mut cur).await.unwrap().is_empty());
+    assert_eq!(f.poll(&mut cur).await.unwrap(), []);
     assert!(log.lock().unwrap().iter().all(|(_, p, _)| p == "/user"));
     cur.since = Some("2026-01-01T00:00:00Z".into());
     // The next sweep only records state (MRs already red/conflicted at install don't fire)...
@@ -441,7 +440,7 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
 /// Also checks the sandbox in headless mode: the agent is allowed `cat`, asked to read a probe
 /// file under a read-denied path, and must not get its content.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a real agent and network"]
 async fn real_agent_smoke() {
     let probe_dir = std::env::home_dir().unwrap().join(".local/share/nightporter");
     std::fs::create_dir_all(&probe_dir).unwrap();
@@ -473,6 +472,6 @@ async fn real_agent_smoke() {
     assert!(!out.contains("PROBE-7f3a9c"), "sandbox let the agent read a denied path:\n{out}");
     res.unwrap();
     assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
-    assert!(!j.replies.is_empty());
+    assert_ne!(j.replies, []);
     assert!(j.diff.contains("smoke.txt"), "the sandboxed agent must still be able to commit:\n{}", j.diff);
 }

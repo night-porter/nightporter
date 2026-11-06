@@ -7,6 +7,7 @@ use reqwest::{Method, StatusCode, header};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::fmt::Write as _;
 
 #[derive(Clone)]
 pub struct Api {
@@ -166,7 +167,9 @@ pub fn enc(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out

@@ -375,6 +375,15 @@ fn kill_group(pid: Option<u32>) {
 }
 
 pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {
+    #[derive(Deserialize)]
+    struct Block {
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        replies: Vec<Reply>,
+        #[serde(default)]
+        verdict: Option<String>,
+    }
     let (text, cost) = match kind {
         AgentKind::Claude => {
             #[derive(Deserialize)]
@@ -394,15 +403,6 @@ pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {
         }
         AgentKind::OpenCode => (stdout.to_string(), None),
     };
-    #[derive(Deserialize)]
-    struct Block {
-        #[serde(default)]
-        summary: String,
-        #[serde(default)]
-        replies: Vec<Reply>,
-        #[serde(default)]
-        verdict: Option<String>,
-    }
     let block = last_block(&text).context("agent did not end with a ```nightporter block")?;
     let b: Block = serde_json::from_str(block).context("bad JSON in the nightporter block")?;
     Ok(Outcome { summary: b.summary, verdict: b.verdict, replies: b.replies, cost_usd: cost })

@@ -49,10 +49,9 @@ pub fn step_for(events: &[Event], verb: Option<Verb>, is_issue: bool) -> &'stati
         Some(Verb::Reproduce) => "reproduce",
         Some(Verb::Review) => "review",
         Some(Verb::Fix) if is_issue => "issue_fix",
-        Some(Verb::Fix) => "fix",
         None if events.iter().all(|e| e.trigger == Trigger::CiFailure) => "ci",
         None if events.iter().all(|e| e.trigger == Trigger::MergeConflict) => "conflict",
-        None => "fix",
+        Some(Verb::Fix) | None => "fix",
     }
 }
 

@@ -214,7 +214,7 @@ impl Db {
             params![repo.key(), author],
             |r| r.get(0),
         )?;
-        Ok(n as usize)
+        Ok(usize::try_from(n)?)
     }
 
     pub fn add_event(&self, e: &Event, d: Disposition, reason: &str) -> Result<bool> {
@@ -225,7 +225,8 @@ impl Db {
                 e.id,
                 e.repo.key(),
                 enum_str(&e.target),
-                e.number as i64,
+                // Forge PR/issue numbers are far below 2^63; stored as-is and read back with cast_unsigned.
+                e.number.cast_signed(),
                 e.author,
                 enum_str(&d),
                 reason,
@@ -285,13 +286,13 @@ impl Db {
         let tx = self.0.transaction()?;
         let attempt: u32 = tx.query_row(
             "SELECT COUNT(*) FROM jobs WHERE repo=?1 AND number=?2 AND status IN ('failed','done') AND created_at > ?3",
-            params![repo.key(), number as i64, now() - 86400],
+            params![repo.key(), number.cast_signed(), now() - 86400],
             |r| r.get(0),
         )?;
         tx.execute(
             "INSERT INTO jobs(repo,target,number,mode,level,status,attempt,created_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)",
-            params![repo.key(), enum_str(&target), number as i64, mode, level, attempt + 1, now()],
+            params![repo.key(), enum_str(&target), number.cast_signed(), mode, level, attempt + 1, now()],
         )?;
         let id = tx.last_insert_rowid();
         for e in event_ids {
@@ -360,7 +361,7 @@ impl Db {
 
     pub fn recent_jobs(&self, limit: usize) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!("{JOB_LIST} ORDER BY id DESC LIMIT ?1"))?;
-        let rows = st.query_map([limit as i64], row_job)?;
+        let rows = st.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -369,7 +370,7 @@ impl Db {
         Ok(self.0.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE repo=?1 AND number=?2
                AND status IN ('queued','running','approved','awaiting_approval','awaiting_run_approval'))",
-            params![repo.key(), number as i64],
+            params![repo.key(), number.cast_signed()],
             |r| r.get(0),
         )?)
     }
@@ -436,7 +437,8 @@ fn row_job(r: &rusqlite::Row) -> rusqlite::Result<Job> {
         id: r.get(0)?,
         repo: RepoId::parse_key(&repo).ok_or(rusqlite::Error::InvalidQuery)?,
         target: if target == "issue" { Target::Issue } else { Target::Pr },
-        number: r.get::<_, i64>(3)? as u64,
+        // Written with cast_signed: the bit-exact inverse.
+        number: r.get::<_, i64>(3)?.cast_unsigned(),
         mode: r.get(4)?,
         level: r.get(5)?,
         status: JobStatus::parse(&r.get::<_, String>(6)?),

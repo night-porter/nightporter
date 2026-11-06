@@ -267,7 +267,7 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     let mut teams = HashSet::new();
     // A deny-team lookup that fails must not let the author through: send them to the inbox.
     let mut deny_unknown = false;
-    if !own && !(s.trust.allow_teams.is_empty() && s.trust.deny_teams.is_empty()) {
+    if !own && (!s.trust.allow_teams.is_empty() || !s.trust.deny_teams.is_empty()) {
         let forge = ctx.forge(&e.repo)?.lock().await;
         for t in s.trust.allow_teams.iter().chain(&s.trust.deny_teams) {
             match forge.in_team(t, &e.author).await {
@@ -330,7 +330,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             continue;
         }
         let last = evs.iter().map(|(_, t)| *t).max().unwrap_or(now);
-        if now - last < s.debounce.as_secs() as i64 {
+        if now - last < i64::try_from(s.debounce.as_secs()).unwrap_or(i64::MAX) {
             continue;
         }
         if ctx.db(|d| d.pr_busy(&repo, n))? {
@@ -507,7 +507,7 @@ mod tests {
         let (_d, ctx, repo) = setup("");
         let cfg = ctx.cfg();
         intake(&ctx, &cfg, "me", ev(&repo, "1", "alice", Role::Member, Trigger::Comment)).await.unwrap();
-        assert!(ctx.db(|d| d.events_with(Disposition::Pending)).unwrap().is_empty());
+        assert_eq!(ctx.db(|d| d.events_with(Disposition::Pending)).unwrap(), []);
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 use crate::config::AgentKind;
 use crate::state::{Db, Job, JobStatus};
 use anyhow::{Context, Result, bail};
+use std::fmt::Write as _;
 use std::process::Command;
 
 /// herdr's own convention: plugins get `HERDR_BIN_PATH`; otherwise look on PATH.
@@ -33,24 +34,24 @@ pub fn briefing(db: &Db, j: &Job) -> String {
     // the maintainer to look at, not instructions.
     let mut data = String::new();
     if !j.summary.is_empty() {
-        data += &format!("Night Porter's summary: {}\n", j.summary);
+        let _ = writeln!(data, "Night Porter's summary: {}", j.summary);
     }
     if !j.error.is_empty() {
-        data += &format!("Error: {}\n", j.error);
+        let _ = writeln!(data, "Error: {}", j.error);
     }
     let events = db.job_events(j.id).unwrap_or_default();
     if !events.is_empty() {
         data += "\nRequests it worked on:\n";
         for e in &events {
             let loc = e.path.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
-            data += &format!("- @{}{loc}: {}\n", e.author, e.body.lines().next().unwrap_or_default());
+            let _ = writeln!(data, "- @{}{loc}: {}", e.author, e.body.lines().next().unwrap_or_default());
         }
     }
     let failed: Vec<_> = j.checks.iter().filter(|c| !c.ok).collect();
     if !failed.is_empty() {
         data += "\nPre-push checks that need a human:\n";
         for c in failed {
-            data += &format!("- {}: {}\n", c.name, c.detail.lines().next().unwrap_or_default());
+            let _ = writeln!(data, "- {}: {}", c.name, c.detail.lines().next().unwrap_or_default());
         }
     }
     if !data.is_empty() {
@@ -62,10 +63,11 @@ pub fn briefing(db: &Db, j: &Job) -> String {
         s += "\nThis branch contains code from someone the maintainer doesn't trust yet. Don't run builds or tests until they say so.\n";
     }
     if !j.replies.is_empty() {
-        s += &format!("\nIt drafted {} repl{} (not posted).\n", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
+        let _ = writeln!(s, "\nIt drafted {} repl{} (not posted).", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
     }
     if !j.head_before.is_empty() && !j.head_after.is_empty() && j.head_before != j.head_after {
-        s += &format!("\nIts commits are {}..{} on this branch. Nothing has been pushed.\n", short(&j.head_before), short(&j.head_after));
+        let _ =
+            writeln!(s, "\nIts commits are {}..{} on this branch. Nothing has been pushed.", short(&j.head_before), short(&j.head_after));
     }
     s += "\nStart by summarising the current state in a few lines, then ask what they want to do.";
     s

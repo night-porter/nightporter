@@ -238,20 +238,9 @@ fn main() -> Result<()> {
             let code = watch::wait(&paths, id, config::parse_duration(&timeout)?)?;
             std::process::exit(code)
         }
-        Cmd::Skill { cmd } => {
-            match cmd {
-                SkillCmd::Show => print!("{}", skill::GUIDE),
-                SkillCmd::Setup => println!("{}", skill::setup()?),
-                SkillCmd::Remove => println!("{}", skill::remove()?),
-            }
-            Ok(())
-        }
+        Cmd::Skill { cmd } => cmd_skill(&cmd),
         Cmd::Daemon => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_env("NIGHTPORTER_LOG").unwrap_or_else(|_| "nightporter=info".into()),
-                )
-                .init();
+            init_tracing();
             rt()?.block_on(daemon::run(paths))
         }
         Cmd::Setup => setup::run(&paths),
@@ -262,20 +251,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => status(&paths),
-        Cmd::Repos => {
-            let cfg = config::Config::load(&paths)?;
-            for (r, p) in repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts) {
-                let s = cfg.settings_for(&paths, &r)?;
-                println!(
-                    "{} {:<45} {:<8} {}",
-                    if s.subscribed { "[on] " } else { "[off]" },
-                    format!("{}/{}", r.host, r.path),
-                    s.level.as_str(),
-                    p.display()
-                );
-            }
-            Ok(())
-        }
+        Cmd::Repos => cmd_repos(&paths),
         Cmd::Subscribe { repo } | Cmd::Unsubscribe { repo } => {
             let on = matches!(cmd_name, "subscribe");
             let r = resolve_repo(&paths, &repo)?;
@@ -324,31 +300,65 @@ fn main() -> Result<()> {
             let ctx = daemon::offline_ctx(&paths, cfg).await?;
             job::gc(&ctx, all).await
         }),
-        Cmd::Token { cmd: TokenCmd::Set { forge, host } } => {
-            let f = ForgeKind::parse(&forge).context("forge must be github or gitlab")?;
-            let host = host.unwrap_or_else(|| if f == ForgeKind::GitHub { "github.com".into() } else { "gitlab.com".into() });
-            eprint!("Paste the token for {host} and press Enter (input is hidden): ");
-            let t = read_secret()?;
-            if t.is_empty() {
-                bail!("empty token");
-            }
-            http::store_token(f, &host, &t)?;
-            eprintln!("\nstored in the OS keychain; set `token = \"keyring\"` on the account in config.toml");
-            Ok(())
-        }
-        Cmd::Service { cmd } => {
-            println!(
-                "{}",
-                match cmd {
-                    ServiceCmd::Install => service::install(&paths.log_file())?,
-                    ServiceCmd::Uninstall => service::uninstall()?,
-                }
-            );
-            Ok(())
-        }
+        Cmd::Token { cmd: TokenCmd::Set { forge, host } } => cmd_token_set(&forge, host),
+        Cmd::Service { cmd } => cmd_service(&paths, &cmd),
         Cmd::Market { cmd } => rt()?.block_on(market(&paths, cmd)),
         Cmd::Pack { cmd } => rt()?.block_on(pack(&paths, cmd)),
     }
+}
+
+fn cmd_skill(cmd: &SkillCmd) -> Result<()> {
+    match cmd {
+        SkillCmd::Show => print!("{}", skill::GUIDE),
+        SkillCmd::Setup => println!("{}", skill::setup()?),
+        SkillCmd::Remove => println!("{}", skill::remove()?),
+    }
+    Ok(())
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("NIGHTPORTER_LOG").unwrap_or_else(|_| "nightporter=info".into()))
+        .init();
+}
+
+fn cmd_repos(paths: &Paths) -> Result<()> {
+    let cfg = config::Config::load(paths)?;
+    for (r, p) in repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts) {
+        let s = cfg.settings_for(paths, &r)?;
+        println!(
+            "{} {:<45} {:<8} {}",
+            if s.subscribed { "[on] " } else { "[off]" },
+            format!("{}/{}", r.host, r.path),
+            s.level.as_str(),
+            p.display()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_token_set(forge: &str, host: Option<String>) -> Result<()> {
+    let f = ForgeKind::parse(forge).context("forge must be github or gitlab")?;
+    let host = host.unwrap_or_else(|| if f == ForgeKind::GitHub { "github.com".into() } else { "gitlab.com".into() });
+    eprint!("Paste the token for {host} and press Enter (input is hidden): ");
+    let t = read_secret()?;
+    if t.is_empty() {
+        bail!("empty token");
+    }
+    http::store_token(f, &host, &t)?;
+    eprintln!("\nstored in the OS keychain; set `token = \"keyring\"` on the account in config.toml");
+    Ok(())
+}
+
+fn cmd_service(paths: &Paths, cmd: &ServiceCmd) -> Result<()> {
+    println!(
+        "{}",
+        match cmd {
+            ServiceCmd::Install => service::install(&paths.log_file())?,
+            ServiceCmd::Uninstall => service::uninstall()?,
+        }
+    );
+    Ok(())
 }
 
 /// The agent configured for a repo (Claude Code if the config can't be read).

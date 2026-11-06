@@ -5,6 +5,7 @@ use crate::paths::Paths;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -203,13 +204,13 @@ pub async fn fetch(paths: &Paths, url: &str, rev: &str) -> Result<(PathBuf, Mani
 pub fn describe(m: &Manifest) -> String {
     let mut s = format!("{} {} — {}\n", m.name, m.version, m.description);
     for st in &m.steps {
-        s.push_str(&format!("  step {:?} at {:?}{}\n", st.name, st.hook, if st.write { "  ⚠ requests WRITE access" } else { "" }));
+        let _ = writeln!(s, "  step {:?} at {:?}{}", st.name, st.hook, if st.write { "  ⚠ requests WRITE access" } else { "" });
     }
     for st in &m.styles {
-        s.push_str(&format!("  reply style {:?}\n", st.name));
+        let _ = writeln!(s, "  reply style {:?}", st.name);
     }
     for e in &m.envs {
-        s.push_str(&format!("  env preset {:?}\n", e.name));
+        let _ = writeln!(s, "  env preset {:?}", e.name);
     }
     s
 }
@@ -382,7 +383,7 @@ file = "pirate.md"
         assert_eq!(lock(&paths).packs["a11y"].rev, "abc");
         let s = steps(&paths, &["a11y".into()], Hook::PostFix);
         assert_eq!(s[0].1, "Check alt text.");
-        assert!(steps(&paths, &["a11y".into()], Hook::Filter).is_empty());
+        assert_eq!(steps(&paths, &["a11y".into()], Hook::Filter), []);
         assert_eq!(style(&paths, "haiku-pirate").as_deref(), Some("Arr."));
         assert_eq!(style(&paths, "a11y/haiku-pirate").as_deref(), Some("Arr."));
         remove(&paths, "a11y").unwrap();

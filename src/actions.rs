@@ -8,6 +8,7 @@ use crate::paths::Paths;
 use crate::state::{Db, Disposition, JobStatus};
 use anyhow::{Context, Result, bail};
 
+#[derive(Clone, Copy)]
 pub enum Scope<'a> {
     Repo(&'a RepoId),
     Global,
@@ -74,14 +75,14 @@ impl Scope<'_> {
     }
 }
 
-fn file_for(paths: &Paths, scope: &Scope) -> std::path::PathBuf {
+fn file_for(paths: &Paths, scope: Scope) -> std::path::PathBuf {
     match scope {
         Scope::Repo(r) => paths.repo_file(r),
         Scope::Global => paths.config_file(),
     }
 }
 
-fn push_unique(doc: &mut toml_edit::DocumentMut, scope: &Scope, key: &str, user: &str) {
+fn push_unique(doc: &mut toml_edit::DocumentMut, scope: Scope, key: &str, user: &str) {
     let trust = match scope {
         Scope::Repo(_) => doc.entry("trust"),
         Scope::Global => {
@@ -112,12 +113,12 @@ pub fn ignore(db: &Db, event_id: &str) -> Result<()> {
 
 /// Inbox: trust this author from now on (repo or global), and release their waiting events.
 pub fn allow_always(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
-    edit_file(&file_for(paths, &scope), |d| push_unique(d, &scope, "allow_users", user))?;
+    edit_file(&file_for(paths, scope), |d| push_unique(d, scope, "allow_users", user))?;
     db.set_author_disposition(user, scope.repo(), Disposition::Pending, "allowed")
 }
 
 pub fn deny(paths: &Paths, db: &Db, user: &str, scope: Scope) -> Result<usize> {
-    edit_file(&file_for(paths, &scope), |d| push_unique(d, &scope, "deny_users", user))?;
+    edit_file(&file_for(paths, scope), |d| push_unique(d, scope, "deny_users", user))?;
     db.set_author_disposition(user, scope.repo(), Disposition::Dropped, "denied")
 }
 

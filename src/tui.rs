@@ -239,7 +239,7 @@ impl App {
     }
 
     fn max_scroll(&self) -> u16 {
-        self.detail_text.lines().count().saturating_sub(5).min(u16::MAX as usize) as u16
+        u16::try_from(self.detail_text.lines().count().saturating_sub(5)).unwrap_or(u16::MAX)
     }
 
     fn switch(&mut self, t: Tab) {
@@ -610,10 +610,10 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<Vec<_>>()
             .chunks(w as usize)
-            .map(|r| r.concat())
+            .map(<[&str]>::concat)
             .collect::<Vec<_>>()
             .join("\n")
     }

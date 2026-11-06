@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 pub struct GitHub {
     pub host: String,
@@ -138,10 +139,10 @@ impl GitHub {
             me: String::new(),
             api,
             labels: HashMap::new(),
-            subscribed: Default::default(),
+            subscribed: HashSet::default(),
             sweep_every: std::time::Duration::from_secs(600),
-            team_cache: Default::default(),
-            perm_cache: Default::default(),
+            team_cache: super::Ttl::default(),
+            perm_cache: super::Ttl::default(),
         }
     }
 
@@ -164,7 +165,7 @@ impl GitHub {
         let since = cur.since.as_deref().map(super::overlap);
         let mut path = "/notifications?all=true&per_page=50".to_string();
         if let Some(s) = &since {
-            path.push_str(&format!("&since={s}"));
+            let _ = write!(path, "&since={s}");
         }
         let started = now_iso();
         let mut out = Vec::new();
@@ -194,7 +195,7 @@ impl GitHub {
                 }
             }
         }
-        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= self.sweep_every.as_secs() as i64);
+        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= i64::try_from(self.sweep_every.as_secs()).unwrap_or(i64::MAX));
         if due {
             cur.last_sweep = Some(crate::state::now());
             match self.sweep(cur).await {
@@ -233,14 +234,14 @@ impl GitHub {
             if !mine && verb.is_none() {
                 continue;
             }
-            out.push(self.event(&repo, target, number, Trigger::Comment, format!("gh-{}-ic-{}", self.host, c.id), c, verb));
+            out.push(Self::event(&repo, target, number, Trigger::Comment, format!("gh-{}-ic-{}", self.host, c.id), c, verb));
         }
 
         if target == Target::Pr && mine {
             let rc: Vec<Comment> = self.api.get_all(&format!("/repos/{r}/pulls/{number}/comments?per_page=100{since_q}"), 10).await?;
             for c in rc.into_iter().filter(|c| after(&c.created_at)) {
                 let thread = Some(c.in_reply_to_id.unwrap_or(c.id).to_string());
-                let mut e = self.event(&repo, target, number, Trigger::ReviewComment, format!("gh-{}-rc-{}", self.host, c.id), c, None);
+                let mut e = Self::event(&repo, target, number, Trigger::ReviewComment, format!("gh-{}-rc-{}", self.host, c.id), c, None);
                 e.thread = thread;
                 out.push(e);
             }
@@ -309,7 +310,7 @@ impl GitHub {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn event(&self, repo: &RepoId, target: Target, number: u64, trigger: Trigger, id: String, c: Comment, verb: Option<Verb>) -> Event {
+    fn event(repo: &RepoId, target: Target, number: u64, trigger: Trigger, id: String, c: Comment, verb: Option<Verb>) -> Event {
         Event {
             id,
             repo: repo.clone(),
@@ -333,13 +334,13 @@ impl GitHub {
     /// Collaborator permission → role, cached for an hour. Used for labels (no association) and
     /// to check MEMBER/COLLABORATOR associations, which GitHub also gives read-only users.
     async fn role_of(&self, repo: &str, user: &str) -> Result<Role> {
-        let key = format!("{repo}:{}", user.to_ascii_lowercase());
-        if let Some(r) = self.perm_cache.get(&key) {
-            return Ok(r);
-        }
         #[derive(Deserialize)]
         struct P {
             permission: String,
+        }
+        let key = format!("{repo}:{}", user.to_ascii_lowercase());
+        if let Some(r) = self.perm_cache.get(&key) {
+            return Ok(r);
         }
         let p: P = self.api.get(&format!("/repos/{repo}/collaborators/{user}/permission")).await?;
         let r = match p.permission.as_str() {
@@ -384,6 +385,23 @@ impl GitHub {
     }
 
     async fn sweep_pr(&self, repo: &RepoId, n: u64) -> Result<(Vec<Event>, String)> {
+        #[derive(Deserialize)]
+        struct Runs {
+            check_runs: Vec<Run>,
+        }
+        #[derive(Deserialize)]
+        struct Run {
+            name: String,
+            conclusion: Option<String>,
+            #[serde(default)]
+            html_url: String,
+            output: Option<Out>,
+        }
+        #[derive(Deserialize)]
+        struct Out {
+            title: Option<String>,
+            summary: Option<String>,
+        }
         let mut out = Vec::new();
         {
             let r = &repo.path;
@@ -400,23 +418,6 @@ impl GitHub {
                     format!("This PR has merge conflicts with `{}`.", p.base.name),
                 ));
             }
-            #[derive(Deserialize)]
-            struct Runs {
-                check_runs: Vec<Run>,
-            }
-            #[derive(Deserialize)]
-            struct Run {
-                name: String,
-                conclusion: Option<String>,
-                #[serde(default)]
-                html_url: String,
-                output: Option<Out>,
-            }
-            #[derive(Deserialize)]
-            struct Out {
-                title: Option<String>,
-                summary: Option<String>,
-            }
             let runs: Runs = self.api.get(&format!("/repos/{r}/commits/{}/check-runs?per_page=100", p.head.sha)).await?;
             let failed: Vec<&Run> =
                 runs.check_runs.iter().filter(|c| matches!(c.conclusion.as_deref(), Some("failure" | "timed_out"))).collect();
@@ -429,13 +430,14 @@ impl GitHub {
                 let mut body = String::from("CI failed:\n");
                 for f in failed {
                     let o = f.output.as_ref();
-                    body.push_str(&format!(
-                        "- {} ({}) {}\n  {}\n",
+                    let _ = writeln!(
+                        body,
+                        "- {} ({}) {}\n  {}",
                         f.name,
                         f.html_url,
                         o.and_then(|o| o.title.clone()).unwrap_or_default(),
                         o.and_then(|o| o.summary.clone()).unwrap_or_default().chars().take(800).collect::<String>()
-                    ));
+                    );
                 }
                 out.push(self.state_event(&repo, n, Trigger::CiFailure, &p.head.sha, body));
             }

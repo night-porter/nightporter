@@ -208,8 +208,8 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
                 // Case-insensitive: on macOS `Package.json` is `package.json`.
                 let name = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
                 DEP_FILES.iter().any(|d| d.eq_ignore_ascii_case(&name))
-                    || (name.starts_with("requirements") && name.ends_with(".txt"))
-                    || name.ends_with(".csproj")
+                    || (name.starts_with("requirements") && ends_with_ci(&name, ".txt"))
+                    || ends_with_ci(&name, ".csproj")
             })
             .collect();
         deps.dedup();
@@ -256,9 +256,20 @@ pub fn parse_names_z(s: &str) -> Vec<String> {
     v
 }
 
+/// `s.ends_with(suffix)`, ignoring ASCII case (macOS filesystems are case-insensitive).
+pub(crate) fn ends_with_ci(s: &str, suffix: &str) -> bool {
+    s.len() >= suffix.len() && s.as_bytes()[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffix_match_ignores_case() {
+        assert!(ends_with_ci("x/Run.SH", ".sh") && ends_with_ci(".sh", ".sh") && ends_with_ci("a.Csproj", ".csproj"));
+        assert!(!ends_with_ci("sh", ".sh") && !ends_with_ci("é", ".sh") && !ends_with_ci("a.shx", ".sh"));
+    }
 
     #[test]
     fn protected_paths_ignore_case_and_cover_env_and_agent_files() {

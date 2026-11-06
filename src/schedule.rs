@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     fn w(days: &str, ranges: &[&str]) -> Window {
-        Window { days: days.into(), windows: ranges.iter().map(|s| s.to_string()).collect(), tz: Some("Europe/Zurich".into()) }
+        Window { days: days.into(), windows: ranges.iter().map(ToString::to_string).collect(), tz: Some("Europe/Zurich".into()) }
     }
     fn at(s: &str) -> Zoned {
         format!("{s}[Europe/Zurich]").parse().unwrap()
