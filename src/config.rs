@@ -12,7 +12,7 @@ use std::time::Duration;
 
 pub const VERSION: u32 = 1;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "one")]
@@ -87,7 +87,7 @@ pub enum TokenSource {
     Keyring,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools, reason = "mirrors the [notifications] TOML table")]
 pub struct Notifications {
@@ -157,7 +157,7 @@ pub enum Escalation {
 }
 
 /// Effective settings for one repo (defaults with the repo file layered on top).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoSettings {
     #[serde(default)]
@@ -434,12 +434,18 @@ pub fn edit_file(path: &Path, f: impl FnOnce(&mut toml_edit::DocumentMut)) -> Re
     f(&mut doc);
     let out = doc.to_string();
     // Validate before writing, so a bad edit can't brick the daemon.
-    if path.file_name().is_some_and(|n| n == "config.toml") {
-        Config::parse(&out)?;
-    } else {
-        Config::parse("")?.resolve(Some(&out.parse::<toml::Table>()?))?;
-    }
+    validate(path, &out)?;
     write_atomic(path, out.as_bytes())
+}
+
+/// Check `text` as the new contents of `path`: `config.toml` or a repo file.
+pub fn validate(path: &Path, text: &str) -> Result<()> {
+    if path.file_name().is_some_and(|n| n == "config.toml") {
+        Config::parse(text)?;
+    } else {
+        Config::parse("")?.resolve(Some(&text.parse::<toml::Table>()?))?;
+    }
+    Ok(())
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -492,7 +498,6 @@ mod dur {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         super::parse_duration(&String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
-    #[allow(dead_code)]
     pub fn serialize<S: Serializer>(v: &Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&super::format_duration(*v))
     }
