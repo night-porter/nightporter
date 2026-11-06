@@ -1,4 +1,9 @@
-# Night Porter
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.svg" />
+    <img src="assets/wordmark-light.svg" alt="Night Porter" height="64" />
+  </picture>
+</h1>
 
 **Handles your PRs while you're away.**
 

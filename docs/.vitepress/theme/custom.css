@@ -14,3 +14,5 @@
   --vp-button-brand-active-text: #000;
 }
 .dark .vp-doc [class*='language-'] > span.lang { color: var(--vp-c-text-2); }
+/* the logo is a wide wordmark, not a square icon */
+.VPNavBarTitle .logo { height: 32px; width: auto; }
