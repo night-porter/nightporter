@@ -26,12 +26,12 @@ New review steps, reply styles and environment presets can often be a
 
 **Don’t open a public issue.**
 [Report it privately](https://github.com/night-porter/nightporter/security/advisories/new) on
-GitHub, or email [security@night-porter.com](mailto:security@night-porter.com). Night Porter runs an agent because of text written by other people, so anything that
+GitHub (preferred), or use the security email on the [support page](https://night-porter.com/support). Night Porter runs an agent because of text written by other people, so anything that
 lets an untrusted author reach the agent, bypass a pre-push check or see a token counts.
 
 <!--@include: ../SECURITY.md#details-->
 
 ## Anything else
 
-Email [hi@night-porter.com](mailto:hi@night-porter.com), or find us on [X](https://x.com/NightPorterDev),
+See the [support page](https://night-porter.com/support) for how to reach us by email, or find us on [X](https://x.com/NightPorterDev),
 [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) and [Mastodon](https://mastodon.social/@nightporter).

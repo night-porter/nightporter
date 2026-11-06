@@ -39,7 +39,7 @@ not a core change. See [Writing packs](https://docs.night-porter.com/writing-pac
 
 ## Questions
 
-Read the [docs](https://docs.night-porter.com), or email [hi@night-porter.com](mailto:hi@night-porter.com).
+Read the [docs](https://docs.night-porter.com), or get in touch via the [support page](https://night-porter.com/support).
 
 ## Code of Conduct
 

@@ -43,8 +43,15 @@ const describe = (md: string) => frontmatter(md)?.[1].match(/^description: "?(.*
 const body = (md: string, dir: string) =>
   md
     .replace(frontmatter(md)?.[0] ?? '', '')
-    // ponytail: includes the whole file, ignoring `#region` / `{lines}` selectors; fine for a plain-text dump
-    .replace(/<!--@include: ([^#{]+?)(?:[#{].*?)?-->/g, (_, f) => readFileSync(join(dir, f.trim()), 'utf8'))
+    // `file#region` takes only that region, like VitePress does. ponytail: `{lines}` selectors aren't used, so not supported.
+    .replace(/<!--@include: ([^#{]+?)(?:#([\w-]+))?-->/g, (_, f, region) => {
+      const text = readFileSync(join(dir, f.trim()), 'utf8')
+      if (!region) return text
+      const start = text.indexOf(`<!-- #region ${region} -->`)
+      if (start < 0) throw new Error(`llms: no region ${region} in ${f}`)
+      const end = text.indexOf(`<!-- #endregion ${region} -->`, start)
+      return text.slice(start + `<!-- #region ${region} -->`.length, end < 0 ? undefined : end).trim()
+    })
     .trim()
 
 // llms.txt (index) and llms-full.txt (every page) for AI agents: https://llmstxt.org
@@ -124,7 +131,7 @@ export default defineConfig({
     footer: {
       message: `Built with ${HEART} by <a href="https://danlemon.com">Dan Lemon</a>`,
       copyright:
-        'MIT or Apache-2.0 · <a href="https://night-porter.com">night-porter.com</a> · <a href="mailto:hi@night-porter.com">hi@night-porter.com</a>',
+        'MIT or Apache-2.0 · <a href="https://night-porter.com">night-porter.com</a> · <a href="https://night-porter.com/support">Support</a>',
     },
   },
 })
