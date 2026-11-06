@@ -1,0 +1,5 @@
+# Everyone is welcome, search engines and AI agents alike. llms.txt and llms-full.txt are for agents.
+User-agent: *
+Allow: /
+
+Sitemap: https://docs.night-porter.com/sitemap.xml

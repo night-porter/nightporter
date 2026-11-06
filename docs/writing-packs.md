@@ -1,3 +1,7 @@
+---
+description: "Write a Night Porter pack: extra review steps, reply styles and environment presets as TOML and Markdown, and publish it in a marketplace."
+---
+
 # Writing packs
 
 A **pack** adds behaviour to Night Porter without changing its code: extra review steps, reply

@@ -1,3 +1,7 @@
+---
+description: "Fix Night Porter problems: start with nightporter doctor, then what to check when a job does not start, fails or keeps waiting."
+---
+
 # Troubleshooting
 
 ## Start with doctor

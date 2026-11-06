@@ -1,3 +1,7 @@
+---
+description: "Night Porter recipes: levels per repo, working hours, trust rules, limits and budgets, sandboxing, DDEV and Docker environments, maintainer mode and replies."
+---
+
 # Advanced recipes
 
 Each recipe goes in `~/.config/nightporter/config.toml` under `[defaults]`, or in a repo file

@@ -1,3 +1,7 @@
+---
+description: "Take over a Night Porter job interactively in herdr or Rex, open the queue as a herdr popup, and script Night Porter with events and wait."
+---
+
 # Working with herdr and Rex
 
 Night Porter works with [herdr](https://herdr.dev) and

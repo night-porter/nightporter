@@ -16,3 +16,8 @@
 .dark .vp-doc [class*='language-'] > span.lang { color: var(--vp-c-text-2); }
 /* the logo is a wide wordmark, not a square icon */
 .VPNavBarTitle .logo { height: 32px; width: auto; }
+/* Social icons (official logos, built into VitePress) tinted with the site's neon red. */
+/* #c4123f keeps 5:1 contrast on white; the dark theme uses the site's own #ff3b6b. */
+.VPSocialLink { color: #c4123f; }
+.dark .VPSocialLink { color: #ff3b6b; }
+.VPSocialLink:hover { color: var(--vp-c-brand-1); }

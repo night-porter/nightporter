@@ -1,3 +1,7 @@
+---
+description: "How to report a Night Porter bug or a security vulnerability, and what to include."
+---
+
 # Reporting issues
 
 ## Bugs
