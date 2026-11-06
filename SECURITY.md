@@ -7,7 +7,8 @@ reports seriously.
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Use GitHub's private vulnerability reporting:
-**Security → Report a vulnerability** on this repository.
+**Security → Report a vulnerability** on this repository, or email
+[security@night-porter.com](mailto:security@night-porter.com).
 
 Please include:
 

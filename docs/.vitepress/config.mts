@@ -41,7 +41,10 @@ export default defineConfig({
         ],
       },
     ],
-    socialLinks: [{ icon: 'github', link: REPO }],
+    socialLinks: [
+      { icon: 'github', link: REPO },
+      { icon: 'x', link: 'https://x.com/NightPorterDev' },
+    ],
     editLink: { pattern: `${REPO}/edit/main/docs/:path`, text: 'Edit this page on GitHub' },
     search: { provider: 'local' },
     footer: { message: 'MIT or Apache-2.0' },
