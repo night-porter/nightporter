@@ -52,13 +52,14 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
 - Leaves no files in your repositories (it uses its own branches and worktrees)
 
-## Works with herdr
+## Works with herdr and Rex
 
-[herdr](https://herdr.dev) is where you run and watch agents; Night Porter is what runs while
-you're not there. They fit together:
+[herdr](https://herdr.dev) and [Rex](https://www.superlogical.com/rex) are where you run and
+watch agents; Night Porter is what runs while you're not there. They fit together:
 
-- **Take over a job in herdr.** On a finished or waiting job, press `h` in the TUI (or run
-  `nightporter handoff <id>`). Night Porter opens a herdr workspace at that job's worktree,
+- **Take over a job in herdr or Rex.** On a finished or waiting job, press `h` in the TUI (or run
+  `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr or Rex (`handoff`
+  in the config picks; `auto` by default),
   starts your agent, and briefs it: what was asked, what it changed, which checks need you,
   and what is drafted but not posted. You continue from there, interactively.
 - **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
@@ -89,7 +90,7 @@ nightporter doctor     # check gh / glab / agents / git
 ```
 
 Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude` and/or `opencode`.
-`gitleaks` is optional but recommended. `herdr` is optional, for taking over jobs interactively.
+`gitleaks` is optional but recommended. `herdr` or Rex is optional, for taking over jobs interactively.
 
 ## Configuration
 

@@ -30,7 +30,7 @@ Move with the arrow keys or `j`/`k`, `g`/`G` for the first and last item. `Enter
 | `A` | approve even though a blocking check failed (asks first) |
 | `r` | reject: nothing is pushed or posted (asks first) |
 | `t` | retry: run the same requests again as a new job |
-| `h` | take over in [herdr](/herdr) |
+| `h` | take over in [herdr or Rex](/herdr) |
 | `c` | copy the push command (for `suggest` jobs) |
 | `y` | copy the reply text |
 
@@ -58,7 +58,9 @@ nightporter approve 42
 nightporter approve 42 --override-blocking
 nightporter reject 42
 nightporter retry 42
-nightporter handoff 42           # take over in herdr
+nightporter handoff 42           # take over in herdr or Rex
+nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
+nightporter events --json        # follow every job and inbox change
 
 nightporter inbox list
 nightporter inbox allow-once <event>

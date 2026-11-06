@@ -8,6 +8,7 @@ mod daemon;
 mod doctor;
 mod forge;
 mod git;
+mod handoff;
 mod herdr;
 mod http;
 mod job;
@@ -19,9 +20,11 @@ mod repos;
 mod schedule;
 mod service;
 mod setup;
+mod skill;
 mod state;
 mod trust;
 mod tui;
+mod watch;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -68,7 +71,7 @@ enum Cmd {
     Reject { id: i64 },
     /// Re-run a finished or failed job's requests as a new job.
     Retry { id: i64 },
-    /// Take over a job interactively in herdr (opens a workspace with a briefed agent).
+    /// Take over a job interactively in herdr or Rex (opens it with a briefed agent).
     Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
     Show { id: i64 },
@@ -106,6 +109,33 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PackCmd,
     },
+    /// Print one line per job or inbox change until interrupted (for scripts and status bars).
+    Events {
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for a job: exit 0 done, 1 failed or rejected, 2 needs you, 3 timed out.
+    Wait {
+        id: i64,
+        #[arg(long, default_value = "30m")]
+        timeout: String,
+    },
+    /// Teach coding agents (Claude Code) how to work with Night Porter.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Print the guide for agents (always matches this version).
+    Show,
+    /// Install a small Claude Code skill that runs `nightporter skill show`.
+    Setup,
+    /// Remove that skill.
+    Remove,
 }
 
 #[derive(Subcommand)]
@@ -189,6 +219,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::detect()?;
     let cmd = cli.cmd.unwrap_or(Cmd::Tui);
+    // A job's agent may look, never act: it must not approve its own work or change trust.
+    if std::env::var_os("NIGHTPORTER_JOB").is_some() && !read_only(&cmd) {
+        bail!("not available inside a Night Porter job; only read-only commands (status, show, inbox list, ...) are");
+    }
     let cmd_name = match &cmd {
         Cmd::Subscribe { .. } => "subscribe",
         _ => "",
@@ -198,6 +232,19 @@ fn main() -> Result<()> {
         Cmd::Tui => {
             paths.ensure()?;
             tui::run(&paths)
+        }
+        Cmd::Events { json } => watch::events(&paths, json),
+        Cmd::Wait { id, timeout } => {
+            let code = watch::wait(&paths, id, config::parse_duration(&timeout)?)?;
+            std::process::exit(code)
+        }
+        Cmd::Skill { cmd } => {
+            match cmd {
+                SkillCmd::Show => print!("{}", skill::GUIDE),
+                SkillCmd::Setup => println!("{}", skill::setup()?),
+                SkillCmd::Remove => println!("{}", skill::remove()?),
+            }
+            Ok(())
         }
         Cmd::Daemon => {
             tracing_subscriber::fmt()
@@ -252,7 +299,7 @@ fn main() -> Result<()> {
         Cmd::Handoff { id } => {
             let db = db(&paths)?;
             let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
-            println!("{}", herdr::handoff(&db, &j, agent_for(&paths, &j.repo))?);
+            println!("{}", handoff::take_over(&paths, &db, &j)?);
             Ok(())
         }
         Cmd::Show { id } => {
@@ -305,6 +352,23 @@ fn main() -> Result<()> {
 }
 
 /// The agent configured for a repo (Claude Code if the config can't be read).
+/// Commands that only read state.
+fn read_only(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Status
+            | Cmd::Show { .. }
+            | Cmd::Repos
+            | Cmd::Doctor
+            | Cmd::Events { .. }
+            | Cmd::Wait { .. }
+            | Cmd::Skill { cmd: SkillCmd::Show }
+            | Cmd::Inbox { cmd: InboxCmd::List }
+            | Cmd::Market { cmd: MarketCmd::List }
+            | Cmd::Pack { cmd: PackCmd::List }
+    )
+}
+
 pub fn agent_for(paths: &Paths, repo: &RepoId) -> config::AgentKind {
     config::Config::load(paths).and_then(|c| c.settings_for(paths, repo)).map(|s| s.agent).unwrap_or(config::AgentKind::Claude)
 }
@@ -527,6 +591,15 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jobs_can_only_run_read_only_commands() {
+        use clap::Parser;
+        let ro = |args: &[&str]| super::read_only(&super::Cli::parse_from(args).cmd.unwrap());
+        assert!(ro(&["nightporter", "status"]) && ro(&["nightporter", "show", "3"]) && ro(&["nightporter", "inbox", "list"]));
+        assert!(!ro(&["nightporter", "approve", "3"]) && !ro(&["nightporter", "inbox", "allow", "x", "--global"]));
+        assert!(!ro(&["nightporter", "skill", "setup"]) && !ro(&["nightporter", "tui"]));
+    }
+
     #[test]
     fn printable_strips_terminal_escapes() {
         assert_eq!(super::printable("ok\x1b[2K\x1b[1Ahidden\r\n\tnext\x07"), "ok[2K[1Ahidden\n\tnext");

@@ -41,6 +41,9 @@ pub struct Config {
     pub notifications: Notifications,
     #[serde(default)]
     pub marketplaces: Vec<String>,
+    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr` or `rex`.
+    #[serde(default)]
+    pub handoff: Handoff,
     /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
     #[serde(default)]
     pub defaults: toml::Table,
@@ -64,6 +67,16 @@ impl Account {
             ForgeKind::GitLab => "gitlab.com",
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Handoff {
+    /// The terminal you're in, else whichever of herdr or Rex is installed.
+    #[default]
+    Auto,
+    Herdr,
+    Rex,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

@@ -33,6 +33,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `retention_days` | `30` | history kept in the state db |
 | `worktree_idle_days` | `14` | idle worktrees are removed after this |
 | `marketplaces` | `[]` | extra marketplace git URLs |
+| `handoff` | `auto` | where `h` opens a job: `auto`, `herdr` or `rex` |
 | `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author` |
 

@@ -274,7 +274,7 @@ impl App {
             }
             KeyCode::Char('t') => actions::retry(&self.db, id).map(|n| format!("re-queued {n} event(s)")),
             KeyCode::Char('h') => match self.db.job(id) {
-                Ok(Some(j)) => crate::herdr::handoff(&self.db, &j, crate::agent_for(&self.paths, &j.repo)),
+                Ok(Some(j)) => crate::handoff::take_over(&self.paths, &self.db, &j),
                 _ => Ok("job not found".into()),
             },
             KeyCode::Char('c') => {
@@ -436,8 +436,8 @@ impl App {
         }
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
-            (true, _) => "↑↓ scroll a approve A override r reject t retry h herdr c/y copy Esc",
-            (_, Tab::Queue | Tab::History) => "↑↓ Enter open a approve r reject t retry h herdr p pause ? q quit",
+            (true, _) => "↑↓ scroll a approve A override r reject t retry h take over c/y copy Esc",
+            (_, Tab::Queue | Tab::History) => "↑↓ Enter open a approve r reject t retry h take over p pause ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore d deny ? help q quit",
             (_, Tab::Repos) => "space subscribe/unsubscribe R rescan ? help q quit",
             (_, Tab::Help) => "1-4 tabs q quit",
@@ -585,7 +585,7 @@ Tabs
 Keys (everywhere): ↑/↓ or j/k move, Enter open, Tab/←/→ switch tab, p pause/resume, q quit
 Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t retry
        c copy the push command (suggest level)   y copy replies
-       h take over in herdr: opens a workspace at the job's worktree with a briefed agent
+       h take over in herdr or Rex: opens the job's worktree with a briefed agent
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   d deny
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
