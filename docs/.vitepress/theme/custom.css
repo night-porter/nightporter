@@ -1,0 +1,11 @@
+/* ponytail: just the brand colour from the main site; the default theme does the rest */
+:root {
+  --vp-c-brand-1: #b86e00;
+  --vp-c-brand-2: #9a5c00;
+  --vp-c-brand-3: #b86e00;
+}
+.dark {
+  --vp-c-brand-1: #ffb547;
+  --vp-c-brand-2: #ffc46b;
+  --vp-c-brand-3: #b86e00;
+}

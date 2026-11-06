@@ -118,7 +118,7 @@ style = "concise"
 footer = true
 ```
 
-See [`docs/`](docs/) for the full reference.
+See the [docs](https://docs.night-porter.com) ([source](docs/)) for the full reference.
 
 ## Security
 

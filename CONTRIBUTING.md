@@ -38,7 +38,7 @@ not a core change. See `docs/writing-packs.md`.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+This project follows the [Contributor Covenant](https://github.com/night-porter/nightporter/blob/main/CODE_OF_CONDUCT.md).
 
 ## License
 
