@@ -5,7 +5,7 @@ Thanks for helping. Night Porter is a single Rust binary: a daemon plus a termin
 ## Getting started
 
 ```sh
-git clone https://github.com/dan2k3k4/nightporter
+git clone https://github.com/night-porter/nightporter
 cd nightporter
 cargo build
 cargo test          # unit + integration tests, no network, no real agent

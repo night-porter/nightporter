@@ -1,5 +1,5 @@
 # herdr plugin: Night Porter's queue inside herdr. Install with
-#   herdr plugin install dan2k3k4/nightporter
+#   herdr plugin install night-porter/nightporter
 # Requires the `nightporter` binary on PATH (and its daemon running for live updates).
 id = "nightporter"
 name = "Night Porter"

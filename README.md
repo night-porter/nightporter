@@ -62,7 +62,7 @@ you're not there. They fit together:
 - **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
 
   ```sh
-  herdr plugin install dan2k3k4/nightporter
+  herdr plugin install night-porter/nightporter
   ```
 
   Then bind it to a key in herdr's config:
