@@ -26,7 +26,7 @@ my-pack/
   README.md
 ```
 
-Only `.md`, `.toml` and `.txt` files (plus `LICENSE*`, `README`, `NOTICE`) are allowed, and
+Only `.md`, `.toml` and `.txt` files (plus `LICENSE`, `LICENSE-MIT`, `LICENSE-APACHE`, `README`, `NOTICE`) are allowed, and
 none of them may be executable.
 
 ## `pack.toml`
@@ -111,4 +111,4 @@ description = "Accessibility review for web front-ends"
 
 Users add your marketplace with `nightporter market add <git-url>`, then
 `nightporter pack add a11y`. To get into the official marketplace, open a PR on
-`nightporter-dev/marketplace`.
+[`night-porter/marketplace`](https://github.com/night-porter/marketplace).

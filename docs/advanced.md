@@ -59,6 +59,9 @@ allow_bots = ["coderabbitai[bot]"]
 A repo file can add people to these lists, but it can’t remove a global deny. Everyone else
 goes to the inbox.
 
+Bots are never trusted by role. A bot that isn’t in `allow_bots` is dropped, not sent to the inbox,
+so add review bots like CodeRabbit by name if you want Night Porter to act on them.
+
 `trust.open = true` lets anyone through, and caps the level at `suggest`.
 
 ## Only some triggers
@@ -140,12 +143,20 @@ Work on other people’s issues and MRs, but only when a trusted person asks: wi
 `/nightporter triage`, `reproduce`, `fix` or `review` comment.
 
 ```toml
-[maintainer]
+[defaults.maintainer]    # or [maintainer] in a repo file
 enabled = true
 label = "nightporter"
 ```
 
 Maintainer mode is capped at `draft`, so you always approve before anything is pushed or posted.
+
+- The label means the same as `/nightporter fix`.
+- `fix` on an issue pushes a new `nightporter/issue-<n>` branch and opens a **draft** PR/MR that
+  closes the issue.
+- `triage`, `review` and `reproduce` only reply; they never push code.
+- When the work would run someone else’s code (their PR, or `reproduce` with an environment or
+  allowed commands), the job first waits as **NEEDS RUN APPROVAL**. Check the build files it lists,
+  then press `a` to let it run on that exact commit.
 
 ## Replies
 
@@ -163,9 +174,12 @@ Packs add review steps, reply styles and environment presets. They’re pinned t
 they can only make the rules stricter.
 
 ```sh
+nightporter market add <git-url>         # a marketplace: a git repo with a marketplace.toml
 nightporter market list
-nightporter pack add <name>
+nightporter pack add <name>              # from a marketplace
+nightporter pack add <git-url>@<sha>     # or straight from git, pinned
 nightporter pack list
+nightporter pack env <pack>/<env>        # print an [env] preset to paste into a repo file
 ```
 
 ```toml

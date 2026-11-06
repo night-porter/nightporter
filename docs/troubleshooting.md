@@ -11,8 +11,11 @@ and whether the daemon is running. Every problem comes with a `fix:` line.
 
 ## Read the log
 
-The daemon writes to `~/.local/share/nightporter/daemon.log`. For one job, run
-`nightporter show <id>`: it has the checks, replies, diff and the agent’s log.
+On macOS the daemon writes to `~/.local/share/nightporter/daemon.log`. On Linux it logs to the
+journal: `journalctl --user -u nightporter`. For more detail, set `NIGHTPORTER_LOG=nightporter=debug`
+and run `nightporter daemon` in a terminal.
+
+For one job, run `nightporter show <id>`: it has the checks, replies, diff and the agent’s log.
 
 ## A job never starts
 
@@ -23,7 +26,8 @@ Work through these in order:
 - **Is the repo subscribed?** `nightporter repos`. If the repo is missing, check `code_dir` and
   `scan_depth`, and that the clone’s remote points at a forge in your `[[accounts]]`.
 - **Is the trigger enabled?** Check `triggers` for that repo.
-- **Is the author trusted?** Look in the inbox (`2` in the TUI, or `nightporter inbox list`).
+- **Is the author trusted?** Look in the inbox (`2` in the TUI, or `nightporter inbox list`). Bots
+  that aren’t in `allow_bots` are dropped, not sent to the inbox.
 - **Is it outside your working hours?** Events outside the `schedule` wait for the next window.
 - **Is it paused?** `nightporter resume`.
 - **Did it hit a limit?** The log says `daily job cap reached` or `only N GB free`. Raise

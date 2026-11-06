@@ -10,12 +10,17 @@ Files:
 | `~/.local/share/nightporter/` | state database, job files, worktrees, packs, daemon log |
 
 `NIGHTPORTER_HOME=/some/dir` moves both to `/some/dir/{config,data}` (handy for testing).
+Other environment variables: `NIGHTPORTER_LOG` (log filter, e.g. `nightporter=debug`),
+`NIGHTPORTER_NO_NOTIFY` (no desktop notifications) and `NO_COLOR` (no colours in the TUI).
+
+Repo files are keyed by forge, not host, so a gitlab.com repo and a self-hosted GitLab repo with
+the same `owner/repo` path share one file.
 The daemon reloads config files when they change. An invalid file is reported and the previous
 config stays active. Unknown keys are errors, so typos don't fail silently.
 
 ## Global keys
 
-| key | default | |
+| key | default | description |
 |---|---|---|
 | `version` | `1` | config format version |
 | `code_dir` | `~/coding` | where your clones live |
@@ -28,12 +33,12 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `retention_days` | `30` | history kept in the state db |
 | `worktree_idle_days` | `14` | idle worktrees are removed after this |
 | `marketplaces` | `[]` | extra marketplace git URLs |
-| `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` |
+| `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author` |
 
 ## Per-repo keys (`[defaults]` or a repo file)
 
-| key | default | |
+| key | default | description |
 |---|---|---|
 | `subscribed` | `false` | repo files only |
 | `agent` | `claude` | `claude` or `opencode` |
@@ -50,9 +55,9 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `sandbox_domains` | `[]` | domains sandboxed commands may reach |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
-| `[trust]` | | `roles`, `allow_users`, `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`, `open` |
-| `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz` |
-| `[reply]` | | `style`, `language`, `footer` (`true`), `resolve_threads` (`false`) |
+| `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |
+| `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz` |
+| `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`) |
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`) |

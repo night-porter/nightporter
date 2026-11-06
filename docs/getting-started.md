@@ -48,8 +48,8 @@ It asks for:
    the command to fix each problem.
 4. **Where your clones live** (`~/coding` by default). Night Porter works on the clones you
    already have.
-5. **Default autonomy level**. Start with `draft`, or `suggest` if you want to watch it for a
-   while first. See [autonomy levels](#autonomy-levels).
+5. **Default autonomy level**. Start at `suggest` or `draft`: `draft` lets you approve every push,
+   `suggest` never pushes at all. See [autonomy levels](#autonomy-levels).
 6. **Active hours**, for example `mon-fri 08:00-09:00,17:00-22:00`. Leave it empty to run
    any time.
 7. **Repos to subscribe to**, picked from the clones it found.

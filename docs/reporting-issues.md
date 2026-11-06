@@ -25,7 +25,7 @@ New review steps, reply styles and environment presets can often be a
 GitHub, or email [security@night-porter.com](mailto:security@night-porter.com). Night Porter runs an agent because of text written by other people, so anything that
 lets an untrusted author reach the agent, bypass a pre-push check or see a token counts.
 
-<!--@include: ../SECURITY.md{13,}-->
+<!--@include: ../SECURITY.md#details-->
 
 ## Anything else
 

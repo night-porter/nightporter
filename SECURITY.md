@@ -10,6 +10,7 @@ reports seriously.
 **Security → Report a vulnerability** on this repository, or email
 [security@night-porter.com](mailto:security@night-porter.com).
 
+<!-- #region details -->
 Please include:
 
 - the version (`nightporter --version`) and OS
@@ -22,7 +23,7 @@ We aim to acknowledge reports within 7 days and to agree on a disclosure date wi
 
 In scope, with the most severe first:
 
-1. Anything that lets an **untrusted author** (see `docs/threat-model.md`) get text, commands or
+1. Anything that lets an **untrusted author** (see the [threat model](https://docs.night-porter.com/threat-model)) get text, commands or
    code to the agent, or get Night Porter to push, post or run code without approval.
 2. Bypasses of the always-on pre-push checks (secrets, protected paths, force-push, Night Porter
    files in commits).
@@ -37,3 +38,4 @@ explains where that line is.
 ## Supported versions
 
 Only the latest release gets security fixes until 1.0.
+<!-- #endregion details -->

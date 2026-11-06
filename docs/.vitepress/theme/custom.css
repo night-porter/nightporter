@@ -1,11 +1,16 @@
 /* ponytail: just the brand colour from the main site; the default theme does the rest */
+/* #8f5600 keeps links, inline code and buttons at ≥4.5:1 on light backgrounds (WCAG 1.4.3) */
 :root {
-  --vp-c-brand-1: #b86e00;
-  --vp-c-brand-2: #9a5c00;
-  --vp-c-brand-3: #b86e00;
+  --vp-c-brand-1: #8f5600;
+  --vp-c-brand-2: #7a4900;
+  --vp-c-brand-3: #8f5600;
 }
 .dark {
   --vp-c-brand-1: #ffb547;
   --vp-c-brand-2: #ffc46b;
-  --vp-c-brand-3: #b86e00;
+  --vp-c-brand-3: #ffb547;
+  --vp-button-brand-text: #000;
+  --vp-button-brand-hover-text: #000;
+  --vp-button-brand-active-text: #000;
 }
+.dark .vp-doc [class*='language-'] > span.lang { color: var(--vp-c-text-2); }

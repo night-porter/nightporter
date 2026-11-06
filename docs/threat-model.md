@@ -27,9 +27,12 @@ security boundary is, and which protections cannot be turned off.
 
 - Trust rules are checked in this order:
   1. a denied user or team is rejected
-  2. an allowed user, team or bot is accepted
-  3. a comment author whose role is in `trust.roles` is accepted
-  4. everyone else is untrusted
+  2. a bot is accepted only if it is in `allow_bots`, and is otherwise dropped (bots are never
+     trusted by role: anyone with access can install one)
+  3. an allowed user or team is accepted
+  4. a comment author whose role is in `trust.roles` is accepted
+  5. with `trust.open = true`, everyone else is accepted (and the level is capped at `suggest`)
+  6. everyone else is untrusted
 - GitHub reports `MEMBER`/`COLLABORATOR` for read-only users too, so Night Porter checks the
   author's real repo permission (write or higher counts as collaborator).
 - Items from untrusted authors go to the TUI inbox and are not processed until you choose
@@ -92,7 +95,8 @@ commit SHA.
 
 ### B4. Running other people's code
 
-Any job on a branch written by an untrusted author (maintainer `review`/`fix` on their MR) needs
+Any job on a branch you didn't write (any maintainer request on someone else's PR or MR), and any
+`reproduce` that runs an environment or allowed commands, needs
 your approval **before the agent starts at all**: the branch can carry agent configuration
 (CLAUDE.md, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
 saw; if they push again, Night Porter asks again. `reproduce` jobs that may run commands need
@@ -102,7 +106,7 @@ approve. Environment commands only ever come from your own config, never from th
 
 ### B5. Packs
 
-Packs contain only TOML and markdown: no executable code, pinned to a commit SHA. A pack step can
+Packs contain only TOML, markdown and plain text: no executable code, pinned to a commit SHA. A pack step can
 block a job or require approval; it can never relax B1–B4. Updating a pack shows the prompt diff
 before it is applied. A step that needs write access shows a warning at install time.
 

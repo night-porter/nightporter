@@ -49,6 +49,9 @@ export default defineConfig({
     ],
     editLink: { pattern: `${REPO}/edit/main/docs/:path`, text: 'Edit this page on GitHub' },
     search: { provider: 'local' },
-    footer: { message: 'MIT or Apache-2.0' },
+    footer: {
+      message:
+        'MIT or Apache-2.0 · <a href="https://night-porter.com">night-porter.com</a> · <a href="mailto:hi@night-porter.com">hi@night-porter.com</a>',
+    },
   },
 })

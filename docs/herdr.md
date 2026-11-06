@@ -5,7 +5,7 @@ agents; Night Porter is what runs while you’re not there.
 
 ## Take over a job
 
-On any job, press `h` in the TUI, or run:
+On a finished or waiting job, press `h` in the TUI, or run:
 
 ```sh
 nightporter handoff <id>
@@ -33,5 +33,5 @@ command = "nightporter.open-queue"
 description = "Night Porter queue"
 ```
 
-The plugin needs the `nightporter` binary on your `PATH`, and the daemon running for live
-updates.
+The plugin needs herdr 0.9.0 or newer, the `nightporter` binary on your `PATH`, and the daemon
+running for live updates.

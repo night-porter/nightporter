@@ -2,6 +2,8 @@
 
 **Handles your PRs while you're away.**
 
+[Website](https://night-porter.com) · [Docs](https://docs.night-porter.com) · [X](https://x.com/NightPorterDev) · [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) · [Mastodon](https://mastodon.social/@nightporter)
+
 Night Porter is like an IRC bouncer for your pull requests. It watches GitHub and GitLab for
 review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
 (Claude Code or OpenCode) on your local clone to deal with them, within the rules you set.
@@ -40,7 +42,7 @@ Night Porter **never** merges, force-pushes, closes or approves.
 
 - GitHub (github.com) and GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`)
 - Claude Code and OpenCode
-- Trust rules by role, user, team or bot, plus an inbox for first-time authors
+- Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
 - Several active windows per day; events outside them are queued
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional
@@ -48,14 +50,14 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)
 - Maintainer mode: triage, reproduce, fix or review issues and MRs from others, on request
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
-- Leaves no files in your repositories
+- Leaves no files in your repositories (it uses its own branches and worktrees)
 
 ## Works with herdr
 
 [herdr](https://herdr.dev) is where you run and watch agents; Night Porter is what runs while
 you're not there. They fit together:
 
-- **Take over a job in herdr.** On any job, press `h` in the TUI (or run
+- **Take over a job in herdr.** On a finished or waiting job, press `h` in the TUI (or run
   `nightporter handoff <id>`). Night Porter opens a herdr workspace at that job's worktree,
   starts your agent, and briefs it: what was asked, what it changed, which checks need you,
   and what is drafted but not posted. You continue from there, interactively.

@@ -3,3 +3,9 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/night-porter/nightporter/security/advisories/new
     about: Please report security issues privately.
+  - name: Docs and troubleshooting
+    url: https://docs.night-porter.com/troubleshooting
+    about: Most setup problems are covered here.
+  - name: Questions
+    url: mailto:hi@night-porter.com
+    about: Anything that isn't a bug or a feature request.
