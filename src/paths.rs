@@ -78,7 +78,7 @@ impl Paths {
 /// Expand a leading `~/`.
 pub fn expand_tilde(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
-        Some(rest) => std::env::home_dir().map(|h| h.join(rest)).unwrap_or_else(|| PathBuf::from(p)),
+        Some(rest) => std::env::home_dir().map_or_else(|| PathBuf::from(p), |h| h.join(rest)),
         None => PathBuf::from(p),
     }
 }

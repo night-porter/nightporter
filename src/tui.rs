@@ -1,5 +1,5 @@
 //! Terminal UI. Keyboard-only, text labels for every state (colour is decoration, never the only
-//! signal), honours NO_COLOR. Reads/writes the same SQLite state as the daemon.
+//! signal), honours `NO_COLOR`. Reads/writes the same SQLite state as the daemon.
 
 use crate::actions::{self, Scope};
 use crate::config::Config;
@@ -110,7 +110,7 @@ impl App {
         // Needs-you first, then today's failures, then running.
         self.queue.sort_by_key(|j| (!j.status.needs_user(), j.status != JobStatus::Failed, j.id));
         if let Some(id) = self.detail {
-            self.detail_text = self.db.job(id).ok().flatten().map(|j| job_text(&self.db, &j)).unwrap_or_else(|| "job not found".into());
+            self.detail_text = self.db.job(id).ok().flatten().map_or_else(|| "job not found".into(), |j| job_text(&self.db, &j));
         }
         self.history = jobs;
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
@@ -163,7 +163,7 @@ impl App {
     /// Returns false to quit.
     fn key(&mut self, k: KeyEvent) -> bool {
         if let Some((_, f)) = self.confirm.take() {
-            if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            if matches!(k.code, KeyCode::Char('y' | 'Y')) {
                 self.msg = f(self).unwrap_or_else(|e| format!("error: {e:#}"));
                 self.refresh(true);
             } else {
@@ -204,7 +204,7 @@ impl App {
                 self.switch(TABS[(i + TABS.len() - 1) % TABS.len()].0);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.sel.select(Some((self.sel.selected().unwrap_or(0) + 1).min(self.len().saturating_sub(1))))
+                self.sel.select(Some((self.sel.selected().unwrap_or(0) + 1).min(self.len().saturating_sub(1))));
             }
             KeyCode::Up | KeyCode::Char('k') => self.sel.select(Some(self.sel.selected().unwrap_or(0).saturating_sub(1))),
             KeyCode::Home | KeyCode::Char('g') => self.sel.select(Some(0)),
@@ -268,7 +268,7 @@ impl App {
             KeyCode::Char('r') => {
                 self.confirm = Some((
                     format!("Reject job {id}? Nothing is pushed or posted. y/N"),
-                    Box::new(move |a: &mut App| actions::reject(&a.db, id).map(|_| format!("job {id} rejected"))),
+                    Box::new(move |a: &mut App| actions::reject(&a.db, id).map(|()| format!("job {id} rejected"))),
                 ));
                 return;
             }
@@ -279,7 +279,7 @@ impl App {
             },
             KeyCode::Char('c') => {
                 let cmd = self.db.job(id).ok().flatten().map(|j| crate::job::manual_commands(&j)).unwrap_or_default();
-                if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|_| format!("copied: {cmd}")) }
+                if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|()| format!("copied: {cmd}")) }
             }
             KeyCode::Char('y') => {
                 let text = self
@@ -289,7 +289,7 @@ impl App {
                     .flatten()
                     .map(|j| j.replies.iter().map(|r| r.body.clone()).collect::<Vec<_>>().join("\n\n---\n\n"))
                     .unwrap_or_default();
-                copy(&text).map(|_| "replies copied".into())
+                copy(&text).map(|()| "replies copied".into())
             }
             _ => return,
         };
@@ -300,8 +300,8 @@ impl App {
     fn inbox_key(&mut self, k: KeyEvent) {
         let Some(e) = self.sel.selected().and_then(|i| self.inbox.get(i)).cloned() else { return };
         let r = match k.code {
-            KeyCode::Char('o') => actions::allow_once(&self.db, &e.id).map(|_| "allowed once".into()),
-            KeyCode::Char('i') => actions::ignore(&self.db, &e.id).map(|_| "ignored".into()),
+            KeyCode::Char('o') => actions::allow_once(&self.db, &e.id).map(|()| "allowed once".into()),
+            KeyCode::Char('i') => actions::ignore(&self.db, &e.id).map(|()| "ignored".into()),
             KeyCode::Char('a') => actions::allow_always(&self.paths, &self.db, &e.author, Scope::Repo(&e.repo))
                 .map(|n| format!("@{} trusted on {} ({n} released)", e.author, e.repo)),
             KeyCode::Char('A') => {
@@ -334,7 +334,7 @@ impl App {
 
     fn repo_key(&mut self, k: KeyEvent) {
         let Some(i) = self.sel.selected() else { return };
-        if matches!(k.code, KeyCode::Char(' ') | KeyCode::Char('s') | KeyCode::Enter)
+        if matches!(k.code, KeyCode::Char(' ' | 's') | KeyCode::Enter)
             && let Some(r) = self.repos.get(i)
         {
             let on = !r.subscribed;

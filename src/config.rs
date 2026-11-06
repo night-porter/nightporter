@@ -558,11 +558,11 @@ fn np_label() -> String {
     "nightporter".into()
 }
 fn all_triggers() -> Vec<Trigger> {
-    use Trigger::*;
+    use Trigger::{CiFailure, Comment, MergeConflict, Review, ReviewComment};
     vec![ReviewComment, Review, Comment, CiFailure, MergeConflict]
 }
 fn default_roles() -> Vec<crate::forge::Role> {
-    use crate::forge::Role::*;
+    use crate::forge::Role::{Collaborator, Maintainer, Member, Owner};
     vec![Owner, Maintainer, Member, Collaborator]
 }
 fn default_escalations() -> Vec<Escalation> {

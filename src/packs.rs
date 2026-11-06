@@ -42,7 +42,7 @@ pub struct Step {
     pub name: String,
     pub hook: Hook,
     pub prompt: String,
-    /// The step asks for write access (only meaningful for pre/post_fix, which share the main run).
+    /// The step asks for write access (only meaningful for `pre/post_fix`, which share the main run).
     #[serde(default)]
     pub write: bool,
 }

@@ -95,7 +95,7 @@ pub fn run(paths: &Paths) -> bool {
     };
     if let Some(cfg) = &cfg {
         let forges: Vec<_> = cfg.accounts.iter().map(|a| (a.forge, a.host().to_string())).collect();
-        let mut agents = vec![cfg.resolve(None).map(|s| s.agent).unwrap_or(AgentKind::Claude)];
+        let mut agents = vec![cfg.resolve(None).map_or(AgentKind::Claude, |s| s.agent)];
         if let Ok(rd) = walk_repo_files(&paths.repos_dir()) {
             for f in rd {
                 if let Ok(t) = std::fs::read_to_string(&f)

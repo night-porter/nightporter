@@ -414,7 +414,7 @@ impl Db {
     }
 
     pub fn prune(&self, retention_days: u32) -> Result<()> {
-        let cutoff = now() - retention_days as i64 * 86400;
+        let cutoff = now() - i64::from(retention_days) * 86400;
         self.0.execute("DELETE FROM job_log WHERE ts < ?1", [cutoff])?;
         self.0.execute("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ('done','failed','rejected','ready')", [cutoff])?;
         self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped','inbox')", [cutoff])?;

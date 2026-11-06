@@ -116,7 +116,7 @@ pub async fn run(paths: Paths) -> Result<()> {
 
     let mut next_poll: HashMap<(ForgeKind, String), Instant> = HashMap::new();
     let mut last_scan = Instant::now();
-    let mut last_housekeeping = Instant::now() - Duration::from_secs(3600);
+    let mut last_housekeeping = Instant::now().checked_sub(Duration::from_secs(3600)).unwrap();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {

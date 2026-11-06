@@ -95,7 +95,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let clone = ctx.clone_for(&j.repo).with_context(|| format!("{} is not cloned under the code dir", j.repo))?;
     let forge = ctx.forge(&j.repo)?;
     let me = forge.lock().await.me().to_string();
-    let repo_url = git::remote_url(&clone, &j.repo, &cfg.accounts).await?;
+    let repo_url = git::remote_url(&clone, &j.repo, &cfg.accounts)?;
     let branch = git::branch_name(j.target, j.number);
     let wt = worktree_path(ctx, &j);
     j.worktree = wt.to_string_lossy().into();
@@ -357,7 +357,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
 
     let f = forge.lock().await;
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
-        let pr_body = j.replies.iter().find(|r| r.event.is_none()).map(|r| r.body.clone()).unwrap_or_else(|| j.summary.clone());
+        let pr_body = j.replies.iter().find(|r| r.event.is_none()).map_or_else(|| j.summary.clone(), |r| r.body.clone());
         let title = format!("Fix #{}: {}", j.number, first_line(&j.summary));
         let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
         log(ctx, id, &format!("opened draft {url}"));
@@ -430,7 +430,7 @@ pub async fn housekeeping(ctx: &Ctx) -> Result<()> {
 /// `nightporter gc`: clean worktrees. `all` removes every idle worktree.
 pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
     let cfg = ctx.cfg();
-    let idle = std::time::Duration::from_secs(cfg.worktree_idle_days as u64 * 86400);
+    let idle = std::time::Duration::from_secs(u64::from(cfg.worktree_idle_days) * 86400);
     let jobs = ctx.db(|d| d.recent_jobs(10_000))?;
     let mut seen = std::collections::HashSet::new();
     for j in jobs {
@@ -508,8 +508,10 @@ fn env_paths(wt: &Path) -> Vec<String> {
     let mut v = vec![".ddev".to_string(), ".devcontainer".to_string()];
     for e in std::fs::read_dir(wt).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().to_string();
-        let compose = (n.starts_with("docker-compose") || n.starts_with("compose")) && (n.ends_with(".yml") || n.ends_with(".yaml"));
-        if compose || matches!(n.as_str(), "Makefile" | "makefile" | "GNUmakefile" | "justfile" | ".env") {
+        // Case-insensitive: on macOS `Docker-Compose.YML` is what `docker compose` reads.
+        let l = n.to_ascii_lowercase();
+        let compose = (l.starts_with("docker-compose") || l.starts_with("compose")) && (l.ends_with(".yml") || l.ends_with(".yaml"));
+        if compose || matches!(l.as_str(), "makefile" | "gnumakefile" | "justfile" | ".env") {
             v.push(n);
         }
     }
@@ -594,7 +596,7 @@ async fn default_branch(clone: &Path, url: &str) -> Result<String> {
 
 /// The head repo (from its https clone URL) is a fork that isn't the base repo and isn't yours.
 fn foreign_fork(head_https: &str, base_path: &str, me: &str) -> bool {
-    let path = head_https.split_once("://").and_then(|(_, r)| r.split_once('/')).map(|(_, p)| p.trim_end_matches(".git")).unwrap_or("");
+    let path = head_https.split_once("://").and_then(|(_, r)| r.split_once('/')).map_or("", |(_, p)| p.trim_end_matches(".git"));
     if path.is_empty() || path.eq_ignore_ascii_case(base_path) {
         return false;
     }
@@ -736,6 +738,7 @@ mod tests {
         std::fs::create_dir_all(wt.join(".ddev")).unwrap();
         std::fs::write(wt.join(".ddev/config.yaml"), "name: ok\n").unwrap();
         std::fs::write(wt.join("compose.yaml"), "services: {}\n").unwrap();
+        std::fs::write(wt.join("Docker-Compose.YML"), "services: {}\n").unwrap();
         std::fs::write(wt.join("src.rs"), "fn main() {}\n").unwrap();
         snapshot_env(&wt, &snap).unwrap();
 
@@ -743,6 +746,7 @@ mod tests {
         std::fs::write(wt.join(".ddev/config.yaml"), "hooks: {pre-stop: [{exec-host: evil}]}\n").unwrap();
         std::fs::write(wt.join(".ddev/docker-compose.evil.yaml"), "x").unwrap();
         std::fs::write(wt.join("docker-compose.override.yml"), "x").unwrap();
+        std::fs::write(wt.join("Docker-Compose.YML"), "services: {evil: {privileged: true}}\n").unwrap();
         std::fs::write(wt.join("src.rs"), "fn main() { changed() }\n").unwrap();
         restore_env(&wt, &snap).unwrap();
 
@@ -750,6 +754,7 @@ mod tests {
         assert!(!wt.join(".ddev/docker-compose.evil.yaml").exists());
         assert!(!wt.join("docker-compose.override.yml").exists());
         assert_eq!(std::fs::read_to_string(wt.join("compose.yaml")).unwrap(), "services: {}\n");
+        assert_eq!(std::fs::read_to_string(wt.join("Docker-Compose.YML")).unwrap(), "services: {}\n", "odd case is still an env file");
         // Only env files are touched: the agent's real work stays.
         assert_eq!(std::fs::read_to_string(wt.join("src.rs")).unwrap(), "fn main() { changed() }\n");
     }

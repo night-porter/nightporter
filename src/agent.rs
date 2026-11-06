@@ -231,7 +231,7 @@ pub fn claude_settings(s: &RepoSettings, wt: &Path, job_dir: &Path, read_only: b
     deny.extend(["WebFetch", "WebSearch"].map(String::from));
     // Credentials and Night Porter's own state on disk. With the sandbox on, these also bind
     // the agent's shell commands.
-    for p in SECRET_PATHS.iter().map(|p| p.to_string()).chain(own_paths()) {
+    for p in SECRET_PATHS.iter().map(std::string::ToString::to_string).chain(own_paths()) {
         deny.push(format!("Read({p})"));
     }
     for g in BUILTIN_PROTECTED.iter().copied().chain(s.checks.protected.iter().map(String::as_str)) {
@@ -257,16 +257,17 @@ pub fn claude_settings(s: &RepoSettings, wt: &Path, job_dir: &Path, read_only: b
         let mut allow_read: Vec<String> = vec![wt.to_string_lossy().into()];
         allow_read.extend(common_git_dir(wt).map(|d| d.to_string_lossy().to_string()));
         allow_read.push(job_dir.join("git").to_string_lossy().into());
-        allow_read.extend(TOOLCHAIN_READS.iter().map(|p| p.to_string()));
+        allow_read.extend(TOOLCHAIN_READS.iter().map(std::string::ToString::to_string));
         allow_read.extend(s.sandbox_read_allow.iter().cloned());
-        let deny_read: Vec<String> = std::iter::once("~/".to_string()).chain(TOOLCHAIN_SECRETS.iter().map(|p| p.to_string())).collect();
+        let deny_read: Vec<String> =
+            std::iter::once("~/".to_string()).chain(TOOLCHAIN_SECRETS.iter().map(std::string::ToString::to_string)).collect();
         sb["filesystem"] = json!({ "denyRead": deny_read, "allowRead": allow_read });
         v["sandbox"] = sb;
     }
     v
 }
 
-/// OpenCode config (passed via `OPENCODE_CONFIG`).
+/// `OpenCode` config (passed via `OPENCODE_CONFIG`).
 pub fn opencode_config(s: &RepoSettings, read_only: bool) -> serde_json::Value {
     let mut bash = serde_json::Map::new();
     bash.insert("*".into(), json!("deny"));

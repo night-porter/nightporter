@@ -73,7 +73,10 @@ pub fn run(paths: &Paths) -> Result<()> {
     if f == "2" || f == "3" {
         let hosts = ask_valid("GitLab host(s), comma-separated (e.g. gitlab.com, git.drupalcode.org)", "gitlab.com", |a| {
             let v: Vec<String> = a.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
-            if v.is_empty() { bail!("enter at least one host") } else { Ok(v) }
+            if v.is_empty() {
+                bail!("enter at least one host")
+            }
+            Ok(v)
         })?;
         forges.extend(hosts.into_iter().map(|h| (ForgeKind::GitLab, h)));
     }

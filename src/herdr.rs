@@ -1,4 +1,4 @@
-//! Hand a job over to herdr (https://herdr.dev): open a workspace at the job's worktree with an
+//! Hand a job over to herdr (<https://herdr.dev)>: open a workspace at the job's worktree with an
 //! interactive agent that already knows what Night Porter did. Night Porter works the night
 //! shift; you pick it up in herdr.
 

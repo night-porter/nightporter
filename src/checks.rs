@@ -205,8 +205,11 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
         let mut deps: Vec<&str> = d
             .paths()
             .filter(|p| {
-                let name = p.rsplit('/').next().unwrap_or(p);
-                DEP_FILES.contains(&name) || (name.starts_with("requirements") && name.ends_with(".txt")) || name.ends_with(".csproj")
+                // Case-insensitive: on macOS `Package.json` is `package.json`.
+                let name = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
+                DEP_FILES.iter().any(|d| d.eq_ignore_ascii_case(&name))
+                    || (name.starts_with("requirements") && name.ends_with(".txt"))
+                    || name.ends_with(".csproj")
             })
             .collect();
         deps.dedup();

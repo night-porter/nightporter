@@ -547,7 +547,7 @@ impl GitHub {
             .cloned()
             .unwrap_or_default();
         for t in threads {
-            let first = t.pointer("/comments/nodes/0/databaseId").and_then(|d| d.as_u64());
+            let first = t.pointer("/comments/nodes/0/databaseId").and_then(serde_json::Value::as_u64);
             if first == Some(want) && t["isResolved"] == false {
                 let m = json!({ "query": "mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread { id } } }", "variables": { "id": t["id"] } });
                 self.api.send(Method::POST, &gql, &m).await?;

@@ -369,8 +369,9 @@ fn read_only(cmd: &Cmd) -> bool {
     )
 }
 
+#[must_use]
 pub fn agent_for(paths: &Paths, repo: &RepoId) -> config::AgentKind {
-    config::Config::load(paths).and_then(|c| c.settings_for(paths, repo)).map(|s| s.agent).unwrap_or(config::AgentKind::Claude)
+    config::Config::load(paths).and_then(|c| c.settings_for(paths, repo)).map_or(config::AgentKind::Claude, |s| s.agent)
 }
 
 fn db(paths: &Paths) -> Result<Db> {
@@ -564,7 +565,7 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
         }
         PackCmd::Update { name, yes } => {
             let l = packs::lock(paths).packs.get(&name).cloned().with_context(|| format!("{name} is not installed"))?;
-            let rev = packs::find(paths, &cfg.marketplaces, &name).map(|e| e.rev).unwrap_or_else(|| "HEAD".into());
+            let rev = packs::find(paths, &cfg.marketplaces, &name).map_or_else(|| "HEAD".into(), |e| e.rev);
             let (staging, m, sha) = packs::fetch(paths, &l.url, &rev).await?;
             if sha == l.rev {
                 let _ = std::fs::remove_dir_all(&staging);

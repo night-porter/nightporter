@@ -1,5 +1,5 @@
-//! Taking over a job interactively: open it in herdr (https://herdr.dev) or Rex
-//! (https://www.superlogical.com/rex) at the job's worktree, with an agent that's already briefed.
+//! Taking over a job interactively: open it in herdr (<https://herdr.dev>) or Rex
+//! (<https://www.superlogical.com/rex>) at the job's worktree, with an agent that's already briefed.
 
 use crate::config::{AgentKind, Handoff};
 use crate::paths::Paths;
