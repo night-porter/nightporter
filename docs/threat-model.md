@@ -23,7 +23,7 @@ security boundary is, and which protections cannot be turned off.
 | Maintainers (role in `trust.roles`, or allow-listed user, team or bot) | for **requests** | comments and reviews on your PRs, `/nightporter` commands, labels |
 | Anyone else on the forge | **no** | comments, issues, MRs, fork code |
 | Pack authors | no (reviewed by you at install, pinned to a commit) | prompt files |
-| The agent (Claude Code / OpenCode) | **no**; treated as possibly confused or injected | runs in a worktree |
+| The agent (Claude Code / OpenCode / Codex) | **no**; treated as possibly confused or injected | runs in a worktree |
 
 ## Boundaries and controls
 
@@ -78,7 +78,7 @@ security boundary is, and which protections cannot be turned off.
   sandboxed commands can't read your home folder except the worktree, its git dir and common
   toolchain folders (`sandbox_read_allow` adds more). The agent's git uses its own config with
   only your name and email.
-- The prompt reaches Claude Code on stdin, not as a command-line argument (visible in `ps`).
+- The prompt reaches Claude Code and Codex on stdin, not as a command-line argument (visible in `ps`).
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
@@ -86,7 +86,17 @@ security boundary is, and which protections cannot be turned off.
   to commands. It fails closed: if the sandbox can't start, the job fails. Verified in headless
   `-p` mode on macOS (2026-11-05): an allowed `cat` of a read-denied path fails with
   "Operation not permitted" (`cargo test real_agent_smoke -- --ignored`).
-- Gaps: OpenCode has no sandbox and no read denies (and its prompt is still an argument), and repos with `sandbox = false` (e.g. for
+- With Codex, Night Porter runs `codex exec --sandbox workspace-write` (writes to the worktree
+  only, network off; `read-only` for review jobs; `danger-full-access` only with
+  `sandbox = false`) with `--ignore-user-config --ignore-rules --ephemeral`, so your
+  `~/.codex/config.toml` (MCP servers, hooks, profiles) and execpolicy rules don't load; the login
+  still comes from `CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and
+  `sandbox_domains` don't apply.
+- Gaps: OpenCode has no sandbox and no read denies (and its prompt is still an argument). Codex's
+  sandbox limits writes and network but not reads: its commands can read files in your home
+  folder (credentials stay out of its environment, and with the network off it can't send them
+  anywhere, but a reply it writes could quote them; draft level shows you every reply first).
+  Repos with `sandbox = false` (e.g. for
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
 - The agent can't redirect the daemon's git: the worktree's `.git` pointer is recorded before the
@@ -105,7 +115,7 @@ Run on every push, in every mode, including `auto`:
 | check | can be disabled? |
 |---|---|
 | secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
-| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
+| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
@@ -120,7 +130,7 @@ commit SHA.
 Any job on a branch you didn't write (any maintainer request on someone else's PR or MR), and any
 `reproduce` that runs an environment or allowed commands, needs
 your approval **before the agent starts at all**: the branch can carry agent configuration
-(CLAUDE.md, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
+(CLAUDE.md, `.codex/`, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
 saw; if they push again, Night Porter asks again. The same applies to your own PR when its head
 branch lives in someone else's fork. Commits someone else pushed to your own branch are not
 detected. `reproduce` jobs that may run commands need
@@ -150,6 +160,15 @@ directories or the state database, and they are kept in `secrecy` types in memor
 
 Job files live in `~/.local/share/nightporter/jobs/<id>/`. Worktrees live outside your clones. A
 pre-push check rejects any commit containing Night Porter files.
+
+### B8. Network calls of its own
+
+Besides your forges (through `gh`/`glab` or the API) and the git URLs of marketplaces and packs
+you add, Night Porter makes one call: with `check_updates = true` (the default), the daemon asks
+GitHub's public releases API for the latest version number once a day (`nightporter update` asks
+now). It is anonymous: no ID and nothing about you or your repos is sent; GitHub sees your IP
+address and the `nightporter/<version>` user agent. Night Porter never downloads or installs an
+update itself. Set `check_updates = false` to turn it off.
 
 ## Out of scope
 

@@ -56,6 +56,7 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
         let fix = match a {
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code   (then run `claude` once to log in)",
             AgentKind::OpenCode => "curl -fsSL https://opencode.ai/install | bash   (or brew install opencode)",
+            AgentKind::Codex => "npm install -g @openai/codex   (or brew install --cask codex; then run `codex` once to log in)",
         };
         out.push(tool(a.bin(), "--version", fix, false));
     }
@@ -143,7 +144,7 @@ pub fn run(paths: &Paths) -> bool {
         ok: running,
         optional: true,
         detail: if running { "running".into() } else { "not running".into() },
-        fix: "nightporter service install   (or run `nightporter daemon`)".into(),
+        fix: "nightporter start   (and `nightporter service install` to start it at login)".into(),
     });
 
     print(&checks);

@@ -165,7 +165,7 @@ fn one_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().chars().take(200).collect()
 }
 
-fn read_user_file(paths: &Paths, p: &str) -> Result<String> {
+pub fn read_user_file(paths: &Paths, p: &str) -> Result<String> {
     let path = expand_tilde(p);
     let path = if path.is_relative() { paths.config_dir.join(path) } else { path };
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))

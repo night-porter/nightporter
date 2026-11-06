@@ -38,6 +38,8 @@ pub enum JobStatus {
     Done,
     Failed,
     Rejected,
+    /// Put away without acting (nothing pushed or posted). Undo with restore.
+    Dismissed,
 }
 
 impl JobStatus {
@@ -52,6 +54,7 @@ impl JobStatus {
             JobStatus::Done => "done",
             JobStatus::Failed => "failed",
             JobStatus::Rejected => "rejected",
+            JobStatus::Dismissed => "dismissed",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -69,6 +72,7 @@ impl JobStatus {
             JobStatus::Done => "done",
             JobStatus::Failed => "FAILED",
             JobStatus::Rejected => "rejected",
+            JobStatus::Dismissed => "dismissed",
         }
     }
     pub fn needs_user(self) -> bool {
@@ -141,6 +145,9 @@ pub struct JobMeta {
     /// Indexes of replies already posted (delivery can be retried without double-posting).
     #[serde(default)]
     pub posted: Vec<usize>,
+    /// The status a dismissed job had, so restore can put it back.
+    #[serde(default)]
+    pub dismissed_from: Option<JobStatus>,
 }
 
 pub fn now() -> i64 {
@@ -253,7 +260,17 @@ impl Db {
     }
 
     pub fn events_with(&self, d: Disposition) -> Result<Vec<(Event, i64)>> {
-        let mut st = self.0.prepare("SELECT json, seen_at FROM events WHERE disposition=?1 ORDER BY seen_at")?;
+        self.events_where(d, "ORDER BY seen_at")
+    }
+
+    /// Inbox events you ignored (not those dropped by filters or a deny), newest first.
+    pub fn ignored_events(&self) -> Result<Vec<(Event, i64)>> {
+        self.events_where(Disposition::Dropped, "AND reason='ignored' ORDER BY seen_at DESC")
+    }
+
+    /// `tail`: a fixed SQL suffix (conditions and order), never user input.
+    fn events_where(&self, d: Disposition, tail: &str) -> Result<Vec<(Event, i64)>> {
+        let mut st = self.0.prepare(&format!("SELECT json, seen_at FROM events WHERE disposition=?1 {tail}"))?;
         let rows = st.query_map([enum_str(&d)], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {
@@ -344,6 +361,16 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a job, its log, and the events it took. Permanent.
+    pub fn purge_job(&mut self, id: i64) -> Result<()> {
+        let tx = self.0.transaction()?;
+        tx.execute("DELETE FROM job_log WHERE job_id=?1", [id])?;
+        tx.execute("DELETE FROM events WHERE job_id=?1", [id])?;
+        tx.execute("DELETE FROM jobs WHERE id=?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn fail(&self, id: i64, err: &str) -> Result<()> {
         self.0.execute("UPDATE jobs SET status='failed', error=?2, updated_at=?3 WHERE id=?1", params![id, err, now()])?;
         Ok(())
@@ -417,7 +444,8 @@ impl Db {
     pub fn prune(&self, retention_days: u32) -> Result<()> {
         let cutoff = now() - i64::from(retention_days) * 86400;
         self.0.execute("DELETE FROM job_log WHERE ts < ?1", [cutoff])?;
-        self.0.execute("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ('done','failed','rejected','ready')", [cutoff])?;
+        self.0
+            .execute("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ('done','failed','rejected','ready','dismissed')", [cutoff])?;
         self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped','inbox')", [cutoff])?;
         Ok(())
     }
@@ -464,7 +492,7 @@ pub fn enum_str<T: Serialize>(v: &T) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::forge::{ForgeKind, Role, Trigger};
 

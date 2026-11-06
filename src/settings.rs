@@ -56,13 +56,18 @@ pub static SETTINGS: &[Setting] = &[
     s("retention_days", Int, "Days of job history kept."),
     s("worktree_idle_days", Int, "Idle worktrees are removed after this many days."),
     s("handoff", Choice(&["auto", "herdr", "rex"]), "Where h (take over) opens a job."),
+    s(
+        "check_updates",
+        Bool,
+        "Once a day, ask GitHub for the latest release number and tell you when there's a new one. Sends nothing about you or your repos.",
+    ),
     s("marketplaces", List, "Extra pack marketplace git URLs."),
     s("notifications.needs_approval", Bool, "Desktop notification when a job needs your approval."),
     s("notifications.failed", Bool, "Desktop notification when a job fails."),
     s("notifications.done", Bool, "Desktop notification when a job is done."),
     s("notifications.new_author", Bool, "Desktop notification when someone untrusted lands in the inbox."),
     // Defaults for every repo (each repo file can override them)
-    s("defaults.agent", Choice(&["claude", "opencode"]), "Coding agent: Claude Code or OpenCode."),
+    s("defaults.agent", Choice(&["claude", "opencode", "codex"]), "Coding agent: Claude Code, OpenCode or Codex."),
     s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),
     risky(
         "defaults.level",
@@ -285,6 +290,131 @@ pub fn edit_in_editor(path: &Path) -> Result<String> {
     result
 }
 
+/// Dotted keys a repo file sets, e.g. `level`, `reply.style`.
+fn set_keys(t: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+    for (k, v) in t {
+        let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        match v {
+            toml::Value::Table(inner) => set_keys(inner, &key, out),
+            _ => out.push(key),
+        }
+    }
+}
+
+/// Everything that shapes Night Porter's work on one repo, in plain words: what the agent is
+/// told, how it replies, when it runs, who it listens to. Used by `nightporter repo show` and
+/// Enter on the TUI's Repos tab.
+pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone: Option<&Path>) -> Result<String> {
+    use std::fmt::Write;
+    let s = cfg.settings_for(paths, repo)?;
+    let file = paths.repo_file(repo);
+    let mut over = Vec::new();
+    if let Ok(t) = std::fs::read_to_string(&file).unwrap_or_default().parse::<toml::Table>() {
+        set_keys(&t, "", &mut over);
+    }
+    let on = |b: bool| if b { "on" } else { "off" };
+    let list = |v: &[String]| if v.is_empty() { "(none)".to_string() } else { v.join(", ") };
+    let mut o = String::new();
+    let _ = writeln!(o, "{}/{}", repo.host, repo.path);
+    if let Some(c) = clone {
+        let _ = writeln!(o, "Clone:      {}", c.display());
+    }
+    let _ = writeln!(o, "Repo file:  {}{}", file.display(), if file.exists() { "" } else { "  (not created: every value is the default)" });
+    if !over.is_empty() {
+        let _ = writeln!(o, "Set here:   {} (everything else comes from [defaults] in config.toml)", over.join(", "));
+    }
+
+    let _ = writeln!(o, "\nWHAT IT DOES");
+    let _ = writeln!(o, "  watching       {}", if s.subscribed { "yes" } else { "no (not subscribed)" });
+    let _ = writeln!(o, "  level          {}", s.level.as_str());
+    let args = if s.agent_args.is_empty() { String::new() } else { format!("  args: {}", s.agent_args.join(" ")) };
+    let _ = writeln!(o, "  agent          {}{args}", s.agent.label());
+    let triggers: Vec<String> = s.triggers.iter().map(crate::state::enum_str).collect();
+    let _ = writeln!(o, "  starts on      {}", triggers.join(", "));
+    let _ = writeln!(
+        o,
+        "  maintainer     {} (level {}, label {:?})",
+        on(s.maintainer.enabled),
+        s.maintainer.level.as_str(),
+        s.maintainer.label
+    );
+
+    let _ = writeln!(o, "\nREPLIES");
+    let builtin = crate::prompts::STYLES.iter().any(|(n, _)| *n == s.reply.style);
+    let _ = writeln!(o, "  style          {}{}", s.reply.style, if builtin { "  (built in)" } else { "" });
+    let _ = writeln!(o, "  language       {}", s.reply.language);
+    let _ = writeln!(o, "  footer         {}   resolve threads {}", on(s.reply.footer), on(s.reply.resolve_threads));
+    match crate::prompts::style(paths, &s.reply.style) {
+        Ok(text) => {
+            let _ = writeln!(o, "  style text:\n{}", indent(&text, 12));
+        }
+        Err(e) => {
+            let _ = writeln!(o, "  style ERROR: {e:#}");
+        }
+    }
+
+    let _ = writeln!(o, "\nINSTRUCTIONS THE AGENT GETS (besides the request itself)");
+    if let Some(c) = clone {
+        let found: Vec<&str> = ["CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md"].into_iter().filter(|f| c.join(f).is_file()).collect();
+        let _ = writeln!(o, "  from the repo  {}", if found.is_empty() { "(no CLAUDE.md / AGENTS.md)".into() } else { found.join(", ") });
+    }
+    for (name, p) in [("prompt", &s.prompt), ("env.prompt", &s.env.prompt)] {
+        match p {
+            None => {
+                let _ = writeln!(o, "  {name:<14} (none)");
+            }
+            Some(p) => match crate::prompts::read_user_file(paths, p) {
+                Ok(text) => {
+                    let _ = writeln!(o, "  {name:<14} {p}:\n{}", indent(&text, 12));
+                }
+                Err(e) => {
+                    let _ = writeln!(o, "  {name:<14} {p}  ERROR: {e:#}");
+                }
+            },
+        }
+    }
+    let _ = writeln!(o, "  packs          {}", list(&s.packs));
+
+    let _ = writeln!(o, "\nWHEN AND HOW MUCH");
+    let sched: Vec<String> = s.schedule.iter().map(|w| format!("{} {}", w.days, w.windows.join(","))).collect();
+    let _ = writeln!(o, "  hours          {}", if sched.is_empty() { "any time".into() } else { sched.join("; ") });
+    let _ = writeln!(
+        o,
+        "  debounce       {}   timeout {}",
+        crate::config::format_duration(s.debounce),
+        crate::config::format_duration(s.timeout)
+    );
+    let _ = writeln!(o, "  CI-fix tries   {}   CI jobs at auto {}", s.max_ci_attempts, on(s.ci_auto));
+    if let Some(b) = s.max_budget_usd {
+        let _ = writeln!(o, "  budget         ${b:.2} per run");
+    }
+
+    let _ = writeln!(o, "\nWHO IT LISTENS TO");
+    let roles: Vec<String> = s.trust.roles.iter().map(crate::state::enum_str).collect();
+    let _ = writeln!(o, "  roles          {}", roles.join(", "));
+    let _ = writeln!(o, "  always trust   {}", list(&s.trust.allow_users));
+    let _ = writeln!(o, "  never trust    {}", list(&s.trust.deny_users));
+    let _ = writeln!(o, "  bots           {}", list(&s.trust.allow_bots));
+    if s.trust.open {
+        let _ = writeln!(o, "  OPEN: everyone is trusted (level capped at suggest)");
+    }
+
+    let _ = writeln!(o, "\nSAFETY");
+    let _ = writeln!(o, "  sandbox        {}   network: {}", on(s.sandbox), list(&s.sandbox_domains));
+    let _ = writeln!(o, "  may run        {}", list(&s.allow_commands));
+    let esc: Vec<String> = s.checks.escalate_on.iter().map(crate::state::enum_str).collect();
+    let _ = writeln!(o, "  always ask on  {}   protected extra: {}", esc.join(", "), list(&s.checks.protected));
+    let _ = writeln!(o, "  env setup      {}", list(&s.env.setup));
+
+    let _ = writeln!(o, "\nChange: `e` in the TUI's Repos tab, or edit {}", file.display());
+    Ok(o)
+}
+
+fn indent(text: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    text.trim_end().lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +430,26 @@ mod tests {
     }
     fn setting(key: &str) -> &'static Setting {
         SETTINGS.iter().find(|s| s.key == key).unwrap()
+    }
+
+    #[test]
+    fn repo_text_says_what_the_repo_gets() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.config_dir.join("mine.md"), "Always run the linter.").unwrap();
+        std::fs::write(paths.config_file(), "[defaults]\nprompt = \"mine.md\"\n").unwrap();
+        let repo = crate::forge::RepoId::new(crate::forge::ForgeKind::GitHub, "github.com", "o/r");
+        edit_file(&paths.repo_file(&repo), |d| {
+            d["level"] = toml_edit::value("suggest");
+            d["reply"]["style"] = toml_edit::value("non-technical");
+        })
+        .unwrap();
+        let cfg = Config::load(&paths).unwrap();
+        let t = super::repo_text(&paths, &cfg, &repo, None).unwrap();
+        assert!(t.contains("Set here:   level, reply.style"), "{t}");
+        assert!(t.contains("level          suggest") && t.contains("non-technical  (built in)"), "{t}");
+        assert!(t.contains("Always run the linter."), "the prompt file's text is shown: {t}");
     }
 
     #[test]

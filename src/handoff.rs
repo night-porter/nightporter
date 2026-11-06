@@ -67,7 +67,7 @@ fn rex(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
     let mut cmd = Command::new(&bin);
     cmd.args(["new", &label, "-c", &j.worktree, "--keep-open", "--shell", &shell, "--json", "--", agent.bin()]);
     match agent {
-        AgentKind::Claude => cmd.arg(&brief),
+        AgentKind::Claude | AgentKind::Codex => cmd.arg(&brief),
         AgentKind::OpenCode => cmd.args(["--prompt", &brief]),
     };
     let out = cmd.output().context("run rex")?;
