@@ -1,3 +1,7 @@
+---
+description: "How to contribute to Night Porter: getting the code building, ground rules, packs, and editing these docs."
+---
+
 <!--@include: ../CONTRIBUTING.md-->
 
 ## Editing these docs

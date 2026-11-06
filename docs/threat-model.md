@@ -1,3 +1,7 @@
+---
+description: "How Night Porter stays safe when acting on text written by strangers: trust, credential isolation, sandboxing and pre-push checks."
+---
+
 # Night Porter threat model
 
 Night Porter reads text written by other people (review comments, issues, merge requests) and

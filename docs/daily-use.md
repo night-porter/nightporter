@@ -1,3 +1,7 @@
+---
+description: "Using Night Porter day to day: the TUI tabs, approving and rejecting jobs, the inbox for untrusted authors, settings, and the CLI."
+---
+
 # Daily use
 
 ## What a job is

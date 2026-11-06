@@ -1,3 +1,7 @@
+---
+description: "Every Night Porter setting: config.toml, per-repo override files, defaults, trust rules, schedules, checks and the limits config cannot change."
+---
+
 # Configuration reference
 
 You rarely need to edit these files by hand: `nightporter setup` (or `S` in the TUI) walks you

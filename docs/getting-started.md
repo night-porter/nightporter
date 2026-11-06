@@ -1,3 +1,7 @@
+---
+description: "Install Night Porter with Homebrew, the install script or Cargo, run the setup wizard, subscribe to a repo and pick an autonomy level."
+---
+
 # Getting started
 
 Night Porter watches GitHub and GitLab for activity on your PRs and MRs: review comments, failing
