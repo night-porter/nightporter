@@ -2,3 +2,8 @@
 2418426f6bd414f3e2724188186445bd92c73b54:src/checks.rs:aws-access-token:253
 2418426f6bd414f3e2724188186445bd92c73b54:src/checks.rs:aws-access-token:305
 5f7fbf46a404214a42c5c8766fe7a4545c131b0c:src/checks.rs:aws-access-token:238
+# Fake GitHub token (ghp_Zq3x...) in the secrets-in-merges test in src/job.rs.
+12872580ceab261675be46090159720299c09484:src/job.rs:github-pat:706
+12872580ceab261675be46090159720299c09484:src/job.rs:github-pat:717
+# The ignore file itself quotes the fake AWS key.
+12dd90655df14476326465a9419c1d48d063c50a:.gitleaksignore:aws-access-token:1
