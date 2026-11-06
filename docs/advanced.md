@@ -96,11 +96,14 @@ max_ci_attempts = 3
 
 ```toml
 [defaults]
-agent = "claude"
+agent = "claude"                                # or "opencode", "codex"
 agent_args = ["--model", "opus"]
-allow_commands = ["npm test", "npm run lint"]   # prefix match
+allow_commands = ["npm test", "npm run lint"]   # prefix match, Claude Code only
 prompt = "prompts/house-style.md"               # relative to the config dir
 ```
+
+`nightporter repo <owner/name>` shows what all of this adds up to for one repo, including the
+contents of your prompt files and the repo's own `CLAUDE.md` / `AGENTS.md`.
 
 ## Sandboxing
 
@@ -134,6 +137,16 @@ only:
 # repos/gitlab/project/token.toml
 sandbox = false
 ```
+
+### Codex
+
+With `agent = "codex"`, Night Porter runs `codex exec` in Codex's own OS sandbox:
+`--sandbox workspace-write` with the network off, `read-only` for review jobs, and
+`danger-full-access` only when `sandbox = false`. Your `~/.codex/config.toml` and execpolicy rules
+are ignored (`--ignore-user-config --ignore-rules --ephemeral`); the login still comes from
+`CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and `sandbox_domains`
+don't apply, and `max_budget_usd` is Claude Code only. Install it with
+`npm install -g @openai/codex` or `brew install --cask codex`, then run `codex` once to log in.
 
 OpenCode has no sandbox.
 

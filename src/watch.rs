@@ -63,7 +63,7 @@ pub fn events(paths: &Paths, json: bool) -> Result<()> {
 pub fn exit_code(s: JobStatus) -> Option<i32> {
     match s {
         JobStatus::Done => Some(0),
-        JobStatus::Failed | JobStatus::Rejected => Some(1),
+        JobStatus::Failed | JobStatus::Rejected | JobStatus::Dismissed => Some(1),
         s if s.needs_user() => Some(2),
         _ => None,
     }

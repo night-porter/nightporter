@@ -52,6 +52,10 @@ impl Paths {
     pub fn worktrees_dir(&self) -> PathBuf {
         self.data_dir.join("worktrees")
     }
+    /// The running daemon's process id (written after it takes the lock).
+    pub fn pid_file(&self) -> PathBuf {
+        self.data_dir.join("daemon.pid")
+    }
     pub fn log_file(&self) -> PathBuf {
         self.data_dir.join("daemon.log")
     }

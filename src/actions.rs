@@ -58,6 +58,54 @@ pub fn retry(db: &Db, id: i64) -> Result<usize> {
     db.requeue_events(id)
 }
 
+/// Put a job away without acting on it: it leaves the Queue, nothing is pushed or posted, and
+/// [`restore`] brings it back. Running and queued jobs can't be dismissed (reject those).
+pub fn dismiss(db: &Db, id: i64) -> Result<()> {
+    let mut j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    match j.status {
+        JobStatus::Dismissed => bail!("job {id} is already dismissed"),
+        s if s.is_active() => bail!("job {id} is {}; reject it instead", s.label()),
+        s => {
+            j.meta.dismissed_from = Some(s);
+            j.status = JobStatus::Dismissed;
+        }
+    }
+    db.update_job(&j)
+}
+
+/// Undo [`dismiss`]: the job goes back to the status it had.
+pub fn restore(db: &Db, id: i64) -> Result<JobStatus> {
+    let mut j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    if j.status != JobStatus::Dismissed {
+        bail!("job {id} is {}, not dismissed", j.status.label());
+    }
+    let to = j.meta.dismissed_from.take().unwrap_or(JobStatus::Done);
+    // Waiting for approval holds the PR; another job may have started on it meanwhile.
+    if matches!(to, JobStatus::AwaitingApproval | JobStatus::AwaitingRunApproval) && db.pr_busy(&j.repo, j.number)? {
+        bail!("{}#{} has a newer job; restore that one's history instead", j.repo, j.number);
+    }
+    j.status = to;
+    db.update_job(&j)?;
+    Ok(to)
+}
+
+/// Delete a finished job for good (with its log and requests). Not undoable.
+pub fn purge(db: &mut Db, id: i64) -> Result<()> {
+    let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    if j.status.is_active() || j.status.needs_user() {
+        bail!("job {id} is {}; dismiss or reject it first", j.status.label());
+    }
+    db.purge_job(id)
+}
+
+/// Undo an inbox ignore: the event waits in the inbox again.
+pub fn unignore(db: &Db, event_id: &str) -> Result<()> {
+    if !db.ignored_events()?.iter().any(|(e, _)| e.id == event_id) {
+        bail!("{event_id} is not an ignored inbox event");
+    }
+    db.set_disposition(event_id, Disposition::Inbox, "")
+}
+
 pub fn set_paused(db: &Db, paused: bool) -> Result<()> {
     db.set("paused", if paused { "1" } else { "0" })
 }
@@ -167,5 +215,37 @@ mod tests {
         assert!(approve(&db, id, false).is_err());
         approve(&db, id, true).unwrap();
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Approved);
+    }
+
+    #[test]
+    fn dismiss_restore_purge() {
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        assert!(dismiss(&db, id).is_err(), "queued jobs are rejected, not dismissed");
+        db.set_status(id, JobStatus::AwaitingApproval).unwrap();
+        dismiss(&db, id).unwrap();
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Dismissed);
+        assert!(!db.pr_busy(&repo, 1).unwrap(), "a dismissed job frees the PR");
+        assert!(purge(&mut db, id).is_ok_and(|()| db.job(id).unwrap().is_none()));
+        let id = db.create_job(&repo, Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        db.set_status(id, JobStatus::AwaitingApproval).unwrap();
+        dismiss(&db, id).unwrap();
+        assert_eq!(restore(&db, id).unwrap(), JobStatus::AwaitingApproval);
+        assert!(restore(&db, id).is_err());
+        assert!(purge(&mut db, id).is_err(), "only finished jobs can be purged");
+        // Restoring into a PR that has a newer pending job is refused.
+        dismiss(&db, id).unwrap();
+        let newer = db.create_job(&repo, Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        assert!(restore(&db, id).is_err());
+        db.set_status(newer, JobStatus::Done).unwrap();
+        assert!(restore(&db, id).is_ok());
+        // Ignored inbox events can come back.
+        db.add_event(&crate::state::tests::ev("e1", 5), Disposition::Inbox, "").unwrap();
+        ignore(&db, "e1").unwrap();
+        assert_eq!(db.ignored_events().unwrap().len(), 1);
+        unignore(&db, "e1").unwrap();
+        assert_eq!(db.events_with(Disposition::Inbox).unwrap().len(), 1);
+        assert!(unignore(&db, "e1").is_err());
     }
 }

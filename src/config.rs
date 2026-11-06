@@ -41,6 +41,9 @@ pub struct Config {
     pub notifications: Notifications,
     #[serde(default)]
     pub marketplaces: Vec<String>,
+    /// Once a day, ask GitHub for the latest release number (anonymous; see `update.rs`).
+    #[serde(default = "yes")]
+    pub check_updates: bool,
     /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr` or `rex`.
     #[serde(default)]
     pub handoff: Handoff,
@@ -132,6 +135,7 @@ impl Level {
 pub enum AgentKind {
     Claude,
     OpenCode,
+    Codex,
 }
 
 impl AgentKind {
@@ -139,13 +143,22 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "Claude Code",
             AgentKind::OpenCode => "OpenCode",
+            AgentKind::Codex => "Codex",
         }
     }
+    /// Binary name, which is also the config value.
     pub fn bin(self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::OpenCode => "opencode",
+            AgentKind::Codex => "codex",
         }
+    }
+    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::OpenCode, AgentKind::Codex];
+    /// The next agent in [`Self::ALL`] (the TUI's `a` key cycles through them).
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
 }
 

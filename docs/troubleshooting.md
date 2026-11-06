@@ -25,9 +25,12 @@ For one job, run `nightporter show <id>`: it has the checks, replies, diff and t
 
 Work through these in order:
 
-- **Is the daemon running?** `nightporter doctor` says. Start it with
-  `nightporter service install`, or run `nightporter daemon` in a terminal to watch it.
-- **Is the repo subscribed?** `nightporter repos`. If the repo is missing, check `code_dir` and
+- **Is the daemon running?** `nightporter doctor` says, and the TUI header says **NOT RUNNING**.
+  Start it with `nightporter start` (or `D` in the TUI); `nightporter service install` also starts
+  it at login. To watch it, run `nightporter daemon` in a terminal (if one is already running, it
+  says so and exits).
+- **Is the repo subscribed?** `nightporter repos` (or `nightporter repo <owner/name>` for
+  everything that applies to it). `nightporter repos --all` lists unwatched clones too. If the repo is missing, check `code_dir` and
   `scan_depth`, and that the clone’s remote points at a forge in your `[[accounts]]`.
 - **Is the trigger enabled?** Check `triggers` for that repo.
 - **Is the author trusted?** Look in the inbox (`2` in the TUI, or `nightporter inbox list`). Bots
@@ -45,7 +48,8 @@ Work through these in order:
 - **Sandbox on Linux**: install `bubblewrap` and `socat`.
 - **Tests need Docker or DDEV**: set `sandbox = false` for that repo. See
   [Sandboxing](/advanced#sandboxing).
-- **Commands blocked**: add them to `allow_commands`.
+- **Commands blocked**: add them to `allow_commands` (Claude Code). Codex has no allow list: its
+  sandbox allows writes to the worktree only and no network; `sandbox = false` lifts that.
 
 Fix the cause, then `nightporter retry <id>`.
 
@@ -62,6 +66,13 @@ Dependency and size changes ask before pushing by default (`checks.escalate_on`)
 The daemon reloads on save. If the file is invalid, it keeps the previous config and logs
 `config not reloaded`. Unknown keys are errors, so a typo shows up there and in
 `nightporter doctor`.
+
+## A job I dismissed or rejected is gone
+
+It's in the **History** tab (`3`): press `/` and type `dismissed` or the repo name. `u` restores
+a dismissed job, or run `nightporter restore <id>`. Only `X` / `nightporter purge` deletes jobs
+for good. An inbox event you ignored: `nightporter inbox list --ignored`, then
+`nightporter inbox restore <event>` (or `u` in the Inbox right after ignoring).
 
 ## Disk filling up with worktrees
 

@@ -25,6 +25,7 @@ mod skill;
 mod state;
 mod trust;
 mod tui;
+mod update;
 mod watch;
 
 #[cfg(test)]
@@ -55,8 +56,22 @@ enum Cmd {
     Doctor,
     /// Plain-text summary of what needs you (script- and screen-reader-friendly).
     Status,
-    /// List known repos and whether they are subscribed.
-    Repos,
+    /// Start the background daemon (it watches your PRs and runs jobs).
+    Start,
+    /// Stop the background daemon. Nothing is watched until `nightporter start`.
+    Stop,
+    /// Check for a newer Night Porter (asks GitHub for the latest release number) and print the upgrade command.
+    Update,
+    /// List watched repos, then how many other clones there are. Paged in a terminal (q quits).
+    Repos {
+        /// Only repos whose name contains this.
+        search: Option<String>,
+        /// Also list every clone that isn't watched.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Everything Night Porter does on one repo: level, agent, prompt, reply style, trust, hours.
+    Repo { repo: String },
     /// Subscribe to a repo (`owner/name`, or `host/owner/name` for non-default hosts).
     Subscribe { repo: String },
     /// Stop watching a repo.
@@ -70,6 +85,20 @@ enum Cmd {
     },
     /// Reject a job: nothing is pushed or posted.
     Reject { id: i64 },
+    /// Put jobs away without acting on them (nothing is pushed or posted). Undo with `restore`.
+    Dismiss {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Bring a dismissed job back to where it was.
+    Restore { id: i64 },
+    /// Delete finished or dismissed jobs for good, with their logs. Can't be undone.
+    Purge {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Re-run a finished or failed job's requests as a new job.
     Retry { id: i64 },
     /// Take over a job interactively in herdr or Rex (opens it with a briefed agent).
@@ -142,7 +171,13 @@ enum SkillCmd {
 #[derive(Subcommand)]
 enum InboxCmd {
     /// List events from unknown authors that are waiting for a decision.
-    List,
+    List {
+        /// List the events you ignored instead (bring one back with `inbox restore`).
+        #[arg(long)]
+        ignored: bool,
+    },
+    /// Put an ignored event back in the inbox.
+    Restore { event: String },
     /// Let this one event through (the author stays untrusted).
     AllowOnce { event: String },
     /// Trust the author from now on, on one repo (`--repo`) or everywhere (`--global`).
@@ -252,7 +287,14 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => status(&paths),
-        Cmd::Repos => cmd_repos(&paths),
+        Cmd::Start | Cmd::Stop => {
+            println!("{}", if matches!(cmd, Cmd::Start) { service::start(&paths)? } else { service::stop(&paths)? });
+            Ok(())
+        }
+        Cmd::Update => cmd_update(&db(&paths)?),
+        Cmd::Repos { search, all } => cmd_repos(&paths, search.as_deref(), all),
+        Cmd::Repo { repo } => cmd_repo(&paths, &repo),
+        c @ (Cmd::Dismiss { .. } | Cmd::Restore { .. } | Cmd::Purge { .. }) => cmd_archive(&paths, c),
         Cmd::Subscribe { repo } | Cmd::Unsubscribe { repo } => {
             let on = matches!(cmd_name, "subscribe");
             let r = resolve_repo(&paths, &repo)?;
@@ -308,6 +350,33 @@ fn main() -> Result<()> {
     }
 }
 
+/// Dismiss, restore and purge: clearing out jobs you won't act on.
+fn cmd_archive(paths: &Paths, cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Dismiss { ids } => {
+            let db = db(paths)?;
+            for id in ids {
+                actions::dismiss(&db, id)?;
+                println!("job {id} dismissed (undo: nightporter restore {id})");
+            }
+        }
+        Cmd::Restore { id } => println!("job {id} is back: {}", actions::restore(&db(paths)?, id)?.label()),
+        Cmd::Purge { ids, yes } => {
+            let mut db = db(paths)?;
+            let list = ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            if !yes && !confirm(&format!("Delete job(s) {list} for good? This can't be undone"))? {
+                return Ok(());
+            }
+            for id in ids {
+                actions::purge(&mut db, id)?;
+                println!("job {id} deleted");
+            }
+        }
+        _ => unreachable!("only archive commands are routed here"),
+    }
+    Ok(())
+}
+
 fn cmd_skill(cmd: &SkillCmd) -> Result<()> {
     match cmd {
         SkillCmd::Show => print!("{}", skill::GUIDE),
@@ -320,20 +389,93 @@ fn cmd_skill(cmd: &SkillCmd) -> Result<()> {
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("NIGHTPORTER_LOG").unwrap_or_else(|_| "nightporter=info".into()))
+        // daemon.log is a file: no colour codes in it.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 }
 
-fn cmd_repos(paths: &Paths) -> Result<()> {
+fn cmd_repos(paths: &Paths, search: Option<&str>, all: bool) -> Result<()> {
+    use std::fmt::Write;
     let cfg = config::Config::load(paths)?;
-    for (r, p) in repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts) {
-        let s = cfg.settings_for(paths, &r)?;
-        println!(
-            "{} {:<45} {:<8} {}",
-            if s.subscribed { "[on] " } else { "[off]" },
-            format!("{}/{}", r.host, r.path),
-            s.level.as_str(),
-            p.display()
-        );
+    let needle = search.unwrap_or_default().to_lowercase();
+    let mut rows: Vec<_> = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts)
+        .into_iter()
+        .filter(|(r, _)| format!("{}/{}", r.host, r.path).to_lowercase().contains(&needle))
+        .map(|(r, p)| {
+            let s = cfg.settings_for(paths, &r);
+            (s.as_ref().is_ok_and(|s| s.subscribed), r, p, s)
+        })
+        .collect();
+    // Watched first, then by name.
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
+    let (on, off) = (rows.iter().filter(|r| r.0).count(), rows.iter().filter(|r| !r.0).count());
+    let show_off = all || search.is_some();
+    let paint = |code: &str, s: &str| if color_out() { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() };
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Watching {on} repo(s){}",
+        if on == 0 { ": subscribe with `nightporter subscribe owner/name` or the TUI's Repos tab" } else { "" }
+    );
+    for (sub, r, p, s) in rows.iter().filter(|r| show_off || r.0) {
+        let (level, agent) = match s {
+            Ok(s) => (s.level.as_str().to_string(), s.agent.label().to_string()),
+            Err(e) => ("ERROR".into(), format!("{e:#}")),
+        };
+        let mark = if *sub { paint("32", "[on] ") } else { paint("2", "[off]") };
+        let _ = writeln!(out, "{mark} {:<45} {:<8} {:<12} {}", format!("{}/{}", r.host, r.path), level, agent, p.display());
+    }
+    if !show_off && off > 0 {
+        let _ =
+            writeln!(out, "\n{off} other clone(s) not watched: `nightporter repos --all` lists them, `nightporter repos <word>` searches.");
+    }
+    let _ = writeln!(out, "Details for one repo: `nightporter repo owner/name`.");
+    page(&out)
+}
+
+/// Colour on stdout only for a terminal, and never with `NO_COLOR`.
+fn color_out() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Print, through `$PAGER` (else `less`) when it's taller than the terminal. q leaves the pager.
+fn page(text: &str) -> Result<()> {
+    use std::io::Write;
+    let tall = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && crossterm::terminal::size().is_ok_and(|(_, h)| text.lines().count() >= usize::from(h).saturating_sub(1));
+    if tall {
+        let pager = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "less -FRX".into());
+        let mut parts = pager.split_whitespace();
+        if let Some(bin) = parts.next()
+            && let Ok(mut child) = std::process::Command::new(bin).args(parts).stdin(std::process::Stdio::piped()).spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            child.wait()?;
+            return Ok(());
+        }
+    }
+    print!("{text}");
+    Ok(())
+}
+
+fn cmd_repo(paths: &Paths, repo: &str) -> Result<()> {
+    let cfg = config::Config::load(paths)?;
+    let r = resolve_repo(paths, repo)?;
+    let clone = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts).remove(&r);
+    page(&printable(&settings::repo_text(paths, &cfg, &r, clone.as_deref())?))
+}
+
+fn cmd_update(db: &Db) -> Result<()> {
+    println!("You have Night Porter {}. Asking GitHub for the latest release…", update::CURRENT);
+    let latest = tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(update::fetch_latest())?;
+    db.set("latest_version", &latest)?;
+    db.set("update_checked_at", &state::now().to_string())?;
+    if update::newer(&latest, update::CURRENT) {
+        println!("{latest} is out. Upgrade with:\n  {}", update::how_to_upgrade());
+    } else {
+        println!("You're up to date.");
     }
     Ok(())
 }
@@ -369,12 +511,13 @@ fn read_only(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Status
             | Cmd::Show { .. }
-            | Cmd::Repos
+            | Cmd::Repos { .. }
+            | Cmd::Repo { .. }
             | Cmd::Doctor
             | Cmd::Events { .. }
             | Cmd::Wait { .. }
             | Cmd::Skill { cmd: SkillCmd::Show }
-            | Cmd::Inbox { cmd: InboxCmd::List }
+            | Cmd::Inbox { cmd: InboxCmd::List { .. } }
             | Cmd::Market { cmd: MarketCmd::List }
             | Cmd::Pack { cmd: PackCmd::List }
     )
@@ -403,11 +546,15 @@ fn resolve_repo(paths: &Paths, s: &str) -> Result<RepoId> {
 
 fn status(paths: &Paths) -> Result<()> {
     let db = db(paths)?;
+    let up = paths.daemon_running();
     println!(
         "Night Porter: daemon {}{}",
-        if paths.daemon_running() { "running" } else { "NOT RUNNING" },
+        if up { "running (stop: nightporter stop)" } else { "NOT RUNNING (start: nightporter start)" },
         if actions::paused(&db) { ", PAUSED" } else { "" }
     );
+    if let Some(b) = update::banner(&db) {
+        println!("{b}");
+    }
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
@@ -441,8 +588,13 @@ fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
     let db = db(paths)?;
     let scope_repo = |r: &Option<String>| -> Result<Option<RepoId>> { r.as_deref().map(|r| resolve_repo(paths, r)).transpose() };
     match cmd {
-        InboxCmd::List => {
-            for (e, _) in db.events_with(Disposition::Inbox)? {
+        InboxCmd::Restore { event } => {
+            actions::unignore(&db, &event)?;
+            println!("{event} is back in the inbox");
+        }
+        InboxCmd::List { ignored } => {
+            let list = if ignored { db.ignored_events()? } else { db.events_with(Disposition::Inbox)? };
+            for (e, _) in list {
                 println!(
                     "{}  @{} ({:?}) on {}#{}\n    {}",
                     e.id,

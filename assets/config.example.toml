@@ -13,6 +13,9 @@ max_concurrent_jobs = 2
 daily_job_cap = 50
 retention_days = 30
 worktree_idle_days = 14
+# Once a day, ask GitHub for the latest release number so the TUI can say when there's a new
+# version. Anonymous; sends nothing about you or your repos. Night Porter never updates itself.
+check_updates = true
 
 # Forge accounts. `token = "cli"` asks gh/glab each time; "keyring" uses a PAT stored with
 # `nightporter token set <forge> [host]`.
@@ -31,7 +34,7 @@ done = true
 new_author = true
 
 [defaults]
-agent = "claude"            # claude | opencode
+agent = "claude"            # claude | opencode | codex
 level = "draft"             # observe | suggest | draft | auto
 triggers = ["review_comment", "review", "comment", "ci_failure", "merge_conflict"]
 debounce = "2m"
@@ -40,7 +43,7 @@ max_ci_attempts = 3
 # ci_auto = false
 timeout = "30m"
 # max_budget_usd = 2.0      # Claude Code only
-sandbox = true              # Claude Code OS sandbox for agent commands; fails closed
+sandbox = true              # OS sandbox for agent commands (Claude Code, Codex); fails closed
 # sandbox_domains = []      # domains sandboxed commands may reach
 # allow_commands = ["npm test", "cargo test"]
 
