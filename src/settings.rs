@@ -107,6 +107,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.maintainer.label", Text, "Label that asks Night Porter to look at an issue or MR."),
 ];
 
+#[derive(Clone)]
 pub struct Row {
     pub setting: &'static Setting,
     /// Effective value, as editable text.

@@ -75,6 +75,11 @@ nightporter setup
 If you skip this and open the TUI (`nightporter`) first, it offers to run the wizard for you.
 You can run it again at any time: `nightporter setup`, or press `S` in the TUI.
 
+In a terminal the wizard uses menus and a searchable checklist: arrow keys move, you can edit an
+answer in place, and in the repo list you type to search and press space to tick. Set
+`NIGHTPORTER_PLAIN=1` (or use `TERM=dumb`) for plain line-by-line prompts, which work better with
+screen readers and in scripts.
+
 It asks for:
 
 1. **Forges**: GitHub, GitLab or both, and the host if it’s self-hosted.
@@ -87,7 +92,8 @@ It asks for:
    `suggest` never pushes at all. See [autonomy levels](#autonomy-levels).
 6. **Active hours**, for example `mon-fri 08:00-09:00,17:00-22:00`. Leave it empty to run
    any time.
-7. **Repos to subscribe to**, picked from the clones it found.
+7. **Repos to subscribe to**, ticked in a searchable list of the clones it found. Repos you
+   already subscribed to start ticked; untick one to unsubscribe.
 8. **The background service**, so the daemon starts at login (launchd on macOS, systemd
    `--user` on Linux).
 
