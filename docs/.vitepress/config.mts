@@ -44,6 +44,8 @@ export default defineConfig({
     socialLinks: [
       { icon: 'github', link: REPO },
       { icon: 'x', link: 'https://x.com/NightPorterDev' },
+      { icon: 'bluesky', link: 'https://bsky.app/profile/nightporter-dev.bsky.social' },
+      { icon: 'mastodon', link: 'https://mastodon.social/@nightporter' },
     ],
     editLink: { pattern: `${REPO}/edit/main/docs/:path`, text: 'Edit this page on GitHub' },
     search: { provider: 'local' },

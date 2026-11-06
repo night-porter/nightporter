@@ -29,4 +29,5 @@ lets an untrusted author reach the agent, bypass a pre-push check or see a token
 
 ## Anything else
 
-Email [hi@night-porter.com](mailto:hi@night-porter.com), or find us on [X](https://x.com/NightPorterDev).
+Email [hi@night-porter.com](mailto:hi@night-porter.com), or find us on [X](https://x.com/NightPorterDev),
+[Bluesky](https://bsky.app/profile/nightporter-dev.bsky.social) and [Mastodon](https://mastodon.social/@nightporter).
