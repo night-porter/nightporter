@@ -85,10 +85,16 @@ watch agents; Night Porter is what runs while you're not there. They fit togethe
 
 ## Install
 
-> Releases are not published yet. Build from source:
+```sh
+brew install night-porter/tap/nightporter                     # macOS, Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/night-porter/nightporter/releases/latest/download/nightporter-installer.sh | sh
+cargo install nightporter --locked                            # with Rust
+```
+
+Windows (experimental), archives and building from source: see
+[Getting started](https://docs.night-porter.com/getting-started).
 
 ```sh
-cargo install --path .
 nightporter setup      # first-run wizard
 nightporter            # open the TUI
 nightporter doctor     # check gh / glab / agents / git

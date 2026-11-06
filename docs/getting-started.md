@@ -26,13 +26,45 @@ Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run
 
 ## 2. Install Night Porter
 
-Releases aren’t published yet. Build it from source with Rust:
+Pick one.
+
+**Homebrew** (macOS and Linux):
+
+```sh
+brew install night-porter/tap/nightporter
+```
+
+**Install script** (macOS and Linux). It downloads the right binary from GitHub Releases:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/night-porter/nightporter/releases/latest/download/nightporter-installer.sh | sh
+```
+
+**Cargo**, if you have Rust:
+
+```sh
+cargo install nightporter --locked
+```
+
+**Windows** (experimental), in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/night-porter/nightporter/releases/latest/download/nightporter-installer.ps1 | iex"
+```
+
+Or download an archive for your platform from
+[GitHub Releases](https://github.com/night-porter/nightporter/releases), check it against its
+`.sha256` file, and put `nightporter` on your `PATH`.
+
+**From source:**
 
 ```sh
 git clone https://github.com/night-porter/nightporter
 cd nightporter
-cargo install --path .
+cargo install --path . --locked
 ```
+
+To update later, run the same command again (`brew upgrade nightporter` with Homebrew).
 
 ## 3. Run the setup wizard
 
