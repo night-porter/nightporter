@@ -1,0 +1,4 @@
+# Fake AWS key (AKIAABCDEFGHIJKLMNOP) in the secrets-check tests in src/checks.rs.
+2418426f6bd414f3e2724188186445bd92c73b54:src/checks.rs:aws-access-token:253
+2418426f6bd414f3e2724188186445bd92c73b54:src/checks.rs:aws-access-token:305
+5f7fbf46a404214a42c5c8766fe7a4545c131b0c:src/checks.rs:aws-access-token:238
