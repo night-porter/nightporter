@@ -8,7 +8,15 @@ export default defineConfig({
   cleanUrls: true,
   srcExclude: ['README.md'],
   lastUpdated: true,
+  head: [
+    ['link', { rel: 'icon', href: '/favicon.ico', sizes: '48x48' }],
+    ['link', { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
+    ['link', { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' }],
+  ],
   themeConfig: {
+    // the wordmark already says "Night Porter"
+    logo: { light: '/wordmark-light.svg', dark: '/wordmark-dark.svg', alt: 'Night Porter' },
+    siteTitle: false,
     nav: [
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Configuration', link: '/configuration' },
