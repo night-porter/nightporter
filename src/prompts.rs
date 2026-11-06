@@ -138,7 +138,7 @@ pub fn build(i: &Input) -> Result<String> {
         if e.trigger == crate::forge::Trigger::CiFailure {
             let _ = writeln!(p, "{}", untrusted(&e.body));
         } else {
-            let _ = writeln!(p, "<request>\n{}\n</request>", e.body.replace("</request>", "</ request>"));
+            let _ = writeln!(p, "<request>\n{}\n</request>", defang(&e.body, "request"));
         }
     }
 
@@ -149,9 +149,15 @@ pub fn build(i: &Input) -> Result<String> {
 }
 
 /// Wrap text from untrusted people. Strips anything that could close the block early.
+/// Break any opening or closing `tag` in `s`, whatever its case or spacing (`</UNTRUSTED >`), so
+/// quoted text can't end the block it's quoted in.
+fn defang(s: &str, tag: &str) -> String {
+    let re = regex::Regex::new(&format!(r"(?i)<(\s*/?)\s*{tag}\b")).expect("tag regex");
+    re.replace_all(s, |c: &regex::Captures| format!("<{} {tag}", c[1].trim())).into_owned()
+}
+
 pub fn untrusted(s: &str) -> String {
-    let clean = s.replace("</untrusted>", "</ untrusted>").replace("<untrusted>", "< untrusted>");
-    format!("<untrusted>\n{clean}\n</untrusted>")
+    format!("<untrusted>\n{}\n</untrusted>", defang(s, "untrusted"))
 }
 
 fn one_line(s: &str) -> String {
@@ -235,6 +241,9 @@ mod tests {
         .unwrap();
         assert!(p.contains("event `e1`") && p.contains("src/a.rs:3") && p.contains("rename this"));
         assert_eq!(p.matches("</untrusted>").count(), 1, "untrusted text must not close the block");
+        let u = untrusted("a </UNTRUSTED > b < /untrusted> c <Untrusted>");
+        assert_eq!(u.to_lowercase().matches("</untrusted>").count(), 1, "case/space variants must not close it: {u}");
+        assert_eq!(u.to_lowercase().matches("<untrusted>").count(), 1, "nor open a new one: {u}");
         assert!(p.contains("```nightporter"));
         assert!(p.contains("short and sweet"));
     }

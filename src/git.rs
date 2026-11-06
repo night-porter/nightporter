@@ -47,6 +47,11 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
     let tmp_ref = format!("refs/nightporter/{}", branch.replace('/', "-"));
     git(clone, &["fetch", "--no-tags", "--quiet", "--end-of-options", url, &format!("+{fetch_ref}:{tmp_ref}")]).await?;
     let sha = git(clone, &["rev-parse", &tmp_ref]).await?;
+    // A previous agent may have repointed the worktree's `.git` at a git dir it built (whose
+    // config can run filters/hooks in the daemon). Never run git through it: start over.
+    if wt.exists() && !gitfile_points_into(clone, wt).await {
+        std::fs::remove_dir_all(wt).with_context(|| format!("remove tampered worktree {}", wt.display()))?;
+    }
     if wt.join(".git").exists() {
         git(wt, &["checkout", "--quiet", "-B", branch, &sha]).await?;
         git(wt, &["reset", "--hard", "--quiet", &sha]).await?;
@@ -62,6 +67,18 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
     }
     let gitfile = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
     Ok((sha, gitfile))
+}
+
+/// `wt/.git` is a regular file naming a git dir directly inside the clone's `worktrees/`.
+async fn gitfile_points_into(clone: &Path, wt: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(wt.join(".git")) else { return false };
+    let Ok(text) = std::fs::read_to_string(wt.join(".git")) else { return false };
+    let Some(dir) = text.trim_end().strip_prefix("gitdir: ") else { return false };
+    let Ok(common) = git(clone, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await else { return false };
+    let (Ok(dir), Ok(worktrees)) = (Path::new(dir).canonicalize(), Path::new(&common).join("worktrees").canonicalize()) else {
+        return false;
+    };
+    meta.is_file() && dir.parent() == Some(worktrees.as_path())
 }
 
 /// The agent must not be able to point the worktree at another git dir (its config could run
@@ -140,8 +157,55 @@ pub fn free_gb(p: &Path) -> Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) fn tests_head(dir: &Path) -> String {
+    let o = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
+
+    /// A throwaway repo with one commit (unsigned, no user config needed).
+    pub(crate) fn repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-qm", "base"]);
+    }
+
+    #[tokio::test]
+    async fn tampered_gitfile_worktree_is_recreated() {
+        let d = tempfile::tempdir().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        repo(&clone);
+        let url = clone.to_string_lossy().to_string();
+        let wt = d.path().join("wt");
+        let (_, gitfile) = prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-1").await.unwrap();
+        assert!(gitfile_points_into(&clone, &wt).await);
+
+        // An agent repoints .git at a git dir it built inside the worktree.
+        let evil = wt.join("evil-git");
+        std::fs::create_dir_all(&evil).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
+        assert!(!gitfile_points_into(&clone, &wt).await);
+        assert!(verify_gitfile(&wt, &gitfile).is_err());
+
+        // The next job must not run git through it: the worktree is rebuilt.
+        prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-1").await.unwrap();
+        assert!(gitfile_points_into(&clone, &wt).await);
+        assert!(!evil.exists());
+    }
 
     #[test]
     fn redacts() {

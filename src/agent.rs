@@ -56,26 +56,47 @@ const SECRET_PATHS: &[&str] = &[
     "~/.docker/config.json",
     "~/.kube/**",
     "~/.npmrc",
-    "~/.config/nightporter/**",
-    "~/.local/share/nightporter/**",
     "~/Library/Keychains/**",
 ];
 
+/// Night Porter's own files the agent must not read: other jobs' prompts and diffs, the state db,
+/// the log and the config. Built from the real paths (they move with XDG dirs and
+/// `NIGHTPORTER_HOME`); worktrees, where the agent works, stay readable. `//` = absolute path.
+fn own_paths() -> Vec<String> {
+    let Ok(p) = crate::paths::Paths::detect() else { return Vec::new() };
+    let abs = |x: std::path::PathBuf| format!("/{}", x.to_string_lossy());
+    vec![format!("{}/**", abs(p.config_dir.clone())), format!("{}/**", abs(p.jobs_dir())), format!("{}*", abs(p.db())), abs(p.log_file())]
+}
+
+/// Model credentials the agent itself needs (and nothing else does).
+const MODEL_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+];
+const MODEL_PREFIXES: &[&str] = &["ANTHROPIC_", "CLAUDE_", "OPENCODE_"];
+
+fn is_model_key(k: &str) -> bool {
+    let u = k.to_ascii_uppercase();
+    MODEL_KEYS.contains(&u.as_str()) || MODEL_PREFIXES.iter().any(|p| u.starts_with(p))
+}
+
+/// Environment for the user's env hooks (setup/teardown/cleanup): the agent's, minus model
+/// credentials. Those commands run outside the sandbox and can read repo-controlled files.
+pub fn hook_env(job_dir: &Path) -> Vec<(String, String)> {
+    agent_env(job_dir).into_iter().filter(|(k, _)| !is_model_key(k)).collect()
+}
+
 /// Environment for the agent: everything from ours minus credentials, plus hardening.
 pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
-    let keep_keys = [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-    ];
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
             let u = k.to_ascii_uppercase();
-            if keep_keys.contains(&u.as_str()) || u.starts_with("ANTHROPIC_") || u.starts_with("CLAUDE_") || u.starts_with("OPENCODE_") {
+            if is_model_key(&u) {
                 return true;
             }
             let forge = ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
@@ -127,8 +148,9 @@ pub fn claude_settings(s: &RepoSettings, read_only: bool) -> serde_json::Value {
         allow.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"].map(String::from));
     }
     deny.extend(["WebFetch", "WebSearch"].map(String::from));
-    // Credentials on disk. (No OS sandbox yet: see docs/threat-model.md.)
-    for p in SECRET_PATHS {
+    // Credentials and Night Porter's own state on disk. With the sandbox on, these also bind
+    // the agent's shell commands.
+    for p in SECRET_PATHS.iter().map(|p| p.to_string()).chain(own_paths()) {
         deny.push(format!("Read({p})"));
     }
     for g in BUILTIN_PROTECTED.iter().copied().chain(s.checks.protected.iter().map(String::as_str)) {
@@ -179,6 +201,10 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
     let bin = std::env::var("NIGHTPORTER_AGENT_BIN").unwrap_or_else(|_| kind.bin().into());
     let mut cmd = Command::new(&bin);
     cmd.current_dir(wt).env_clear().envs(agent_env(job_dir)).kill_on_drop(true).stdin(std::process::Stdio::null());
+    // Own process group, killed when the run ends: nothing the agent backgrounds can keep
+    // writing to the worktree after we've checked it.
+    #[cfg(unix)]
+    cmd.process_group(0);
     match kind {
         AgentKind::Claude => {
             let settings = job_dir.join("claude-settings.json");
@@ -214,7 +240,10 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
         .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("start `{bin}` (is it installed?)"))?;
-    let out = match tokio::time::timeout(s.timeout, child.wait_with_output()).await {
+    let pid = child.id();
+    let res = tokio::time::timeout(s.timeout, child.wait_with_output()).await;
+    kill_group(pid);
+    let out = match res {
         Ok(r) => r?,
         Err(_) => bail!("agent timed out after {}", crate::config::format_duration(s.timeout)),
     };
@@ -225,6 +254,17 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
         bail!("agent exited with {}: {}", out.status, tail(&stderr, 400).trim());
     }
     parse_output(kind, &stdout)
+}
+
+/// Kill whatever is left in the agent's process group.
+fn kill_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid.and_then(|p| libc::pid_t::try_from(p).ok()) {
+        // SAFETY: plain syscall; the group was created for this child by `process_group(0)`.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {

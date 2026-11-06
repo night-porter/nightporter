@@ -574,7 +574,8 @@ impl GitHub {
             return Ok(members.iter().any(|m| m.eq_ignore_ascii_case(user)));
         }
         let (org, slug) = team.split_once('/').context("team must be org/team")?;
-        let members: Vec<User> = self.api.get(&format!("/orgs/{org}/teams/{slug}/members?per_page=100")).await?;
+        // Every page: a member past the first 100 must still match (deny_teams fails open otherwise).
+        let members: Vec<User> = self.api.get_all(&format!("/orgs/{org}/teams/{slug}/members?per_page=100"), 100).await?;
         let members: Vec<String> = members.into_iter().map(|u| u.login).collect();
         let hit = members.iter().any(|m| m.eq_ignore_ascii_case(user));
         self.team_cache.put(team.into(), members);

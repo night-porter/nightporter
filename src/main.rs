@@ -258,7 +258,7 @@ fn main() -> Result<()> {
         Cmd::Show { id } => {
             let db = db(&paths)?;
             let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
-            print!("{}", tui::job_text(&db, &j));
+            print!("{}", printable(&tui::job_text(&db, &j)));
             Ok(())
         }
         Cmd::Inbox { cmd } => inbox(&paths, cmd),
@@ -335,17 +335,30 @@ fn status(paths: &Paths) -> Result<()> {
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
-        println!("job {:>4}  {:<22} {}#{}  {}", j.id, j.status.label(), j.repo, j.number, j.summary.lines().next().unwrap_or_default());
+        println!(
+            "job {:>4}  {:<22} {}#{}  {}",
+            j.id,
+            j.status.label(),
+            j.repo,
+            j.number,
+            printable(j.summary.lines().next().unwrap_or_default())
+        );
     }
     let inbox = db.events_with(Disposition::Inbox)?;
     for (e, _) in &inbox {
         any = true;
-        println!("inbox {}  @{} on {}#{}: {}", e.id, e.author, e.repo, e.number, e.body.lines().next().unwrap_or_default());
+        println!("inbox {}  @{} on {}#{}: {}", e.id, e.author, e.repo, e.number, printable(e.body.lines().next().unwrap_or_default()));
     }
     if !any {
         println!("Nothing needs you.");
     }
     Ok(())
+}
+
+/// Forge text and diffs can carry terminal escape sequences (hiding lines, rewriting the
+/// screen). Keep newlines and tabs, drop every other control character.
+fn printable(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
 }
 
 fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
@@ -354,7 +367,15 @@ fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
     match cmd {
         InboxCmd::List => {
             for (e, _) in db.events_with(Disposition::Inbox)? {
-                println!("{}  @{} ({:?}) on {}#{}\n    {}", e.id, e.author, e.role, e.repo, e.number, e.body.replace('\n', "\n    "));
+                println!(
+                    "{}  @{} ({:?}) on {}#{}\n    {}",
+                    e.id,
+                    e.author,
+                    e.role,
+                    e.repo,
+                    e.number,
+                    printable(&e.body).replace('\n', "\n    ")
+                );
             }
         }
         InboxCmd::AllowOnce { event } => {
@@ -502,4 +523,12 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
         PackCmd::Env { name } => print!("{}", packs::env_preset(paths, &name)?),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn printable_strips_terminal_escapes() {
+        assert_eq!(super::printable("ok\x1b[2K\x1b[1Ahidden\r\n\tnext\x07"), "ok[2K[1Ahidden\n\tnext");
+    }
 }

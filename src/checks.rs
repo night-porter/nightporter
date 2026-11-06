@@ -2,7 +2,7 @@
 
 use crate::config::{Checks, Escalation};
 use crate::state::CheckResult;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::RegexSet;
 use std::sync::LazyLock;
 
@@ -20,14 +20,42 @@ pub const BUILTIN_PROTECTED: &[&str] = &[
     "**/*.key",
     "**/id_rsa*",
     "**/id_ed25519*",
+    // Other CI systems.
+    ".circleci/**",
+    "Jenkinsfile",
+    ".travis.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    ".buildkite/**",
+    // Agent instructions and config (any agent the user might also run).
     "CLAUDE.md",
     "**/CLAUDE.md",
+    "CLAUDE.local.md",
+    "**/CLAUDE.local.md",
     "AGENTS.md",
     "**/AGENTS.md",
+    "GEMINI.md",
+    "**/GEMINI.md",
     ".claude/**",
     ".opencode/**",
     "opencode.json",
+    "opencode.jsonc",
     ".mcp.json",
+    ".cursor/**",
+    ".cursorrules",
+    ".github/copilot-instructions.md",
+    // Things that run code on checkout, commit, folder open or env start-up.
+    ".husky/**",
+    ".pre-commit-config.yaml",
+    ".lfsconfig",
+    ".envrc",
+    ".vscode/**",
+    ".devcontainer/**",
+    ".ddev/**",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
     ".git",
     ".git/**",
     "**/.git",
@@ -114,6 +142,11 @@ impl Diff {
     fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.iter().map(|f| f.path.as_str()).chain(self.touched.iter().map(String::as_str))
     }
+    /// The text that can carry new content (added lines, merge resolutions, commit messages),
+    /// for an external scanner.
+    pub fn added_text(&self) -> String {
+        self.scan_lines().collect::<Vec<_>>().join("\n")
+    }
     /// Lines that can carry new content: added lines and commit messages, not removals.
     fn scan_lines(&self) -> impl Iterator<Item = &str> {
         self.scan.lines().filter(|l| !l.starts_with('-')).map(|l| l.strip_prefix('+').unwrap_or(l))
@@ -123,7 +156,8 @@ impl Diff {
 fn globs(extra: &[String]) -> GlobSet {
     let mut b = GlobSetBuilder::new();
     for g in BUILTIN_PROTECTED.iter().copied().chain(extra.iter().map(String::as_str)) {
-        if let Ok(g) = Glob::new(g) {
+        // Case-insensitive: on macOS `Claude.md` *is* `CLAUDE.md`.
+        if let Ok(g) = GlobBuilder::new(g).case_insensitive(true).build() {
             b.add(g);
         }
     }
@@ -187,7 +221,8 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
 
 /// Keep enough to recognise the line, never the secret itself.
 fn redact(l: &str) -> String {
-    let t: String = l.trim().chars().take(12).collect();
+    // Just enough to find the line; never enough of a token to be useful.
+    let t: String = l.trim().chars().take(4).collect();
     format!("{t}… [redacted]")
 }
 
@@ -221,6 +256,23 @@ pub fn parse_names_z(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_paths_ignore_case_and_cover_env_and_agent_files() {
+        for p in [
+            "Claude.md",
+            "docs/agents.md",
+            ".DDEV/config.yaml",
+            "compose.yaml",
+            ".husky/pre-commit",
+            "GEMINI.md",
+            ".Github/Workflows/ci.yml",
+        ] {
+            let d = Diff { files: vec![FileStat { path: p.into(), added: 1, removed: 0 }], fast_forward: true, ..Default::default() };
+            let r = run(&Checks::default(), &d, None, &[]);
+            assert!(r.iter().any(|c| c.name == "protected paths" && !c.ok), "{p} should be protected");
+        }
+    }
 
     fn cfg() -> Checks {
         Checks::default()

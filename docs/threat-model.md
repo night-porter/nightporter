@@ -49,6 +49,8 @@ security boundary is, and which protections cannot be turned off.
   clearly marked `UNTRUSTED` blocks, and the job's autonomy is capped at `draft`.
 - `trust.open = true` (accept anyone) is capped at `suggest`, so nothing is posted or pushed
   automatically.
+- Team rules read every page of a team's members. If a `deny_teams` lookup fails, the author goes
+  to the inbox instead of being trusted.
 
 ### B2. The agent holds no forge credentials
 
@@ -58,7 +60,8 @@ security boundary is, and which protections cannot be turned off.
   cleared and git hooks are disabled for the agent's commits. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
   inside the agent are logged out.
 - The generated agent settings deny `git push`, `gh`, `glab` and network commands, deny
-  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, ...), and only
+  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, ...) and Night
+  Porter's own config, state database, log and other jobs' files, and only
   allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
 - Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
   permission allows) is ignored.
@@ -73,8 +76,13 @@ security boundary is, and which protections cannot be turned off.
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
 - The agent can't redirect the daemon's git: the worktree's `.git` pointer is recorded before the
-  agent runs and checked afterwards. Diffs, checks and pushes run in your clone on fixed SHAs,
+  agent runs and checked right after, even when the run failed, before anything else touches the
+  worktree. A changed pointer removes the worktree, and a reused worktree whose `.git` doesn't
+  point into your clone is rebuilt. Diffs, checks and pushes run in your clone on fixed SHAs,
   and every daemon git call disables hooks, fsmonitor and the `ext::` transport.
+- The agent runs in its own process group, which is killed when the run ends, so nothing it
+  started in the background keeps changing the worktree after the checks.
+- Night Porter's config and data directories are readable by you only.
 
 ### B3. Pre-push checks
 
@@ -82,8 +90,8 @@ Run on every push, in every mode, including `auto`:
 
 | check | can be disabled? |
 |---|---|
-| secrets in any commit's patch or message, and in replies (built-in patterns, plus gitleaks if installed) | **no** |
-| protected paths touched by any commit, not only the net diff (CI configs, `.git`, `.gitattributes`, agent instruction files, plus your globs) | **no** (you can only add to the list) |
+| secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
+| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
@@ -103,6 +111,13 @@ saw; if they push again, Night Porter asks again. `reproduce` jobs that may run 
 the same approval. The TUI shows
 which build files changed (`composer.json`, `package.json`, `Makefile`, CI files) before you
 approve. Environment commands only ever come from your own config, never from the repository.
+
+Environment commands run outside the agent's sandbox, and what they do depends on files in the
+worktree. So Night Porter copies the files they typically read (`.ddev/`, `.devcontainer/`,
+compose files, `Makefile`, `justfile`, `.env`) before the agent runs and puts them back before
+teardown and cleanup, and the commands get no model API keys. Scripts your commands call by
+name (`composer install`, `npm test`) still run the branch's version: keep environment commands
+to repos whose scripts you'd run yourself.
 
 ### B5. Packs
 

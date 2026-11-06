@@ -265,6 +265,8 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     }
     // Team membership needs the network; resolve only the teams this repo's rules mention.
     let mut teams = HashSet::new();
+    // A deny-team lookup that fails must not let the author through: send them to the inbox.
+    let mut deny_unknown = false;
     if !own && !(s.trust.allow_teams.is_empty() && s.trust.deny_teams.is_empty()) {
         let forge = ctx.forge(&e.repo)?.lock().await;
         for t in s.trust.allow_teams.iter().chain(&s.trust.deny_teams) {
@@ -273,12 +275,19 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
                     teams.insert(t.clone());
                 }
                 Ok(false) => {}
-                Err(err) => tracing::warn!("team {t}: {err:#}"),
+                Err(err) => {
+                    tracing::warn!("team {t}: {err:#}");
+                    deny_unknown |= s.trust.deny_teams.contains(t);
+                }
             }
         }
     }
     let decision =
         if own { trust::Decision::Trusted("self") } else { trust::decide(&s.trust, &e.author, e.role, e.is_bot, |t| teams.contains(t)) };
+    let decision = match decision {
+        trust::Decision::Trusted(_) if deny_unknown => trust::Decision::Untrusted,
+        d => d,
+    };
     let (disp, reason) = match decision {
         trust::Decision::Trusted(why) => (Disposition::Pending, why.to_string()),
         trust::Decision::Untrusted => (Disposition::Inbox, "unknown author".into()),

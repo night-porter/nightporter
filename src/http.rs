@@ -27,14 +27,22 @@ impl Api {
         let http = reqwest::Client::builder()
             .user_agent(concat!("nightporter/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
-            // Follow redirects only on the same host: GitLab's PRIVATE-TOKEN header is not
-            // stripped on cross-host redirects the way `Authorization` is.
+            // Follow redirects only to the same scheme, host and port: GitLab's PRIVATE-TOKEN
+            // header is not stripped on cross-host redirects the way `Authorization` is, and an
+            // https→http hop would send it in the clear.
             .redirect(reqwest::redirect::Policy::custom(|a| {
-                let same = a.previous().first().and_then(|u| u.host_str()) == a.url().host_str();
+                let same = a.previous().first().is_some_and(|p| same_origin(p, a.url()));
                 if same && a.previous().len() < 5 { a.follow() } else { a.stop() }
             }))
             .build()?;
         Ok(Self { http, base: base.trim_end_matches('/').into(), token, gitlab })
+    }
+
+    fn is_ours(&self, url: &str) -> bool {
+        match (reqwest::Url::parse(&self.base), reqwest::Url::parse(url)) {
+            (Ok(b), Ok(u)) => same_origin(&b, &u),
+            _ => false,
+        }
     }
 
     fn req(&self, m: Method, path: &str) -> reqwest::RequestBuilder {
@@ -66,7 +74,8 @@ impl Api {
             match self.get_cond::<Vec<T>>(&p, None).await? {
                 Got::Fresh(v, h) => {
                     out.extend(v);
-                    next = next_link(&h);
+                    // Only follow `next` links back to our own API: they carry the token.
+                    next = next_link(&h).filter(|u| self.is_ours(u));
                 }
                 Got::NotModified => break,
             }
@@ -105,6 +114,10 @@ async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response>
     let body = resp.text().await.unwrap_or_default();
     let body: String = body.chars().take(300).collect();
     bail!("{path}: HTTP {s}: {body}")
+}
+
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// The `rel="next"` URL from a `Link` header.
@@ -161,6 +174,16 @@ pub fn enc(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redirects_and_next_links_stay_on_origin() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(super::same_origin(&u("https://gitlab.example.com/api/v4/x"), &u("https://gitlab.example.com/api/v4/y?page=2")));
+        assert!(super::same_origin(&u("https://h.example/a"), &u("https://h.example:443/b")));
+        assert!(!super::same_origin(&u("https://h.example/a"), &u("http://h.example/a")), "no https→http");
+        assert!(!super::same_origin(&u("https://h.example/a"), &u("https://h.example:8443/a")), "no port change");
+        assert!(!super::same_origin(&u("https://h.example/a"), &u("https://evil.example/a")));
+    }
+
     #[test]
     fn link_next() {
         let mut h = reqwest::header::HeaderMap::new();

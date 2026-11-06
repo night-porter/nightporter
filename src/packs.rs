@@ -85,7 +85,7 @@ pub struct MarketEntry {
     pub description: String,
 }
 
-pub const OFFICIAL_MARKET: &str = "https://github.com/nightporter-dev/marketplace";
+pub const OFFICIAL_MARKET: &str = "https://github.com/night-porter/marketplace";
 
 /// Only these files may appear in a pack. No scripts, no binaries.
 const ALLOWED_EXT: &[&str] = &["md", "toml", "txt"];

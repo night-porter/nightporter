@@ -65,6 +65,12 @@ impl Paths {
         for d in [&self.config_dir, &self.data_dir, &self.repos_dir(), &self.jobs_dir(), &self.worktrees_dir()] {
             std::fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
         }
+        // Private repo content lives here (prompts, diffs, logs, state): owner only.
+        #[cfg(unix)]
+        for d in [&self.config_dir, &self.data_dir] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).with_context(|| format!("chmod {}", d.display()))?;
+        }
         Ok(())
     }
 }
