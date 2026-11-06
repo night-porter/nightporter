@@ -8,7 +8,7 @@ cargo-dist-version = "0.34.0"
 ci = "github"
 installers = ["shell", "powershell", "homebrew"]
 tap = "night-porter/homebrew-tap"
-publish-jobs = ["homebrew"]
+publish-jobs = ["homebrew"]  # crates.io: hand-written `publish-crates` job in release.yml
 targets = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",

@@ -10,6 +10,8 @@ homepage = "https://github.com/night-porter/nightporter"
 readme = "README.md"
 keywords = ["github", "gitlab", "agent", "tui", "pull-request"]
 categories = ["command-line-utilities", "development-tools"]
+# Only what the crate needs: prompts/ and assets/ are compiled in with include_str!.
+include = ["/src/**", "/prompts/**", "/assets/**", "/LICENSE-*", "/README.md"]
 
 [dependencies]
 anyhow = "1.0.104"
