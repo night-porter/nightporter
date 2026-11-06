@@ -81,6 +81,92 @@ pub fn install(log: &std::path::Path) -> Result<String> {
     }
 }
 
+fn service_file() -> Option<PathBuf> {
+    let h = home().ok()?;
+    let p = if cfg!(target_os = "macos") {
+        h.join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    } else {
+        h.join(".config/systemd/user/nightporter.service")
+    };
+    p.is_file().then_some(p)
+}
+
+/// Is the daemon set to start at login? The service runs the default instance, so an isolated
+/// `NIGHTPORTER_HOME` never goes through it.
+pub fn installed() -> bool {
+    std::env::var_os("NIGHTPORTER_HOME").is_none() && service_file().is_some()
+}
+
+fn wait_for(paths: &crate::paths::Paths, running: bool) -> bool {
+    for _ in 0..50 {
+        if paths.daemon_running() == running {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
+}
+
+/// Start the daemon in the background: through the login service if it's installed, otherwise
+/// as a detached process logging to `daemon.log`.
+pub fn start(paths: &crate::paths::Paths) -> Result<String> {
+    if paths.daemon_running() {
+        return Ok("Night Porter is already running".into());
+    }
+    let via_service = installed()
+        && if cfg!(target_os = "macos") {
+            let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
+            run(Command::new("launchctl").args(["kickstart", &format!("gui/{uid}/{LABEL}")])).is_ok()
+        } else {
+            run(Command::new("systemctl").args(["--user", "start", "nightporter.service"])).is_ok()
+        };
+    if !via_service {
+        paths.ensure()?;
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;
+        let mut cmd = Command::new(exe()?);
+        cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
+        // Its own process group: closing this terminal doesn't take it down.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        cmd.spawn().context("start the daemon")?;
+    }
+    if !wait_for(paths, true) {
+        bail!("the daemon didn't start; see {}", paths.log_file().display());
+    }
+    Ok("Night Porter is running: it watches your PRs in the background".into())
+}
+
+/// Stop the daemon, however it was started. Running jobs stop too and are queued again on the
+/// next start; nothing half-done is pushed.
+pub fn stop(paths: &crate::paths::Paths) -> Result<String> {
+    if !paths.daemon_running() {
+        return Ok("Night Porter is not running".into());
+    }
+    let pid = std::fs::read_to_string(paths.pid_file())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .context("can't find the daemon's process id; stop it with your system's task manager")?;
+    #[cfg(unix)]
+    {
+        let pid = libc::pid_t::try_from(pid)?;
+        // SAFETY: plain syscall; SIGTERM makes the daemon exit cleanly.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            bail!("couldn't signal process {pid}: {}", std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(unix))]
+    run(Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]))?;
+    if !wait_for(paths, false) {
+        bail!("the daemon (process {pid}) is still running");
+    }
+    let _ = std::fs::remove_file(paths.pid_file());
+    Ok(if installed() {
+        "Night Porter stopped. It starts again when you log in; `nightporter service uninstall` turns that off.".into()
+    } else {
+        "Night Porter stopped".into()
+    })
+}
+
 pub fn uninstall() -> Result<String> {
     if cfg!(target_os = "macos") {
         let p = home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));

@@ -84,11 +84,32 @@ pub async fn connect(cfg: &Config) -> Result<HashMap<(ForgeKind, String), tokio:
     Ok(out)
 }
 
+/// Ctrl-C or SIGTERM (`nightporter stop`, `kill`, logout). Exiting cleanly matters: launchd and
+/// systemd restart a daemon that dies from a signal, but not one that exits with success.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut term) = signal(SignalKind::terminate()) else { return std::future::pending().await };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 pub async fn run(paths: Paths) -> Result<()> {
     paths.ensure()?;
     // Single instance: the lock is held for the life of the process.
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths.lock())?;
-    lock.try_lock().map_err(|_| anyhow::anyhow!("another nightporter daemon is already running ({})", paths.lock().display()))?;
+    if lock.try_lock().is_err() {
+        // Not an error exit: launchd/systemd would otherwise relaunch this copy every 30s, forever.
+        eprintln!("Night Porter is already running ({}); nothing to do", paths.lock().display());
+        return Ok(());
+    }
+    std::fs::write(paths.pid_file(), std::process::id().to_string())?;
 
     let cfg = Config::load(&paths)?;
     let db = Db::open(&paths.db())?;
@@ -122,7 +143,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            _ = tokio::signal::ctrl_c() => { tracing::info!("shutting down"); return Ok(()); }
+            () = shutdown() => { tracing::info!("shutting down"); let _ = std::fs::remove_file(paths.pid_file()); return Ok(()); }
         }
         if dirty.swap(false, std::sync::atomic::Ordering::Relaxed) || last_scan.elapsed() > Duration::from_secs(900) {
             reload(&ctx);
@@ -154,6 +175,9 @@ pub async fn run(paths: Paths) -> Result<()> {
             tokio::spawn(async move {
                 if let Err(e) = job::housekeeping(&c).await {
                     tracing::warn!("housekeeping: {e:#}");
+                }
+                if c.cfg().check_updates {
+                    crate::update::daily_check(&c.db).await;
                 }
             });
         }

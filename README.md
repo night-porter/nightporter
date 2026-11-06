@@ -11,7 +11,7 @@
 
 Night Porter is like an IRC bouncer for your pull requests. It watches GitHub and GitLab for
 review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
-(Claude Code or OpenCode) on your local clone to deal with them, within the rules you set.
+(Claude Code, OpenCode or Codex) on your local clone to deal with them, within the rules you set.
 
 Most agent tools are cockpits: you start the agent and watch it. Night Porter is the night
 shift. It starts work **by itself** when something happens on your PRs, and it's built to be safe
@@ -46,7 +46,7 @@ Night Porter **never** merges, force-pushes, closes or approves.
 ## Features
 
 - GitHub (github.com) and GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`)
-- Claude Code and OpenCode
+- Claude Code, OpenCode and Codex
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
 - Several active windows per day; events outside them are queued
@@ -55,6 +55,12 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)
 - Maintainer mode: triage, reproduce, fix or review issues and MRs from others, on request
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
+- Dismiss a job without replying or pushing, undo it, or delete it for good; search History for
+  done and dismissed jobs
+- One view per repo (`nightporter repo <owner/name>`) of everything that shapes its jobs: level,
+  agent, prompt files, reply style, trust, hours and checks
+- Start and stop from the TUI (`D`) or `nightporter start` / `nightporter stop`
+- A once-a-day, anonymous check for a new release (`check_updates`); it never updates itself
 - Leaves no files in your repositories (it uses its own branches and worktrees)
 
 ## Works with herdr and Rex
@@ -98,9 +104,10 @@ Windows (experimental), archives and building from source: see
 nightporter setup      # first-run wizard
 nightporter            # open the TUI
 nightporter doctor     # check gh / glab / agents / git
+nightporter stop       # turn the background daemon off (nightporter start turns it on)
 ```
 
-Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude` and/or `opencode`.
+Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude`, `opencode` and/or `codex`.
 `gitleaks` is optional but recommended. `herdr` or Rex is optional, for taking over jobs interactively.
 
 ## Configuration

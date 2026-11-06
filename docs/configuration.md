@@ -7,7 +7,8 @@ description: "Every Night Porter setting: config.toml, per-repo override files, 
 You rarely need to edit these files by hand: `nightporter setup` (or `S` in the TUI) walks you
 through the basics, and the TUI's **Settings** tab (`5`) shows and changes every key below,
 checking each change before it's saved. `e` there opens the file in your editor, with the same
-check.
+check. To see what actually applies to one repo (its file, the defaults, prompt files and
+packs together), use `nightporter repo <owner/name>` or `Enter` on the Repos tab.
 
 Files:
 
@@ -43,6 +44,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `worktree_idle_days` | `14` | idle worktrees are removed after this |
 | `marketplaces` | `[]` | extra marketplace git URLs |
 | `handoff` | `auto` | where `h` opens a job: `auto`, `herdr` or `rex` |
+| `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
 | `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author` |
 
@@ -51,9 +53,9 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | key | default | description |
 |---|---|---|
 | `subscribed` | `false` | repo files only |
-| `agent` | `claude` | `claude` or `opencode` |
+| `agent` | `claude` | `claude` (Claude Code), `opencode` or `codex` |
 | `agent_args` | `[]` | extra CLI args, e.g. `["--model", "opus"]` |
-| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]` |
+| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code only: Codex has no per-command allow list |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
@@ -62,8 +64,8 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
-| `sandbox` | `true` | Claude Code's OS sandbox for the agent's shell commands (Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux). Fails closed. Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
-| `sandbox_domains` | `[]` | domains sandboxed commands may reach |
+| `sandbox` | `true` | OS sandbox for the agent's shell commands. Claude Code: Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux; fails closed. Codex: its own sandbox (`--sandbox workspace-write`, network off; `danger-full-access` when `false`). Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
+| `sandbox_domains` | `[]` | domains sandboxed commands may reach (Claude Code only; Codex jobs have no network) |
 | `sandbox_read_allow` | `[]` | extra folders in your home folder that sandboxed commands may read, e.g. `["~/.config/mytool"]`; `["~/"]` lifts the home-folder restriction. The worktree and common toolchain folders (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache`, …) are always readable. |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
@@ -85,7 +87,7 @@ global deny.
 - Maintainer mode is capped at `draft`.
 - The secrets, protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*`, keys, and the agent instruction files `CLAUDE.md`,
-  `AGENTS.md`, `.claude/`, `.opencode/`.
+  `AGENTS.md`, `.claude/`, `.opencode/`, `.codex/`.
 - Night Porter never merges, force-pushes, closes or approves.
 
 ## Examples

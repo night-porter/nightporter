@@ -189,7 +189,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     let forges = ask_forges()?;
 
     // 2. Agents
-    let agent = [AgentKind::Claude, AgentKind::OpenCode][choose("\n2. Which agent by default?", &["Claude Code", "OpenCode"], 0)?];
+    let agent = AgentKind::ALL[choose("\n2. Which agent by default?", &AgentKind::ALL.map(AgentKind::label), 0)?];
 
     // 3. Tools
     println!("\n3. Checking tools…");
@@ -233,7 +233,7 @@ pub fn run(paths: &Paths) -> Result<()> {
                 }
             }
         }
-        d["defaults"]["agent"] = toml_edit::value(if agent == AgentKind::Claude { "claude" } else { "opencode" });
+        d["defaults"]["agent"] = toml_edit::value(agent.bin());
         d["defaults"]["level"] = toml_edit::value(level.as_str());
         if let Some(w) = &sched {
             let mut t = toml_edit::Table::new();

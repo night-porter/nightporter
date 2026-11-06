@@ -5,8 +5,8 @@ description: "Install Night Porter with Homebrew, the install script or Cargo, r
 # Getting started
 
 Night Porter watches GitHub and GitLab for activity on your PRs and MRs: review comments, failing
-CI and merge conflicts. When something happens, it runs your coding agent (Claude Code or
-OpenCode) in a separate git worktree, checks the result, and then pushes and replies, or waits
+CI and merge conflicts. When something happens, it runs your coding agent (Claude Code,
+OpenCode or Codex) in a separate git worktree, checks the result, and then pushes and replies, or waits
 for you. How far it goes is up to you.
 
 ::: warning Early development
@@ -20,13 +20,13 @@ Night Porter is 0.x. Expect breaking changes.
 | `git` | everything |
 | `gh` | GitHub |
 | `glab` | GitLab (gitlab.com or self-hosted) |
-| `claude` or `opencode` | the agent |
+| `claude`, `opencode` or `codex` | the agent (Codex: `npm install -g @openai/codex` or `brew install --cask codex`) |
 | `gitleaks` | optional, a stronger secrets check |
 | `herdr` or Rex | optional, for [taking over jobs](/herdr) |
 | `bubblewrap` and `socat` | Linux only, for Claude Code’s sandbox |
 
-Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run `claude` or
-`opencode` once so it’s logged in too.
+Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run `claude`,
+`opencode` or `codex` once so it’s logged in too.
 
 ## 2. Install Night Porter
 
@@ -69,6 +69,9 @@ cargo install --path . --locked
 ```
 
 To update later, run the same command again (`brew upgrade nightporter` with Homebrew).
+Night Porter never updates itself, but once a day it checks whether there's a new release and
+says so in the TUI header ("update available") and in `nightporter status`; `nightporter update`
+checks right now. See [`check_updates`](/configuration#global-keys) to turn that off.
 
 ## 3. Run the setup wizard
 
@@ -87,7 +90,7 @@ screen readers and in scripts.
 It asks for:
 
 1. **Forges**: GitHub, GitLab or both, and the host if it’s self-hosted.
-2. **Default agent**: Claude Code or OpenCode.
+2. **Default agent**: Claude Code, OpenCode or Codex.
 3. **A tool check**: the same as `nightporter doctor`. Nothing is installed for you; it prints
    the command to fix each problem.
 4. **Where your clones live** (`~/coding` by default). Night Porter works on the clones you
@@ -136,11 +139,38 @@ At any level, Night Porter **never** merges, force-pushes, closes or approves.
 ## Subscribing to more repos
 
 ```sh
-nightporter repos                       # what it found, and what’s subscribed
+nightporter repos                       # subscribed repos, then a count of the other clones
+nightporter repos api --all             # search by name; --all lists every clone
 nightporter subscribe acme/api          # owner/name
 nightporter subscribe git.example.com/team/app   # self-hosted host
 nightporter unsubscribe acme/api
 ```
 
-Or press `4` in the TUI: the space bar toggles a repo, `l` cycles its autonomy level (it asks
-before `auto`) and `a` switches its agent. These write the repo file for you.
+Or press `4` in the TUI: the space bar (or `s`) toggles a repo, `l` cycles its autonomy level (it
+asks before `auto`) and `a` switches its agent (Claude Code → OpenCode → Codex). These write the
+repo file for you. `Enter` on a repo, or `nightporter repo acme/api`, shows everything that shapes
+work on it: level, agent, prompt files, reply style, trust, hours and checks.
+
+## Turning Night Porter off
+
+Night Porter has two parts. The **daemon** is the background part that watches your PRs and
+runs jobs. The **TUI** is the window you look at. Closing the TUI (`q`) does **not** stop the
+daemon: it keeps watching.
+
+To turn it off, press `D` in the TUI (it asks first), or run:
+
+```sh
+nightporter stop
+```
+
+Jobs that were running stop too. Nothing half-done is pushed or posted; they're queued again
+the next time it starts. Your repos and config are not touched.
+
+To turn it back on, press `D` again (the header says **NOT RUNNING (D starts it)** while it's
+off) or run `nightporter start`.
+
+If you installed the background service, it also starts again when you log in. To stop that:
+
+```sh
+nightporter service uninstall
+```

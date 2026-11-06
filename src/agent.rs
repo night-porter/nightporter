@@ -133,7 +133,7 @@ const MODEL_KEYS: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
 ];
-const MODEL_PREFIXES: &[&str] = &["ANTHROPIC_", "CLAUDE_", "OPENCODE_"];
+const MODEL_PREFIXES: &[&str] = &["ANTHROPIC_", "CLAUDE_", "OPENCODE_", "CODEX_"];
 
 fn is_model_key(k: &str) -> bool {
     let u = k.to_ascii_uppercase();
@@ -333,6 +333,9 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
             std::fs::write(&cfg, serde_json::to_vec_pretty(&opencode_config(s, read_only))?)?;
             cmd.env("OPENCODE_CONFIG", &cfg).args(["run", "--pure", prompt]);
         }
+        AgentKind::Codex => {
+            cmd.stdin(std::process::Stdio::piped()).args(codex_args(s, job_dir, read_only));
+        }
     }
     cmd.args(&s.agent_args);
     let mut child = cmd
@@ -360,7 +363,37 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
     if !out.status.success() {
         bail!("agent exited with {}: {}", out.status, tail(&stderr, 400).trim());
     }
+    if kind == AgentKind::Codex {
+        // The final message is in the file `-o` wrote; stdout is the progress stream.
+        let last = std::fs::read_to_string(job_dir.join(CODEX_LAST)).unwrap_or_default();
+        return parse_output(kind, &last);
+    }
     parse_output(kind, &stdout)
+}
+
+const CODEX_LAST: &str = "codex-last-message.md";
+
+/// `codex exec` arguments. Codex has no per-command allow list: its OS sandbox (Seatbelt /
+/// Landlock) is the boundary, with writes limited to the worktree and the network off. Your
+/// `~/.codex/config.toml` (MCP servers, hooks, profiles) and execpolicy rules are not loaded;
+/// login still comes from `CODEX_HOME`. The prompt is read from stdin (`-`).
+fn codex_args(s: &RepoSettings, job_dir: &Path, read_only: bool) -> Vec<String> {
+    let sandbox = if read_only {
+        "read-only"
+    } else if s.sandbox {
+        "workspace-write"
+    } else {
+        "danger-full-access"
+    };
+    let mut a: Vec<String> =
+        ["exec", "--sandbox", sandbox, "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"]
+            .map(String::from)
+            .to_vec();
+    for c in ["approval_policy=\"never\"", "sandbox_workspace_write.network_access=false", "tools.web_search=false"] {
+        a.extend(["-c".into(), c.into()]);
+    }
+    a.extend(["-o".into(), job_dir.join(CODEX_LAST).to_string_lossy().into(), "-".into()]);
+    a
 }
 
 /// Kill whatever is left in the agent's process group.
@@ -401,7 +434,7 @@ pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {
             }
             (r.result, r.total_cost_usd)
         }
-        AgentKind::OpenCode => (stdout.to_string(), None),
+        AgentKind::OpenCode | AgentKind::Codex => (stdout.to_string(), None),
     };
     let block = last_block(&text).context("agent did not end with a ```nightporter block")?;
     let b: Block = serde_json::from_str(block).context("bad JSON in the nightporter block")?;
@@ -424,6 +457,21 @@ fn tail(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_runs_sandboxed_without_user_config() {
+        let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
+        let a = codex_args(&s, Path::new("/j"), false).join(" ");
+        assert!(a.starts_with("exec --sandbox workspace-write --ignore-user-config"), "{a}");
+        assert!(a.contains("sandbox_workspace_write.network_access=false") && a.ends_with("-o /j/codex-last-message.md -"), "{a}");
+        assert!(codex_args(&s, Path::new("/j"), true).join(" ").contains("--sandbox read-only"));
+        let off = crate::config::Config::parse("[defaults]\nsandbox = false").unwrap().resolve(None).unwrap();
+        assert!(codex_args(&off, Path::new("/j"), false).join(" ").contains("danger-full-access"));
+        let out = "done\n```nightporter\n{\"summary\":\"ok\",\"replies\":[]}\n```";
+        assert_eq!(parse_output(AgentKind::Codex, out).unwrap().summary, "ok");
+        assert_eq!(AgentKind::Claude.next().next(), AgentKind::Codex);
+        assert_eq!(AgentKind::Codex.next(), AgentKind::Claude);
+    }
 
     #[test]
     fn env_is_scrubbed() {
