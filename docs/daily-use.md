@@ -20,12 +20,13 @@ Run `nightporter`. It has five tabs:
 | `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours |
 | `2` | Inbox | events from people you don’t trust yet |
 | `3` | History | recent jobs |
-| `4` | Repos | your clones; space toggles the subscription, `l` cycles the level, `a` switches the agent, `e` edits the repo file, `R` rescans |
+| `4` | Repos | your clones, `[x]` when subscribed; space toggles the subscription, `l` cycles the level, `a` switches the agent, `e` edits the repo file, `R` rescans |
 | `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
 | `?` | Help | keys and commands |
 
 Move with the arrow keys or `j`/`k`, `g`/`G` for the first and last item. `Enter` opens a job and
-`Esc` closes it. `p` pauses and resumes. `S` runs the setup wizard again. `q` quits. Set `NO_COLOR=1` to turn colours off.
+`Esc` closes it. `PgUp`/`PgDn` move a page. `/` searches the Repos and Settings lists (`Esc` clears
+the search). `p` pauses and resumes. `S` runs the setup wizard again. `q` quits. Set `NO_COLOR=1` to turn colours off.
 
 ### Settings
 

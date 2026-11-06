@@ -39,6 +39,7 @@ enum Suspend {
 /// A pending yes/no question and what to do on "y".
 type Confirm = Box<dyn FnOnce(&mut App) -> Result<String>>;
 
+#[derive(Clone)]
 struct RepoRow {
     id: crate::forge::RepoId,
     subscribed: bool,
@@ -46,6 +47,7 @@ struct RepoRow {
     agent: String,
 }
 
+#[allow(clippy::struct_excessive_bools, reason = "independent UI flags, not a state machine")]
 struct App {
     paths: Paths,
     db: Db,
@@ -70,6 +72,12 @@ struct App {
     settings_err: String,
     /// Text being typed for the selected setting.
     input: Option<String>,
+    /// Unfiltered Repos and Settings rows; `repos` / `settings` are what `filter` lets through.
+    repos_all: Vec<RepoRow>,
+    settings_all: Vec<crate::settings::Row>,
+    /// `/` search on the Repos and Settings tabs; `filtering` while it's being typed.
+    filter: String,
+    filtering: bool,
 }
 
 /// No forge account configured yet: nothing can be watched, so the wizard is the useful first step.
@@ -122,6 +130,10 @@ impl App {
             settings: vec![],
             settings_err: String::new(),
             input: None,
+            repos_all: vec![],
+            settings_all: vec![],
+            filter: String::new(),
+            filtering: false,
         }
     }
 
@@ -170,11 +182,11 @@ impl App {
         self.paused = actions::paused(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
-            (self.settings, self.settings_err) = match crate::settings::rows(&self.paths) {
+            (self.settings_all, self.settings_err) = match crate::settings::rows(&self.paths) {
                 Ok(r) => (r, String::new()),
                 Err(e) => (vec![], format!("{e:#}")),
             };
-            self.repos = match Config::load(&self.paths) {
+            self.repos_all = match Config::load(&self.paths) {
                 Ok(cfg) => crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts)
                     .into_keys()
                     .map(|id| match cfg.settings_for(&self.paths, &id) {
@@ -187,11 +199,39 @@ impl App {
                     vec![]
                 }
             };
+            self.apply_filter();
         }
         let n = self.len();
         if self.sel.selected().is_some_and(|i| i >= n) {
             self.sel.select(Some(n.saturating_sub(1)));
         }
+    }
+
+    /// Case-insensitive substring match on the repo path or the setting key.
+    fn apply_filter(&mut self) {
+        let f = self.filter.to_lowercase();
+        self.repos =
+            self.repos_all.iter().filter(|r| format!("{}/{}", r.id.host, r.id.path).to_lowercase().contains(&f)).cloned().collect();
+        self.settings = self.settings_all.iter().filter(|r| r.setting.key.contains(&f)).cloned().collect();
+        if self.sel.selected().is_some_and(|i| i >= self.len()) {
+            self.sel.select(Some(0));
+        }
+    }
+
+    fn filter_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Char(c) => self.filter.push(c),
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.filtering = false;
+            }
+            KeyCode::Enter | KeyCode::Down | KeyCode::Up => self.filtering = false,
+            _ => return,
+        }
+        self.apply_filter();
     }
 
     fn len(&self) -> usize {
@@ -236,6 +276,10 @@ impl App {
             self.input_key(k);
             return true;
         }
+        if self.filtering {
+            self.filter_key(k);
+            return true;
+        }
         if self.detail.is_some() {
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
@@ -251,6 +295,11 @@ impl App {
             return true;
         }
         match k.code {
+            // Esc first clears a search, then quits.
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.apply_filter();
+            }
             KeyCode::Char('q') | KeyCode::Esc => return false,
             KeyCode::Char('1') => self.switch(Tab::Queue),
             KeyCode::Char('2') => self.switch(Tab::Inbox),
@@ -271,6 +320,13 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => self.sel.select(Some(self.sel.selected().unwrap_or(0).saturating_sub(1))),
             KeyCode::Home | KeyCode::Char('g') => self.sel.select(Some(0)),
+            KeyCode::PageDown => self.sel.select(Some((self.sel.selected().unwrap_or(0) + 10).min(self.len().saturating_sub(1)))),
+            KeyCode::PageUp => self.sel.select(Some(self.sel.selected().unwrap_or(0).saturating_sub(10))),
+            KeyCode::Char('/') if matches!(self.tab, Tab::Repos | Tab::Settings) => {
+                self.filtering = true;
+                self.sel.select(Some(0));
+            }
+
             KeyCode::End | KeyCode::Char('G') => self.sel.select(Some(self.len().saturating_sub(1))),
             KeyCode::Char('p') => {
                 let p = !self.paused;
@@ -309,6 +365,12 @@ impl App {
 
     fn switch(&mut self, t: Tab) {
         self.tab = t;
+        // A search belongs to one list.
+        if !self.filter.is_empty() || self.filtering {
+            self.filter.clear();
+            self.filtering = false;
+            self.apply_filter();
+        }
         self.sel.select(Some(0));
         if t == Tab::Repos {
             self.refresh(true);
@@ -543,33 +605,25 @@ impl App {
                         ))
                     })
                     .collect(),
-                Tab::Repos => self
-                    .repos
-                    .iter()
-                    .map(|r| {
-                        ListItem::new(format!(
-                            "{} {:<50} {:<8} {}",
-                            if r.subscribed { "[on] " } else { "[off]" },
-                            format!("{}/{}", r.id.host, r.id.path),
-                            r.level,
-                            r.agent
-                        ))
-                    })
-                    .collect(),
+                Tab::Repos => self.repo_items(),
                 Tab::Settings | Tab::Help => vec![],
             };
             let empty = items.is_empty();
             let title = match self.tab {
+                Tab::Repos if !self.filter.is_empty() || self.filtering => {
+                    &format!(" Repos matching \"{}\" ({} of {}) ", self.filter, self.repos.len(), self.repos_all.len())
+                }
                 Tab::Queue => " Needs you / running ",
                 Tab::Inbox => " Unknown authors waiting ",
                 Tab::History => " History ",
-                Tab::Repos => " Repos (space subscribe, l level, a agent, e edit file, R rescan) ",
+                Tab::Repos => " Repos (space subscribe, l level, a agent, e edit file, / search, R rescan) ",
                 Tab::Settings | Tab::Help => "",
             };
             if empty {
                 let msg = match self.tab {
                     Tab::Queue => "Nothing needs you. Jobs show up here when your PRs get activity.",
                     Tab::Inbox => "No one is waiting.",
+                    Tab::Repos if !self.filter.is_empty() => "No repo matches the search. Esc clears it.",
                     Tab::Repos => "No clones found. Press S to run the setup wizard (forges, clone folder, repos).",
                     _ => "Nothing yet.",
                 };
@@ -592,12 +646,13 @@ impl App {
     fn footer(&self) -> (&'static str, String) {
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
+            (false, Tab::Repos | Tab::Settings) if self.filtering => "type to search, Enter keep results, Esc clear search",
             (true, _) => "↑↓ scroll a approve A override r reject t retry h take over c/y copy Esc",
             (_, Tab::Queue | Tab::History) => "↑↓ Enter open a approve r reject t retry h take over p pause ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore d deny ? help q quit",
-            (_, Tab::Repos) => "space subscribe l level a agent e edit S setup ? help q quit",
+            (_, Tab::Repos) => "space subscribe l level a agent e edit / search S setup ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
-            (_, Tab::Settings) => "Enter change d default e edit file S setup ? help q quit",
+            (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
             (_, Tab::Help) => "1-5 tabs S setup wizard q quit",
         };
         let line2 = match (&self.confirm, &self.input) {
@@ -606,13 +661,38 @@ impl App {
                 let key = self.sel.selected().and_then(|i| self.settings.get(i)).map_or("", |r| r.setting.key);
                 format!("{key} = {buf}_   {}", self.msg)
             }
+            _ if self.filtering => format!("search: {}_", self.filter),
             _ => self.msg.clone(),
         };
         (keys, line2)
     }
 
+    fn repo_items(&self) -> Vec<ListItem<'static>> {
+        // Column as wide as the longest visible name, so levels line up.
+        let w = self.repos.iter().map(|r| r.id.host.len() + r.id.path.len() + 1).max().unwrap_or(0);
+        self.repos
+            .iter()
+            .map(|r| {
+                let name = Span::styled(
+                    format!("{:<w$} ", format!("{}/{}", r.id.host, r.id.path)),
+                    if r.subscribed { Style::new().add_modifier(Modifier::BOLD) } else { Style::new().add_modifier(Modifier::DIM) },
+                );
+                ListItem::new(Line::from(vec![
+                    Span::raw(if r.subscribed { "[x] " } else { "[ ] " }),
+                    name,
+                    Span::styled(format!("{:<8} ", r.level), self.style(level_style(&r.level))),
+                    Span::raw(r.agent.clone()),
+                ]))
+            })
+            .collect()
+    }
+
     fn draw_settings(&mut self, f: &mut Frame, body: Rect) {
-        let title = format!(" Settings: {} (each repo file can override defaults.*) ", self.paths.config_file().display());
+        let title = if self.filter.is_empty() && !self.filtering {
+            format!(" Settings: {} (each repo file can override defaults.*) ", self.paths.config_file().display())
+        } else {
+            format!(" Settings matching \"{}\" ({} of {}) ", self.filter, self.settings.len(), self.settings_all.len())
+        };
         if !self.settings_err.is_empty() {
             let text = format!(
                 "config.toml doesn't load, so Night Porter is using the last good config:\n\n  {}\n\nPress e to fix it in your editor. Your edit is checked before it's saved.",
@@ -630,7 +710,17 @@ impl App {
             .iter()
             .map(|r| {
                 let value = if r.value.is_empty() { "(none)" } else { r.value.as_str() };
-                ListItem::new(format!("{:<34} {:<9} {value}", r.setting.key, if r.set { "[set]" } else { "[default]" }))
+                let shown = match (r.setting.kind, value) {
+                    (crate::settings::Kind::Bool, "true") => "[x] on".to_string(),
+                    (crate::settings::Kind::Bool, _) => "[ ] off".to_string(),
+                    _ => value.to_string(),
+                };
+                let source = if r.set { Style::new().add_modifier(Modifier::BOLD) } else { Style::new().add_modifier(Modifier::DIM) };
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{:<34} ", r.setting.key)),
+                    Span::styled(format!("{:<9} ", if r.set { "[set]" } else { "[default]" }), source),
+                    Span::styled(shown, self.style(level_style(value))),
+                ]))
             })
             .collect();
         let list = List::new(items)
@@ -640,6 +730,18 @@ impl App {
         f.render_stateful_widget(list, list_area, &mut self.sel);
         let help = self.sel.selected().and_then(|i| self.settings.get(i)).map_or("", |r| r.setting.help);
         f.render_widget(Paragraph::new(help).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::TOP)), help_area);
+    }
+}
+
+/// Riskier levels stand out; the level is always written out too, so colour is only a hint.
+fn level_style(level: &str) -> Style {
+    match level {
+        "auto" => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "draft" => Style::new().fg(Color::Yellow),
+        "suggest" => Style::new().fg(Color::Cyan),
+        "observe" => Style::new().add_modifier(Modifier::DIM),
+        "ERROR" => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        _ => Style::new(),
     }
 }
 
@@ -776,7 +878,8 @@ Tabs
   4 Repos    subscribe your local clones, set each one's level and agent
   5 Settings every config.toml setting, its value and whether it's [set] or [default]
 
-Keys (everywhere): ↑/↓ or j/k move, Enter open, Tab/←/→ switch tab, p pause/resume, q quit
+Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ switch tab, p pause, q quit
+       /  search the Repos or Settings list (Esc clears)
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
 Repos: space subscribe/unsubscribe   l next level (observe → suggest → draft → auto, asks before auto)
        a  switch agent (Claude Code / OpenCode)   e edit the repo's file   R rescan
@@ -908,6 +1011,17 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(screen(&mut app).contains("defaults.sandbox = false? y/N"), "turning the sandbox off asks first");
         press(&mut app, KeyCode::Char('n'));
+        // `/` searches the list; Esc clears the search before it would quit.
+        press(&mut app, KeyCode::Char('/'));
+        for c in "sandbox".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.settings.iter().all(|r| r.setting.key.contains("sandbox")) && app.settings.len() == 3);
+        assert!(screen(&mut app).contains("Settings matching \"sandbox\" (3 of"), "{}", screen(&mut app));
+        assert!(screen(&mut app).contains("[x] on"), "bools show as checkboxes");
+        assert!(press(&mut app, KeyCode::Esc), "Esc clears the search instead of quitting");
+        assert_eq!(app.settings.len(), app.settings_all.len());
         std::fs::write(paths.config_file(), "nope = 1\n").unwrap();
         app.refresh(true);
         assert!(screen(&mut app).contains("Press e to fix it"));
