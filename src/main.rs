@@ -19,6 +19,7 @@ mod prompts;
 mod repos;
 mod schedule;
 mod service;
+mod settings;
 mod setup;
 mod skill;
 mod state;

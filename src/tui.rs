@@ -2,7 +2,7 @@
 //! signal), honours `NO_COLOR`. Reads/writes the same SQLite state as the daemon.
 
 use crate::actions::{self, Scope};
-use crate::config::Config;
+use crate::config::{AgentKind, Config};
 use crate::forge::Event;
 use crate::paths::Paths;
 use crate::state::{Db, Disposition, Job, JobStatus};
@@ -18,10 +18,23 @@ enum Tab {
     Inbox,
     History,
     Repos,
+    Settings,
     Help,
 }
-const TABS: [(Tab, &str); 5] =
-    [(Tab::Queue, "1 Queue"), (Tab::Inbox, "2 Inbox"), (Tab::History, "3 History"), (Tab::Repos, "4 Repos"), (Tab::Help, "? Help")];
+const TABS: [(Tab, &str); 6] = [
+    (Tab::Queue, "1 Queue"),
+    (Tab::Inbox, "2 Inbox"),
+    (Tab::History, "3 History"),
+    (Tab::Repos, "4 Repos"),
+    (Tab::Settings, "5 Settings"),
+    (Tab::Help, "? Help"),
+];
+
+/// Work that needs the real terminal: the main loop leaves the alternate screen for it.
+enum Suspend {
+    Setup,
+    Editor(std::path::PathBuf),
+}
 
 /// A pending yes/no question and what to do on "y".
 type Confirm = Box<dyn FnOnce(&mut App) -> Result<String>>;
@@ -51,9 +64,33 @@ struct App {
     color: bool,
     daemon_up: bool,
     paused: bool,
+    suspend: Option<Suspend>,
+    settings: Vec<crate::settings::Row>,
+    /// Why the Settings tab is empty: `config.toml` doesn't load.
+    settings_err: String,
+    /// Text being typed for the selected setting.
+    input: Option<String>,
+}
+
+/// No forge account configured yet: nothing can be watched, so the wizard is the useful first step.
+fn needs_setup(paths: &Paths) -> bool {
+    Config::load(paths).is_ok_and(|c| c.accounts.is_empty())
+}
+
+/// Run the wizard outside the TUI, then wait so its last lines can be read.
+fn setup_then_pause(paths: &Paths) {
+    if let Err(e) = crate::setup::run(paths) {
+        println!("\nsetup stopped: {e:#}");
+    }
+    print!("\nPress Enter to continue to Night Porter… ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 pub fn run(paths: &Paths) -> Result<()> {
+    if needs_setup(paths) && crate::setup::yes("Night Porter isn't set up yet. Run the setup wizard now?", true)? {
+        setup_then_pause(paths);
+    }
     let mut app = App::new(paths, Db::open(&paths.db())?);
     app.refresh(true);
     let mut term = ratatui::init();
@@ -81,6 +118,10 @@ impl App {
             color: std::env::var_os("NO_COLOR").is_none(),
             daemon_up: false,
             paused: false,
+            suspend: None,
+            settings: vec![],
+            settings_err: String::new(),
+            input: None,
         }
     }
 
@@ -94,6 +135,18 @@ impl App {
                 && !self.key(k)
             {
                 return Ok(());
+            }
+            if let Some(job) = self.suspend.take() {
+                ratatui::restore();
+                self.msg = match job {
+                    Suspend::Setup => {
+                        setup_then_pause(&self.paths);
+                        "setup finished".into()
+                    }
+                    Suspend::Editor(path) => crate::settings::edit_in_editor(&path).unwrap_or_else(|e| format!("error: {e:#}")),
+                };
+                *term = ratatui::init();
+                self.refresh(true);
             }
             if last.elapsed() > Duration::from_secs(2) {
                 self.refresh(false);
@@ -117,6 +170,10 @@ impl App {
         self.paused = actions::paused(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
+            (self.settings, self.settings_err) = match crate::settings::rows(&self.paths) {
+                Ok(r) => (r, String::new()),
+                Err(e) => (vec![], format!("{e:#}")),
+            };
             self.repos = match Config::load(&self.paths) {
                 Ok(cfg) => crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts)
                     .into_keys()
@@ -143,6 +200,7 @@ impl App {
             Tab::Inbox => self.inbox.len(),
             Tab::History => self.history.len(),
             Tab::Repos => self.repos.len(),
+            Tab::Settings => self.settings.len(),
             Tab::Help => 0,
         }
     }
@@ -174,6 +232,10 @@ impl App {
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
             return false;
         }
+        if self.input.is_some() {
+            self.input_key(k);
+            return true;
+        }
         if self.detail.is_some() {
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
@@ -194,6 +256,7 @@ impl App {
             KeyCode::Char('2') => self.switch(Tab::Inbox),
             KeyCode::Char('3') => self.switch(Tab::History),
             KeyCode::Char('4') => self.switch(Tab::Repos),
+            KeyCode::Char('5') => self.switch(Tab::Settings),
             KeyCode::Char('?') | KeyCode::F(1) => self.switch(Tab::Help),
             KeyCode::Tab | KeyCode::Right => {
                 let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
@@ -218,6 +281,7 @@ impl App {
                 };
                 self.paused = p;
             }
+            KeyCode::Char('S') => self.suspend = Some(Suspend::Setup),
             KeyCode::Char('R') if self.tab == Tab::Repos => {
                 self.refresh(true);
                 self.msg = "rescanned".into();
@@ -232,6 +296,7 @@ impl App {
                 Tab::Queue | Tab::History => self.job_key(k),
                 Tab::Inbox => self.inbox_key(k),
                 Tab::Repos => self.repo_key(k),
+                Tab::Settings => self.settings_key(k),
                 Tab::Help => {}
             },
         }
@@ -333,16 +398,97 @@ impl App {
     }
 
     fn repo_key(&mut self, k: KeyEvent) {
-        let Some(i) = self.sel.selected() else { return };
-        if matches!(k.code, KeyCode::Char(' ' | 's') | KeyCode::Enter)
-            && let Some(r) = self.repos.get(i)
-        {
-            let on = !r.subscribed;
-            self.msg = match actions::set_subscribed(&self.paths, &r.id, on) {
-                Ok(()) => format!("{} {}", if on { "subscribed to" } else { "unsubscribed from" }, r.id.path),
-                Err(e) => format!("error: {e:#}"),
-            };
-            self.refresh(true);
+        let Some(r) = self.sel.selected().and_then(|i| self.repos.get(i)) else { return };
+        let (id, path) = (r.id.clone(), self.paths.repo_file(&r.id));
+        let set = move |key: &'static str, val: &'static str| {
+            crate::config::edit_file(&path, |d| d[key] = toml_edit::value(val)).map(|()| format!("{} {key} = {val}", id.path))
+        };
+        let r = match k.code {
+            KeyCode::Char(' ' | 's') | KeyCode::Enter => {
+                let on = !r.subscribed;
+                actions::set_subscribed(&self.paths, &r.id, on)
+                    .map(|()| format!("{} {}", if on { "subscribed to" } else { "unsubscribed from" }, r.id.path))
+            }
+            KeyCode::Char('l') => {
+                let next = match r.level.as_str() {
+                    "observe" => "suggest",
+                    "suggest" => "draft",
+                    "draft" => "auto",
+                    _ => "observe",
+                };
+                if next == "auto" {
+                    self.confirm = Some((
+                        format!("Let {} push and reply on its own (auto)? y/N", r.id.path),
+                        Box::new(move |_: &mut App| set("level", "auto")),
+                    ));
+                    return;
+                }
+                set("level", next)
+            }
+            KeyCode::Char('a') => set("agent", if r.agent == AgentKind::Claude.label() { "opencode" } else { "claude" }),
+            KeyCode::Char('e') => {
+                self.suspend = Some(Suspend::Editor(self.paths.repo_file(&r.id)));
+                return;
+            }
+            _ => return,
+        };
+        self.msg = r.unwrap_or_else(|e| format!("error: {e:#}"));
+        self.refresh(true);
+    }
+
+    fn settings_key(&mut self, k: KeyEvent) {
+        if k.code == KeyCode::Char('e') {
+            self.suspend = Some(Suspend::Editor(self.paths.config_file()));
+            return;
+        }
+        let Some(row) = self.sel.selected().and_then(|i| self.settings.get(i)) else { return };
+        let s = row.setting;
+        let r = match k.code {
+            KeyCode::Char('d') | KeyCode::Delete => crate::settings::set(&self.paths, s, ""),
+            KeyCode::Enter | KeyCode::Char(' ') => match crate::settings::next(s, &row.value) {
+                Some(v) if s.confirm == Some(v) => {
+                    self.confirm =
+                        Some((format!("Set {} = {v}? y/N", s.key), Box::new(move |a: &mut App| crate::settings::set(&a.paths, s, v))));
+                    return;
+                }
+                Some(v) => crate::settings::set(&self.paths, s, v),
+                None if s.kind == crate::settings::Kind::Info => Ok(s.help.into()),
+                None => {
+                    self.input = Some(row.value.clone());
+                    return;
+                }
+            },
+            _ => return,
+        };
+        self.msg = r.unwrap_or_else(|e| format!("not saved: {e:#}"));
+        self.refresh(true);
+    }
+
+    /// Typing a value for the selected setting. Enter saves (if valid), Esc cancels.
+    fn input_key(&mut self, k: KeyEvent) {
+        let Some(buf) = self.input.as_mut() else { return };
+        match k.code {
+            KeyCode::Char(c) => buf.push(c),
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Esc => {
+                self.input = None;
+                self.msg = "cancelled".into();
+            }
+            KeyCode::Enter => {
+                let Some(s) = self.sel.selected().and_then(|i| self.settings.get(i)).map(|r| r.setting) else { return };
+                match crate::settings::set(&self.paths, s, buf) {
+                    Ok(m) => {
+                        self.input = None;
+                        self.msg = m;
+                        self.refresh(true);
+                    }
+                    // Keep the text so it can be fixed.
+                    Err(e) => self.msg = format!("not saved: {e:#}"),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -370,6 +516,8 @@ impl App {
                 .scroll((self.scroll, 0))
                 .block(Block::default().borders(Borders::ALL).title(format!(" Job {id} — Esc back ")));
             f.render_widget(p, body);
+        } else if self.tab == Tab::Settings {
+            self.draw_settings(f, body);
         } else if self.tab == Tab::Help {
             f.render_widget(
                 Paragraph::new(HELP).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" Help ")),
@@ -408,21 +556,21 @@ impl App {
                         ))
                     })
                     .collect(),
-                Tab::Help => vec![],
+                Tab::Settings | Tab::Help => vec![],
             };
             let empty = items.is_empty();
             let title = match self.tab {
                 Tab::Queue => " Needs you / running ",
                 Tab::Inbox => " Unknown authors waiting ",
                 Tab::History => " History ",
-                Tab::Repos => " Repos (space toggles subscription, R rescans) ",
-                Tab::Help => "",
+                Tab::Repos => " Repos (space subscribe, l level, a agent, e edit file, R rescan) ",
+                Tab::Settings | Tab::Help => "",
             };
             if empty {
                 let msg = match self.tab {
                     Tab::Queue => "Nothing needs you. Jobs show up here when your PRs get activity.",
                     Tab::Inbox => "No one is waiting.",
-                    Tab::Repos => "No clones found. Check code_dir and [[accounts]] in config.toml.",
+                    Tab::Repos => "No clones found. Press S to run the setup wizard (forges, clone folder, repos).",
                     _ => "Nothing yet.",
                 };
                 f.render_widget(Paragraph::new(msg).block(Block::default().borders(Borders::ALL).title(title)), body);
@@ -434,19 +582,64 @@ impl App {
                 f.render_stateful_widget(list, body, &mut self.sel);
             }
         }
+        let (keys, line2) = self.footer();
+        f.render_widget(Paragraph::new(vec![Line::from(keys), Line::from(line2)]).style(Style::new().add_modifier(Modifier::DIM)), foot);
+    }
+}
+
+impl App {
+    /// Footer: the keys for this view, then the question or last message.
+    fn footer(&self) -> (&'static str, String) {
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
             (true, _) => "↑↓ scroll a approve A override r reject t retry h take over c/y copy Esc",
             (_, Tab::Queue | Tab::History) => "↑↓ Enter open a approve r reject t retry h take over p pause ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore d deny ? help q quit",
-            (_, Tab::Repos) => "space subscribe/unsubscribe R rescan ? help q quit",
-            (_, Tab::Help) => "1-4 tabs q quit",
+            (_, Tab::Repos) => "space subscribe l level a agent e edit S setup ? help q quit",
+            (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
+            (_, Tab::Settings) => "Enter change d default e edit file S setup ? help q quit",
+            (_, Tab::Help) => "1-5 tabs S setup wizard q quit",
         };
-        let line2 = match &self.confirm {
-            Some((q, _)) => q.clone(),
-            None => self.msg.clone(),
+        let line2 = match (&self.confirm, &self.input) {
+            (Some((q, _)), _) => q.clone(),
+            (_, Some(buf)) => {
+                let key = self.sel.selected().and_then(|i| self.settings.get(i)).map_or("", |r| r.setting.key);
+                format!("{key} = {buf}_   {}", self.msg)
+            }
+            _ => self.msg.clone(),
         };
-        f.render_widget(Paragraph::new(vec![Line::from(keys), Line::from(line2)]).style(Style::new().add_modifier(Modifier::DIM)), foot);
+        (keys, line2)
+    }
+
+    fn draw_settings(&mut self, f: &mut Frame, body: Rect) {
+        let title = format!(" Settings: {} (each repo file can override defaults.*) ", self.paths.config_file().display());
+        if !self.settings_err.is_empty() {
+            let text = format!(
+                "config.toml doesn't load, so Night Porter is using the last good config:\n\n  {}\n\nPress e to fix it in your editor. Your edit is checked before it's saved.",
+                self.settings_err
+            );
+            f.render_widget(
+                Paragraph::new(text).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(title)),
+                body,
+            );
+            return;
+        }
+        let [list_area, help_area] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(body);
+        let items: Vec<ListItem> = self
+            .settings
+            .iter()
+            .map(|r| {
+                let value = if r.value.is_empty() { "(none)" } else { r.value.as_str() };
+                ListItem::new(format!("{:<34} {:<9} {value}", r.setting.key, if r.set { "[set]" } else { "[default]" }))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_symbol("> ")
+            .highlight_style(self.style(Style::new().add_modifier(Modifier::REVERSED)));
+        f.render_stateful_widget(list, list_area, &mut self.sel);
+        let help = self.sel.selected().and_then(|i| self.settings.get(i)).map_or("", |r| r.setting.help);
+        f.render_widget(Paragraph::new(help).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::TOP)), help_area);
     }
 }
 
@@ -580,9 +773,16 @@ Tabs
   1 Queue    jobs that need you (NEEDS APPROVAL, ready to copy) and running jobs
   2 Inbox    comments from people you don't trust yet: allow once, trust, ignore or deny
   3 History  every job, newest first
-  4 Repos    subscribe / unsubscribe your local clones
+  4 Repos    subscribe your local clones, set each one's level and agent
+  5 Settings every config.toml setting, its value and whether it's [set] or [default]
 
 Keys (everywhere): ↑/↓ or j/k move, Enter open, Tab/←/→ switch tab, p pause/resume, q quit
+       S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
+Repos: space subscribe/unsubscribe   l next level (observe → suggest → draft → auto, asks before auto)
+       a  switch agent (Claude Code / OpenCode)   e edit the repo's file   R rescan
+Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
+       e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
+          never saved, so a typo can't break the daemon.
 Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t retry
        c copy the push command (suggest level)   y copy replies
        h take over in herdr or Rex: opens the job's worktree with a briefed agent
@@ -671,6 +871,50 @@ mod tests {
             let s = screen(&mut app);
             assert!(s.contains(want), "tab {k}: {s}");
         }
+        // Repos tab: l cycles the level in the repo file, auto asks first; a switches agent.
+        press(&mut app, KeyCode::Char('4'));
+        let row = |level: &str| vec![RepoRow { id: repo.clone(), subscribed: false, level: level.into(), agent: "Claude Code".into() }];
+        app.repos = row("draft");
+        let level = |p: &Paths| std::fs::read_to_string(p.repo_file(&repo)).unwrap_or_default();
+        press(&mut app, KeyCode::Char('l'));
+        assert!(screen(&mut app).contains("(auto)? y/N"));
+        press(&mut app, KeyCode::Char('n'));
+        assert!(!level(&paths).contains("auto"));
+        app.repos = row("auto");
+        press(&mut app, KeyCode::Char('l'));
+        assert!(level(&paths).contains("level = \"observe\""), "{}", level(&paths));
+        app.repos = row("observe");
+        press(&mut app, KeyCode::Char('a'));
+        assert!(level(&paths).contains("agent = \"opencode\""), "{}", level(&paths));
+        press(&mut app, KeyCode::Char('S'));
+        assert!(matches!(app.suspend, Some(Suspend::Setup)), "S asks the main loop to run the wizard");
+        app.suspend = None;
+
+        // Settings tab: values with their source, typed input validated before saving.
+        press(&mut app, KeyCode::Char('5'));
+        let s = screen(&mut app);
+        assert!(s.contains("poll_interval") && s.contains("[default]") && s.contains("Folder where your clones live"), "{s}");
+        app.sel.select(app.settings.iter().position(|r| r.setting.key == "poll_interval"));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        for c in "soon".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(screen(&mut app).contains("not saved") && app.input.is_some(), "bad value is refused, text kept");
+        press(&mut app, KeyCode::Esc);
+        app.sel.select(app.settings.iter().position(|r| r.setting.key == "defaults.sandbox"));
+        press(&mut app, KeyCode::Enter);
+        assert!(screen(&mut app).contains("defaults.sandbox = false? y/N"), "turning the sandbox off asks first");
+        press(&mut app, KeyCode::Char('n'));
+        std::fs::write(paths.config_file(), "nope = 1\n").unwrap();
+        app.refresh(true);
+        assert!(screen(&mut app).contains("Press e to fix it"));
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(app.suspend, Some(Suspend::Editor(_))));
+        app.suspend = None;
+
         press(&mut app, KeyCode::Char('p'));
         assert!(screen(&mut app).contains("PAUSED"));
         assert!(!press(&mut app, KeyCode::Char('q')));

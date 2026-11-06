@@ -9,18 +9,31 @@ the job pushes and replies or waits for you.
 
 ## The TUI
 
-Run `nightporter`. It has four tabs:
+Run `nightporter`. It has five tabs:
 
 | key | tab | shows |
 |---|---|---|
 | `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours |
 | `2` | Inbox | events from people you don’t trust yet |
 | `3` | History | recent jobs |
-| `4` | Repos | your clones; space toggles the subscription, `R` rescans |
+| `4` | Repos | your clones; space toggles the subscription, `l` cycles the level, `a` switches the agent, `e` edits the repo file, `R` rescans |
+| `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
 | `?` | Help | keys and commands |
 
 Move with the arrow keys or `j`/`k`, `g`/`G` for the first and last item. `Enter` opens a job and
-`Esc` closes it. `p` pauses and resumes. `q` quits. Set `NO_COLOR=1` to turn colours off.
+`Esc` closes it. `p` pauses and resumes. `S` runs the setup wizard again. `q` quits. Set `NO_COLOR=1` to turn colours off.
+
+### Settings
+
+`Enter` on a setting switches it (on/off and fixed choices) or lets you type a new value; `d` puts it
+back to the default. Durations look like `2m`, lists are comma-separated, and active hours look like
+`mon-fri 08:00-09:00,17:00-22:00; sat 10:00-12:00`. Changes that loosen a safety default (level
+`auto`, `sandbox = false`, `ci_auto`, `trust.open`) ask first.
+
+`e` opens `config.toml` (or, on the Repos tab, the selected repo's file) in `$VISUAL` / `$EDITOR`.
+Every change is checked before it's saved: an invalid value is refused with the reason, and an
+invalid file from the editor is never written; you can fix it or throw the edit away. If
+`config.toml` was broken by hand, the Settings tab says why and `e` fixes it.
 
 ### On a job
 

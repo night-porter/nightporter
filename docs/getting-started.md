@@ -72,6 +72,9 @@ To update later, run the same command again (`brew upgrade nightporter` with Hom
 nightporter setup
 ```
 
+If you skip this and open the TUI (`nightporter`) first, it offers to run the wizard for you.
+You can run it again at any time: `nightporter setup`, or press `S` in the TUI.
+
 It asks for:
 
 1. **Forges**: GitHub, GitLab or both, and the host if it’s self-hosted.
@@ -129,4 +132,5 @@ nightporter subscribe git.example.com/team/app   # self-hosted host
 nightporter unsubscribe acme/api
 ```
 
-Or press `4` in the TUI and toggle repos with the space bar.
+Or press `4` in the TUI: the space bar toggles a repo, `l` cycles its autonomy level (it asks
+before `auto`) and `a` switches its agent. These write the repo file for you.

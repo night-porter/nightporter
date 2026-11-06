@@ -1,5 +1,10 @@
 # Configuration reference
 
+You rarely need to edit these files by hand: `nightporter setup` (or `S` in the TUI) walks you
+through the basics, and the TUI's **Settings** tab (`5`) shows and changes every key below,
+checking each change before it's saved. `e` there opens the file in your editor, with the same
+check.
+
 Files:
 
 | file | purpose |

@@ -27,7 +27,7 @@ fn ask_valid<T>(q: &str, default: &str, parse: impl Fn(&str) -> Result<T>) -> Re
     }
 }
 
-fn yes(q: &str, default: bool) -> Result<bool> {
+pub fn yes(q: &str, default: bool) -> Result<bool> {
     ask_valid(&format!("{q} (y/n)"), if default { "y" } else { "n" }, |a| match a.to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(true),
         "n" | "no" => Ok(false),
@@ -42,7 +42,7 @@ fn parse_level(a: &str) -> Result<Level> {
 }
 
 /// `mon-fri 08:00-09:00,17:00-22:00`, or empty / `always` for no schedule.
-fn parse_schedule(a: &str) -> Result<Option<Window>> {
+pub fn parse_schedule(a: &str) -> Result<Option<Window>> {
     let a = a.trim();
     if a.is_empty() || a.eq_ignore_ascii_case("always") {
         return Ok(None);
