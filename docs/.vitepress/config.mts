@@ -60,7 +60,7 @@ function writeLlms(srcDir: string, outDir: string) {
   const index = [
     '# Night Porter docs',
     '',
-    '> Night Porter handles your PRs while you’re away: a daemon and terminal UI that watch GitHub and GitLab for review comments, failing CI and merge conflicts on your PRs and MRs, then run Claude Code, OpenCode or Codex on your local clone, within the rules you set. It never merges, force-pushes, closes or approves.',
+    '> Night Porter handles your PRs while you’re away: a daemon and terminal UI that watch GitHub, GitLab and Forgejo/Gitea for review comments, failing CI and merge conflicts on your PRs and MRs, then run Claude Code, OpenCode or Codex on your local clone, within the rules you set. It never merges, force-pushes, closes or approves.',
     '',
     `Every page as one file: ${SITE}/llms-full.txt. Website: https://night-porter.com. Source: ${REPO}.`,
     ...pages.flatMap((g) => ['', `## ${g.text}`, '', ...g.items.map((i) => `- [${i.text}](${SITE}${i.link}): ${describe(i.md)}`)]),
