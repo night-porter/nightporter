@@ -10,7 +10,7 @@ security boundary is, and which protections cannot be turned off.
 
 ## Assets
 
-1. **Forge credentials**: GitHub/GitLab tokens, and your git SSH keys.
+1. **Forge credentials**: GitHub/GitLab/Forgejo tokens, and your git SSH keys.
 2. **Your repositories**: their history, branches and the code that gets merged.
 3. **Your machine**: files, other projects and secrets in your home directory.
 4. **Your reputation**: comments and commits posted under your name.
@@ -19,11 +19,11 @@ security boundary is, and which protections cannot be turned off.
 
 | actor | trusted? | how they reach Night Porter |
 |---|---|---|
-| You | yes | config files, TUI approvals |
+| You | yes | config files, TUI approvals, `/nightporter approve` etc. in your own PR comments |
 | Maintainers (role in `trust.roles`, or allow-listed user, team or bot) | for **requests** | comments and reviews on your PRs, `/nightporter` commands, labels |
 | Anyone else on the forge | **no** | comments, issues, MRs, fork code |
 | Pack authors | no (reviewed by you at install, pinned to a commit) | prompt files |
-| The agent (Claude Code / OpenCode / Codex) | **no**; treated as possibly confused or injected | runs in a worktree |
+| The agent (Claude Code / OpenCode / Codex / Gemini CLI) | **no**; treated as possibly confused or injected | runs in a worktree |
 
 ## Boundaries and controls
 
@@ -58,6 +58,29 @@ security boundary is, and which protections cannot be turned off.
 - Team rules read every page of a team's members. If a `deny_teams` lookup fails, the author goes
   to the inbox instead of being trusted.
 
+### B1a. Job commands in PR comments
+
+`/nightporter approve|dismiss|retry|status` in a PR or MR comment steers Night Porter's newest job
+on it (`pr_commands = true` by default; `false` turns it off). Why this is safe to have on:
+
+- Only the token's own user counts, matched by numeric user ID (not login, which can be
+  renamed). Trust rules don't apply: maintainers, allow-listed users and bots can't issue them.
+  A GitHub comment posted by an app on your behalf (`performed_via_github_app`) doesn't count.
+  If the user ID is unknown, nothing counts.
+- Anyone who can post as you already holds your forge account (or a token Night Porter itself
+  could use), and could push to your branch directly; a comment gives them nothing more.
+- Agent-written replies are posted as you, so they are the one way text could come back with
+  your user ID: they have `/nightporter` neutralised and carry the hidden marker, and comments
+  with the marker are never read as commands.
+- The comment must be newer than the job, and each comment ID is recorded before it is acted
+  on, so an old or repeated comment never acts again (or on a later job).
+- `approve` only releases a job waiting for push approval, with no override for blocking checks;
+  approving a run of someone else's code (B4) still needs the TUI, which shows the changed build
+  files. B3 checks still run before the push. It never touches the PR itself: there is no merge,
+  close or forge approval.
+- Command comments, from anyone, are dropped at intake: never a request, never review feedback
+  for the agent.
+
 ### B2. The agent holds no forge credentials
 
 - The agent process starts with forge tokens and anything that looks like a secret (`*TOKEN*`,
@@ -65,8 +88,8 @@ security boundary is, and which protections cannot be turned off.
   own API key. `SSH_AUTH_SOCK` is removed, `GIT_SSH_COMMAND` fails, credential helpers are
   cleared and git hooks are disabled for the agent's commits. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
   inside the agent are logged out.
-- The generated agent settings deny `git push`, `gh`, `glab` and network commands, deny
-  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, ...) and Night
+- The generated agent settings deny `git push`, `gh`, `glab`, `tea`, `fj` and network commands, deny
+  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.config/tea`, `~/.git-credentials`, ...) and Night
   Porter's own config, state database, log and other jobs' files, and only
   allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
 - Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
@@ -78,7 +101,7 @@ security boundary is, and which protections cannot be turned off.
   sandboxed commands can't read your home folder except the worktree, its git dir and common
   toolchain folders (`sandbox_read_allow` adds more). The agent's git uses its own config with
   only your name and email.
-- The prompt reaches Claude Code and Codex on stdin, not as a command-line argument (visible in `ps`).
+- The prompt reaches Claude Code, Codex and Gemini CLI on stdin, not as a command-line argument (visible in `ps`).
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
@@ -92,10 +115,25 @@ security boundary is, and which protections cannot be turned off.
   `~/.codex/config.toml` (MCP servers, hooks, profiles) and execpolicy rules don't load; the login
   still comes from `CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and
   `sandbox_domains` don't apply.
+- With Gemini CLI (experimental: not yet run against a real Gemini CLI; 0.67 or newer; older versions are refused, since they silently ignore the
+  sandbox setting), Night Porter writes a system settings file to the job directory
+  (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`, which overrides user and workspace settings) that turns on
+  Gemini's tool sandbox with the network off, and turns off hooks, the repo's `.env` and
+  auto-update. An admin policy (`--admin-policy`, above your own policies) denies every shell
+  command except the allowed git subcommands and `allow_commands`, always denies the deny list,
+  web fetch/search and the memory tool, and denies any command that asks for
+  `additional_permissions` (Gemini's way to widen the sandbox for one call). It runs with
+  `--approval-mode default` (never YOLO), `--extensions none` and no MCP servers. Headless Gemini
+  must trust the workspace, so a branch with `.gemini/settings.json` or `.gemini/.env` is refused. A system policy folder (`/etc/gemini-cli/policies`, `/Library/Application Support/GeminiCli/policies`) with any `.toml` in it is refused too: Gemini then drops our admin policy.
 - Gaps: OpenCode has no sandbox and no read denies (and its prompt is still an argument). Codex's
   sandbox limits writes and network but not reads: its commands can read files in your home
   folder (credentials stay out of its environment, and with the network off it can't send them
   anywhere, but a reply it writes could quote them; draft level shows you every reply first).
+  Gemini CLI's sandbox limits reads to the worktree, its git dir, system folders and the folders
+  on your `PATH` (with the parent of each `bin`, so `~/.cargo/bin` opens `~/.cargo` including
+  `credentials.toml`, and `~/bin` opens your whole home folder); it can't deny paths inside those
+  the way Claude Code does. Its sandbox and policy setup have been checked against its source
+  (v0.67.0 and main, 2026-11-06), not yet in a real run.
   Repos with `sandbox = false` (e.g. for
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
@@ -115,7 +153,7 @@ Run on every push, in every mode, including `auto`:
 | check | can be disabled? |
 |---|---|
 | secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
-| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
+| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab, Forgejo/Gitea Actions, Woodpecker and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
@@ -130,7 +168,7 @@ commit SHA.
 Any job on a branch you didn't write (any maintainer request on someone else's PR or MR), and any
 `reproduce` that runs an environment or allowed commands, needs
 your approval **before the agent starts at all**: the branch can carry agent configuration
-(CLAUDE.md, `.codex/`, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
+(CLAUDE.md, GEMINI.md, `.codex/`, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
 saw; if they push again, Night Porter asks again. The same applies to your own PR when its head
 branch lives in someone else's fork. Commits someone else pushed to your own branch are not
 detected. `reproduce` jobs that may run commands need
@@ -153,7 +191,7 @@ before it is applied. A step that needs write access shows a warning at install 
 
 ### B6. Credentials at rest
 
-Tokens come from `gh`/`glab` or from the OS keychain. They are never stored in config, logs, job
+Tokens come from `gh`/`glab`/`tea` or from the OS keychain. They are never stored in config, logs, job
 directories or the state database, and they are kept in `secrecy` types in memory.
 
 ### B7. Nothing left in your repos
@@ -169,6 +207,43 @@ GitHub's public releases API for the latest version number once a day (`nightpor
 now). It is anonymous: no ID and nothing about you or your repos is sent; GitHub sees your IP
 address and the `nightporter/<version>` user agent. Night Porter never downloads or installs an
 update itself. Set `check_updates = false` to turn it off.
+
+Notification targets you add (`[[notifications.targets]]`) send each event's kind, repo, PR
+number, title and link, job id and a one-line summary to the webhook or command you name;
+never diffs, comments or tokens. Webhook URLs are never logged or shown in the TUI; keep them
+out of the file with `url_env`. The PR title is untrusted text: Slack messages escape it and
+Discord messages can't ping anyone.
+
+### Agent sandboxes
+
+What each agent gets, as Night Porter configures it (`sandbox = true`, the default). Environment
+scrubbing, the empty `gh`/`glab` config, the git overrides and the B3 checks apply to all of them.
+
+| | Claude Code | Codex | Gemini CLI | OpenCode |
+|---|---|---|---|---|
+| OS sandbox for commands | yes (Seatbelt / bubblewrap), fails closed | yes (Seatbelt / Landlock) | yes (Seatbelt / bubblewrap); version-gated | **no** |
+| Command allow list | yes | **no** (sandbox only) | yes (admin policy) | yes |
+| Commands' network | off, or listed domains | off | off | **open** |
+| Commands' writes | worktree | worktree | worktree, temp folders | **anywhere** |
+| Commands' reads | worktree, git dir, toolchain folders; secrets inside them denied | **anywhere** | worktree, git dir, system and `PATH` folders | **anywhere** |
+| File tools outside the worktree | blocked | as commands | as commands | denied (`external_directory`) |
+| Repo agent config ignored | yes (`--setting-sources user`) | yes (`--ignore-user-config`) | refused if `.gemini/settings.json` or `.gemini/.env` | **no** (`--pure` skips plugins only) |
+| Your hooks / MCP / plugins | hooks off; MCP off; plugins load | config not loaded | hooks, extensions, MCP off | MCP off |
+| Prompt off the command line | yes | yes | yes | **no** |
+
+Not supported, and why:
+
+- **Cursor CLI** (`cursor-agent`): a run can't be limited to Night Porter's settings. The repo's
+  `.cursor/sandbox.json` overrides your own and can open the network, and the repo's
+  `.cursor/hooks.json`, `.cursor/mcp.json` and plugins load; `--disable-project-configs` only skips
+  `.cursor/cli.json`, and there is no documented config-directory override. Cursor says a
+  locked-down headless mode doesn't exist yet (forum, 2026-10-15). Where its sandbox can't start
+  (Linux without Landlock), it asks for approval instead, which `--force` answers yes. Revisit if
+  it gets per-run setting sources (its TypeScript SDK has them).
+- **Amp** (`amp -x`): no OS sandbox; tools run without asking by default; the repo's
+  `.amp/settings.json` overrides user settings, including `amp.permissions`, and
+  `--settings-file` only replaces the user file.
+- **Antigravity** (Google's successor to Gemini CLI for consumer accounts): not evaluated.
 
 ## Out of scope
 
@@ -187,4 +262,5 @@ look like options.
 - [x] Claude Code's sandbox applies in `-p` mode (macOS, real run, 2026-11-05)
 - [ ] Same check on Linux (bubblewrap)
 - [ ] Sandbox for OpenCode runs (macOS `sandbox-exec`, Linux bubblewrap)
+- [ ] Gemini CLI's tool sandbox and admin policy in a real headless run (macOS and Linux)
 - [x] First independent review (2026-11-05): findings fixed, see git history

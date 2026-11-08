@@ -96,29 +96,75 @@ pub fn parse_schedule(a: &str) -> Result<Option<Window>> {
         return Ok(None);
     }
     let (days, ranges) = a.split_once(' ').context("use `<days> <HH:MM-HH:MM,...>`, e.g. `mon-fri 08:00-09:00,17:00-22:00`")?;
-    let w = Window { days: days.into(), windows: ranges.split(',').map(|r| r.trim().to_string()).collect(), tz: None };
+    let w = Window { days: days.into(), windows: ranges.split(',').map(|r| r.trim().to_string()).collect(), ..Default::default() };
     crate::schedule::validate(std::slice::from_ref(&w))?;
     Ok(Some(w))
 }
 
+/// Comma-separated hosts, at least one.
+fn ask_hosts(q: &str, default: &str) -> Result<Vec<String>> {
+    ask_valid(q, default, |a| {
+        let v: Vec<String> = a.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
+        if v.is_empty() {
+            bail!("enter at least one host")
+        }
+        Ok(v)
+    })
+}
+
 /// Step 1: which forges and hosts.
 fn ask_forges() -> Result<Vec<(ForgeKind, String)>> {
-    let f = choose("\n1. Which forges?", &["GitHub", "GitLab (gitlab.com or self-hosted)", "Both"], 0)?;
+    let f = choose(
+        "\n1. Which forges?",
+        &["GitHub", "GitLab (gitlab.com or self-hosted)", "Forgejo / Gitea (codeberg.org, gitea.com or self-hosted)", "Several of these"],
+        0,
+    )?;
+    let want = |i: usize, name: &str| -> Result<bool> { if f == 3 { yes(&format!("Use {name}?"), true) } else { Ok(f == i) } };
     let mut forges: Vec<(ForgeKind, String)> = Vec::new();
-    if f != 1 {
+    if want(0, "GitHub")? {
         forges.push((ForgeKind::GitHub, ask("GitHub host", "github.com")?.to_ascii_lowercase()));
     }
-    if f != 0 {
-        let hosts = ask_valid("GitLab host(s), comma-separated (e.g. gitlab.com, git.drupalcode.org)", "gitlab.com", |a| {
-            let v: Vec<String> = a.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
-            if v.is_empty() {
-                bail!("enter at least one host")
-            }
-            Ok(v)
-        })?;
+    if want(1, "GitLab")? {
+        let hosts = ask_hosts("GitLab host(s), comma-separated (e.g. gitlab.com, git.drupalcode.org)", "gitlab.com")?;
         forges.extend(hosts.into_iter().map(|h| (ForgeKind::GitLab, h)));
     }
+    if want(2, "Forgejo / Gitea")? {
+        let hosts = ask_hosts("Forgejo / Gitea host(s), comma-separated (e.g. codeberg.org, gitea.com)", "codeberg.org")?;
+        forges.extend(hosts.into_iter().map(|h| (ForgeKind::Forgejo, h)));
+    }
     Ok(forges)
+}
+
+/// Forgejo/Gitea token: `tea`'s login if it has one for the host, else paste one into the
+/// keychain. Returns the hosts that now use the keychain.
+fn forgejo_tokens(forges: &[(ForgeKind, String)]) -> Result<Vec<String>> {
+    let mut keyring = Vec::new();
+    for (_, host) in forges.iter().filter(|(f, _)| *f == ForgeKind::Forgejo) {
+        if crate::http::tea_token(host).is_ok() {
+            println!("  {host}: using your `tea` login");
+            continue;
+        }
+        println!(
+            "  {host}: create an access token at https://{host}/user/settings/applications\n  with scopes: {}",
+            crate::forge::forgejo::SCOPES
+        );
+        let q = format!("Paste the token for {host} (hidden; empty to skip)");
+        let t = if fancy() {
+            answer(inquire::Password::new(&q).without_confirmation().with_display_mode(inquire::PasswordDisplayMode::Hidden).prompt())?
+        } else {
+            print!("{q}: ");
+            std::io::stdout().flush()?;
+            crate::read_secret()?
+        };
+        if t.trim().is_empty() {
+            println!("  skipped; later: `nightporter token set forgejo {host}` and token = \"keyring\"");
+            continue;
+        }
+        crate::http::store_token(ForgeKind::Forgejo, host, t.trim())?;
+        println!("  stored in the OS keychain");
+        keyring.push(host.clone());
+    }
+    Ok(keyring)
 }
 
 /// Step 7: pick which of the clones found under the code dir to watch. Already-subscribed repos
@@ -187,6 +233,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     }
 
     let forges = ask_forges()?;
+    let keyring_hosts = forgejo_tokens(&forges)?;
 
     // 2. Agents
     let agent = AgentKind::ALL[choose("\n2. Which agent by default?", &AgentKind::ALL.map(AgentKind::label), 0)?];
@@ -218,16 +265,24 @@ pub fn run(paths: &Paths) -> Result<()> {
         let accounts = d["accounts"].or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
         if let Some(aot) = accounts.as_array_of_tables_mut() {
             for (f, host) in &forges {
-                let default_host = if *f == ForgeKind::GitHub { "github.com" } else { "gitlab.com" };
-                let exists = aot.iter().any(|t| {
-                    t.get("forge").and_then(|v| v.as_str()) == Some(f.as_str())
+                let default_host = f.default_host();
+                let keyring = *f == ForgeKind::Forgejo && keyring_hosts.contains(host);
+                let existing = aot.iter_mut().find(|t| {
+                    t.get("forge").and_then(|v| v.as_str()).and_then(ForgeKind::parse) == Some(*f)
                         && t.get("host").and_then(|v| v.as_str()).unwrap_or(default_host).eq_ignore_ascii_case(host)
                 });
-                if !exists {
+                if let Some(t) = existing {
+                    if keyring {
+                        t["token"] = toml_edit::value("keyring");
+                    }
+                } else {
                     let mut t = toml_edit::Table::new();
                     t["forge"] = toml_edit::value(f.as_str());
                     if host != default_host {
                         t["host"] = toml_edit::value(host.as_str());
+                    }
+                    if keyring {
+                        t["token"] = toml_edit::value("keyring");
                     }
                     aot.push(t);
                 }

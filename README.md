@@ -9,9 +9,9 @@
 
 [Website](https://night-porter.com) · [Demo video](https://www.youtube.com/watch?v=vjD-h2O7WUI) · [Docs](https://docs.night-porter.com) · [X](https://x.com/NightPorterDev) · [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) · [Mastodon](https://mastodon.social/@nightporter)
 
-Night Porter is like an IRC bouncer for your pull requests. It watches GitHub and GitLab for
-review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
-(Claude Code, OpenCode or Codex) on your local clone to deal with them, within the rules you set.
+Night Porter is like an IRC bouncer for your pull requests. It watches GitHub, GitLab and Forgejo/Gitea
+(Codeberg) for review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
+(Claude Code, OpenCode, Codex, or Gemini CLI as an experimental option) on your local clone to deal with them, within the rules you set.
 
 Most agent tools are cockpits: you start the agent and watch it. Night Porter is the night
 shift. It starts work **by itself** when something happens on your PRs, and it's built to be safe
@@ -21,8 +21,8 @@ when that something was written by a stranger.
 
 ## How it works
 
-1. **Watch.** A small daemon polls GitHub notifications and your open GitLab MRs (no webhooks, no
-   public endpoint).
+1. **Watch.** A small daemon polls GitHub and Forgejo/Gitea notifications and your open GitLab MRs
+   (no webhooks, no public endpoint).
 2. **Filter.** Only repos you subscribed to, only events you enabled, and only from people you
    trust. Comments from strangers wait in an inbox until you decide.
 3. **Work.** After a short quiet period, Night Porter batches the new activity on a PR and runs
@@ -45,11 +45,15 @@ Night Porter **never** merges, force-pushes, closes or approves.
 
 ## Features
 
-- GitHub (github.com) and GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`)
-- Claude Code, OpenCode and Codex
+- GitHub (github.com), GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`) and
+  Forgejo/Gitea (codeberg.org, gitea.com and self-hosted)
+- Claude Code, OpenCode, Codex and Gemini CLI (experimental: not yet tested against a real Gemini CLI)
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
-- Several active windows per day; events outside them are queued
+- Several active windows per day; events outside them are queued. Each window can set its own
+  level, agent and notifications (draft by day, auto overnight)
+- Desktop notifications, plus webhooks (Slack, Discord, ntfy, JSON) and commands for your phone
+  or chat; `nightporter notify test` checks them
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional
   AI-disclosure footer
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)
@@ -59,20 +63,23 @@ Night Porter **never** merges, force-pushes, closes or approves.
   done and dismissed jobs
 - One view per repo (`nightporter repo <owner/name>`) of everything that shapes its jobs: level,
   agent, prompt files, reply style, trust, hours and checks
+- Control jobs from your phone: comment `/nightporter approve`, `dismiss`, `retry` or `status` on
+  the PR or MR (only your own account counts)
 - Start and stop from the TUI (`D`) or `nightporter start` / `nightporter stop`
 - A once-a-day, anonymous check for a new release (`check_updates`); it never updates itself
 - Leaves no files in your repositories (it uses its own branches and worktrees)
 
-## Works with herdr and Rex
+## Works with herdr, Rex, tmux and Zellij
 
 [herdr](https://herdr.dev) and [Rex](https://www.superlogical.com/rex) are where you run and
 watch agents; Night Porter is what runs while you're not there. They fit together:
 
-- **Take over a job in herdr or Rex.** On a finished or waiting job, press `h` in the TUI (or run
-  `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr or Rex (`handoff`
-  in the config picks; `auto` by default),
+- **Take over a job.** On a finished or waiting job, press `h` in the TUI (or run
+  `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr, Rex, tmux, Zellij
+  or a new terminal window (`handoff` in the config picks; `auto` uses the one you're in),
   starts your agent, and briefs it: what was asked, what it changed, which checks need you,
-  and what is drafted but not posted. You continue from there, interactively.
+  and what is drafted but not posted. You continue from there, interactively. With none of
+  them around, it prints the command to run.
 - **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
 
   ```sh
@@ -103,12 +110,13 @@ Windows (experimental), archives and building from source: see
 ```sh
 nightporter setup      # first-run wizard
 nightporter            # open the TUI
-nightporter doctor     # check gh / glab / agents / git
+nightporter doctor     # check gh / glab / forge tokens / agents / git
 nightporter stop       # turn the background daemon off (nightporter start turns it on)
 ```
 
-Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude`, `opencode` and/or `codex`.
-`gitleaks` is optional but recommended. `herdr` or Rex is optional, for taking over jobs interactively.
+Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab) and/or a Forgejo/Gitea access token
+(or a `tea` login), plus `claude`, `opencode`, `codex` and/or `gemini` (experimental).
+`gitleaks` is optional but recommended. herdr, Rex, tmux or Zellij is optional, for taking over jobs interactively.
 
 ## Configuration
 
@@ -139,7 +147,8 @@ style = "concise"
 footer = true
 ```
 
-See the [docs](https://docs.night-porter.com) ([source](docs/)) for the full reference.
+See the [docs](https://docs.night-porter.com) ([source](docs/)) for the full reference, and
+[CHANGELOG.md](CHANGELOG.md) or [What's new](https://docs.night-porter.com/whats-new) for what changed.
 
 ## Security
 

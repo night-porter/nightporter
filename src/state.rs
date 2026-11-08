@@ -142,6 +142,9 @@ pub struct JobMeta {
     pub build_files: Vec<String>,
     #[serde(default)]
     pub pr_url: String,
+    /// The PR/MR or issue title, for notifications.
+    #[serde(default)]
+    pub title: String,
     /// Indexes of replies already posted (delivery can be retried without double-posting).
     #[serde(default)]
     pub posted: Vec<usize>,
@@ -389,6 +392,17 @@ impl Db {
     pub fn recent_jobs(&self, limit: usize) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!("{JOB_LIST} ORDER BY id DESC LIMIT ?1"))?;
         let rows = st.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], row_job)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest job on each PR/issue that a `/nightporter` command on the forge may act on:
+    /// waiting for you, or updated since `since` (bounds the API calls per poll).
+    pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
+        let mut st = self.0.prepare(&format!(
+            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY repo, target, number)
+               AND (status IN ('awaiting_approval','awaiting_run_approval','ready') OR updated_at >= ?1) ORDER BY id"
+        ))?;
+        let rows = st.query_map([since], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

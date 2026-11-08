@@ -45,6 +45,9 @@ struct RepoRow {
     subscribed: bool,
     level: String,
     agent: String,
+    /// What an open schedule window changes right now, e.g. `now auto, from window`. `l` and `a`
+    /// cycle the repo's own level and agent (shown), not the window's.
+    window: String,
 }
 
 #[allow(clippy::struct_excessive_bools, reason = "independent UI flags, not a state machine")]
@@ -215,9 +218,15 @@ impl App {
             self.repos_all = match Config::load(&self.paths) {
                 Ok(cfg) => crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts)
                     .into_keys()
-                    .map(|id| match cfg.settings_for(&self.paths, &id) {
-                        Ok(s) => RepoRow { subscribed: s.subscribed, level: s.level.as_str().into(), agent: s.agent.label().into(), id },
-                        Err(e) => RepoRow { subscribed: false, level: "ERROR".into(), agent: format!("{e:#}"), id },
+                    .map(|id| match cfg.base_settings_for(&self.paths, &id) {
+                        Ok(s) => RepoRow {
+                            subscribed: s.subscribed,
+                            level: s.level.as_str().into(),
+                            agent: s.agent.label().into(),
+                            window: window_note(&s, &s.clone().at(&jiff::Zoned::now())),
+                            id,
+                        },
+                        Err(e) => RepoRow { subscribed: false, level: "ERROR".into(), agent: format!("{e:#}"), window: String::new(), id },
                     })
                     .collect(),
                 Err(e) => {
@@ -836,6 +845,10 @@ impl App {
                     name,
                     Span::styled(format!("{:<8} ", r.level), self.style(level_style(&r.level))),
                     Span::styled(r.agent.clone(), self.style(Style::new().fg(Color::Magenta))),
+                    Span::styled(
+                        if r.window.is_empty() { String::new() } else { format!("  ({})", r.window) },
+                        Style::new().add_modifier(Modifier::DIM),
+                    ),
                 ]))
             })
             .collect()
@@ -901,6 +914,18 @@ impl App {
 }
 
 /// Riskier levels stand out; the level is always written out too, so colour is only a hint.
+/// What the open schedule window changes about `base`, e.g. `now auto, from window`; empty if nothing.
+fn window_note(base: &crate::config::RepoSettings, now: &crate::config::RepoSettings) -> String {
+    let mut changed = vec![];
+    if now.level != base.level {
+        changed.push(now.level.as_str().to_string());
+    }
+    if now.agent != base.agent {
+        changed.push(now.agent.label().to_string());
+    }
+    if changed.is_empty() { String::new() } else { format!("now {}, from window", changed.join(", ")) }
+}
+
 fn level_style(level: &str) -> Style {
     match level {
         "auto" => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1052,7 +1077,8 @@ Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ 
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
 Repos: Enter details   space subscribe/unsubscribe   l next level (observe → suggest → draft → auto)
-       a  switch agent (Claude Code → OpenCode → Codex)   e edit the repo's file   R rescan
+       a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental)   e edit the repo's file   R rescan
+       l, a set the repo's own value; (now auto, from window) on a row: a schedule window overrides it
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
        e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
           never saved, so a typo can't break the daemon.
@@ -1060,7 +1086,7 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        x dismiss: put it away without replying or pushing (it stays in History)
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies
-       h take over in herdr or Rex: opens the job's worktree with a briefed agent
+       h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
@@ -1149,7 +1175,9 @@ mod tests {
         }
         // Repos tab: l cycles the level in the repo file, auto asks first; a switches agent.
         press(&mut app, KeyCode::Char('4'));
-        let row = |level: &str| vec![RepoRow { id: repo.clone(), subscribed: false, level: level.into(), agent: "Claude Code".into() }];
+        let row = |level: &str| {
+            vec![RepoRow { id: repo.clone(), subscribed: false, level: level.into(), agent: "Claude Code".into(), window: String::new() }]
+        };
         app.repos = row("draft");
         let level = |p: &Paths| std::fs::read_to_string(p.repo_file(&repo)).unwrap_or_default();
         press(&mut app, KeyCode::Char('l'));
@@ -1208,6 +1236,31 @@ mod tests {
     }
 
     #[test]
+    fn repos_tab_shows_the_repo_level_and_notes_the_window() {
+        let cfg = crate::config::Config::parse(
+            "[defaults]\nlevel = \"draft\"\n[[defaults.schedule]]\ndays = \"daily\"\nwindows = [\"00:00-24:00\"]\nlevel = \"auto\"",
+        )
+        .unwrap();
+        let base = cfg.resolve(None).unwrap();
+        let now = base.clone().at(&jiff::Zoned::now());
+        assert_eq!(window_note(&base, &now), "now auto, from window");
+        assert_eq!(window_note(&base, &base), "");
+        // The row shows the repo's own level, so `l` visibly moves it (draft -> auto asks first).
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let mut app = App::new(&paths, Db::open(&paths.db()).unwrap());
+        press(&mut app, KeyCode::Char('4'));
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let window = window_note(&base, &now);
+        app.repos = vec![RepoRow { id: repo, subscribed: true, level: base.level.as_str().into(), agent: "Claude Code".into(), window }];
+        let s = screen(&mut app);
+        assert!(s.contains("draft") && s.contains("(now auto, from window)"), "{s}");
+        press(&mut app, KeyCode::Char('l'));
+        assert!(screen(&mut app).contains("(auto)? y/N"));
+    }
+
+    #[test]
     fn dismiss_undo_purge_repo_view_and_daemon_toggle() {
         let d = tempfile::tempdir().unwrap();
         let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
@@ -1239,7 +1292,8 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         // Enter on a repo shows its settings.
         press(&mut app, KeyCode::Char('4'));
-        app.repos = vec![RepoRow { id: repo.clone(), subscribed: true, level: "draft".into(), agent: "Codex".into() }];
+        app.repos =
+            vec![RepoRow { id: repo.clone(), subscribed: true, level: "draft".into(), agent: "Codex".into(), window: String::new() }];
         press(&mut app, KeyCode::Enter);
         assert!(screen(&mut app).contains("WHAT IT DOES") || screen(&mut app).contains("error"), "{}", screen(&mut app));
         press(&mut app, KeyCode::Esc);

@@ -31,7 +31,7 @@ In scope, with the most severe first:
 4. Packs or marketplaces that can relax checks, run code or escape their pinned commit.
 5. Config or state corruption that silently raises autonomy.
 
-Out of scope: problems in Claude Code, OpenCode, `gh`, `glab` or git themselves (report those
+Out of scope: problems in Claude Code, OpenCode, Codex, Gemini CLI, `gh`, `glab`, `tea`, Forgejo, Gitea or git themselves (report those
 upstream), and a trusted maintainer deliberately asking for something harmful. The threat model
 explains where that line is.
 

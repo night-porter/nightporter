@@ -1,7 +1,7 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
 use crate::config::{Config, Level};
-use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger, github::GitHub, gitlab::GitLab};
+use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger, forgejo::Forgejo, github::GitHub, gitlab::GitLab};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
 use crate::paths::Paths;
@@ -51,8 +51,12 @@ impl Ctx {
             tracing::warn!("{msg}");
         }
     }
-    pub fn notify(&self, kind: Kind, title: &str, body: &str) {
-        notify::send(&self.cfg().notifications, kind, title, body);
+    /// Notify about `repo`, honouring its `notify` list (or the active window's).
+    pub fn notify(&self, repo: &RepoId, ev: &notify::Event) {
+        let cfg = self.cfg();
+        // Unreadable settings: send everywhere rather than drop it.
+        let only = cfg.settings_for(&self.paths, repo).ok().and_then(|s| s.notify);
+        notify::send(&cfg.notifications, only.as_deref(), ev);
     }
     fn subscribed(&self, cfg: &Config) -> Vec<(RepoId, crate::config::RepoSettings)> {
         self.clones()
@@ -75,6 +79,9 @@ pub async fn connect(cfg: &Config) -> Result<HashMap<(ForgeKind, String), tokio:
             }
             ForgeKind::GitLab => {
                 Forge::GitLab(GitLab::new(&host, Api::new(&base.unwrap_or_else(|| GitLab::api_base(&host)), token, true)?))
+            }
+            ForgeKind::Forgejo => {
+                Forge::Forgejo(Forgejo::new(&host, Api::new(&base.unwrap_or_else(|| Forgejo::api_base(&host)), token, false)?))
             }
         };
         f.login().await.with_context(|| format!("log in to {host}"))?;
@@ -116,7 +123,11 @@ pub async fn run(paths: Paths) -> Result<()> {
     let n = db.recover()?;
     if n > 0 {
         tracing::warn!("{n} job(s) were interrupted by a restart; their requests are queued again");
-        notify::send(&cfg.notifications, Kind::Failed, "restarted", &format!("{n} interrupted job(s) re-queued"));
+        notify::send(
+            &cfg.notifications,
+            None,
+            &notify::Event::new(Kind::Failed, "restarted", &format!("{n} interrupted job(s) re-queued")),
+        );
     }
     let forges = connect(&cfg).await?;
     let clones = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts);
@@ -228,6 +239,11 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
             g.labels = labels;
             g.sweep_every = cfg.sweep_interval;
         }
+        Forge::Forgejo(g) => {
+            g.subscribed = set;
+            g.labels = labels;
+            g.sweep_every = cfg.sweep_interval;
+        }
     }
     if mine.is_empty() {
         return Ok(0);
@@ -255,8 +271,54 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
         }
     }
     ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    if cfg.pr_commands
+        && let Err(e) = pr_commands(ctx, key).await
+    {
+        tracing::warn!("pr commands {}: {e:#}", key.1);
+    }
     let min = cursor.poll_interval_secs.unwrap_or(0);
     Ok(min)
+}
+
+/// Act on `/nightporter approve|dismiss|retry|status` comments you posted on a PR/MR that has a
+/// job. Only the token's own user id counts (see `forge::control_of`); each comment is acted on
+/// once (its id is recorded before acting) and gets a thumbs-up, or a short reply when it
+/// couldn't be done or asked for status.
+pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<()> {
+    // ponytail: newest job per PR, waiting or touched in 3 days; one API call each per poll.
+    let jobs = ctx.db(|d| d.command_jobs(crate::state::now() - 3 * 86400))?;
+    let forge = ctx.forges[key].lock().await;
+    for j in jobs.iter().filter(|j| j.repo.forge == key.0 && j.repo.host == key.1) {
+        let since = jiff::Timestamp::from_second(j.created_at)?.strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let cmds = match forge.controls(&j.repo, j.target, j.number, &since).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("{}#{} commands: {e:#}", j.repo, j.number);
+                continue;
+            }
+        };
+        for c in cmds {
+            let done_key = format!("cmd:{}:{}", j.repo.key(), c.id);
+            if ctx.db(|d| d.get(&done_key))?.is_some() {
+                continue;
+            }
+            ctx.db(|d| d.set(&done_key, "1"))?;
+            let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
+            tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
+            let sent = match res {
+                Ok(None) => forge.ack(&j.repo, j.target, j.number, &c.id).await,
+                Ok(Some(msg)) => forge.reply(&j.repo, j.target, j.number, None, &format!("{msg}\n{}", crate::prompts::FOOTER_MARK)).await,
+                Err(e) => {
+                    let msg = format!("Night Porter: {e:#}\n{}", crate::prompts::FOOTER_MARK);
+                    forge.reply(&j.repo, j.target, j.number, None, &msg).await
+                }
+            };
+            if let Err(e) = sent {
+                tracing::warn!("job {}: acknowledge command: {e:#}", j.id);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Classify one event: pending (trusted), inbox (unknown author) or dropped.
@@ -270,6 +332,11 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     // Night Porter's own replies are posted as you; never treat them as new requests.
     if own && e.body.contains(crate::prompts::FOOTER_MARK) {
         return drop("night porter reply");
+    }
+    // `/nightporter approve` and friends steer jobs (yours only, see `pr_commands`); from anyone
+    // they are never requests or review feedback.
+    if crate::forge::parse_control(&e.body).is_some() {
+        return drop("job command");
     }
     match e.mode() {
         Mode::MyPrs => {
@@ -320,11 +387,15 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     let new = ctx.db(|d| d.add_event(&e, disp, &reason))?;
     // One notification per waiting author, not one per comment (a stranger can post a lot).
     if new && disp == Disposition::Inbox && ctx.db(|d| d.inbox_count(&e.repo, &e.author))? == 1 {
-        ctx.notify(
+        let mut ev = notify::Event::about(
             Kind::NewAuthor,
-            &format!("@{} on {}#{}", e.author, e.repo, e.number),
-            "New author waiting in the inbox: allow or ignore?",
+            &e.repo,
+            e.target,
+            e.number,
+            &format!("@{} is waiting in the inbox: allow or ignore?", e.author),
         );
+        ev.title = format!("@{} on {}", e.author, ev.title);
+        ctx.notify(&e.repo, &ev);
     }
     Ok(())
 }
@@ -374,7 +445,17 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
                 for id in &ids {
                     ctx.db(|d| d.set_disposition(id, Disposition::Dropped, "CI-fix attempts exhausted"))?;
                 }
-                ctx.notify(Kind::Failed, &format!("{repo}#{n}"), &format!("CI still failing after {tries} attempts; stopped retrying"));
+                let target = evs[0].0.target;
+                ctx.notify(
+                    &repo,
+                    &notify::Event::about(
+                        Kind::Failed,
+                        &repo,
+                        target,
+                        n,
+                        &format!("CI still failing after {tries} attempts; stopped retrying"),
+                    ),
+                );
                 continue;
             }
             ctx.db(|d| d.set_ci_attempts(&repo, n, tries + 1))?;
@@ -433,7 +514,9 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             if let Err(e) = res {
                 tracing::error!("job {id}: {e:#}");
                 let _ = c.db(|d| d.fail(id, &format!("{e:#}")));
-                c.notify(Kind::Failed, &format!("job {id} failed"), &format!("{e:#}"));
+                let mut ev = notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &format!("job {id} failed: {e:#}"));
+                ev.job = Some(id);
+                c.notify(&j.repo, &ev);
             }
             c.running.lock().unwrap().remove(&id);
         });
