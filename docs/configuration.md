@@ -71,7 +71,8 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
 | `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |
-| `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz` |
+| `notify` | everywhere | where notifications go: `"desktop"` and/or [target](#notification-targets) names, e.g. `["desktop", "phone"]` |
+| `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz`, and optionally `level`, `agent`, `notify` for that window; see [Working hours](/advanced#working-hours) |
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`) |
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
@@ -86,6 +87,9 @@ global deny.
 
 - `trust.open = true` caps the level at `suggest`.
 - Maintainer mode is capped at `draft`.
+- A schedule window's `level` is checked like `level`: the caps above still apply, CI-failure jobs
+  still stop at `draft` unless `ci_auto`, and a window can lower maintainer jobs but never raise
+  them.
 - The secrets, protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*`, keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `.claude/`, `.opencode/`, `.codex/`.

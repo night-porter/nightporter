@@ -73,18 +73,26 @@ pub fn wants(t: &NotifyTarget, kind: Kind) -> bool {
     t.kinds.is_empty() || t.kinds.contains(&kind)
 }
 
-/// Send `ev` to the desktop (if its toggle is on) and every target that wants it. Never blocks:
-/// the popup runs on its own thread, targets as tasks on the current tokio runtime.
-pub fn send(n: &Notifications, ev: &Event) {
+/// Whether the desktop gets `kind`, and which targets do. `only` is the repo's (or the active
+/// window's) `notify` list; `None` = everywhere.
+pub fn route<'a>(n: &'a Notifications, only: Option<&[String]>, kind: Kind) -> (bool, Vec<&'a NotifyTarget>) {
+    let picked = |name: &str| only.is_none_or(|o| o.iter().any(|x| x == name));
+    (picked("desktop") && desktop_on(n, kind), n.targets.iter().filter(|t| picked(&t.name) && wants(t, kind)).collect())
+}
+
+/// Send `ev` to the desktop and the targets [`route`] picks. Never blocks: the popup runs on
+/// its own thread, targets as tasks on the current tokio runtime.
+pub fn send(n: &Notifications, only: Option<&[String]>, ev: &Event) {
     if std::env::var_os("NIGHTPORTER_NO_NOTIFY").is_some() {
         return;
     }
-    if desktop_on(n, ev.kind) {
+    let (desk, targets) = route(n, only, ev.kind);
+    if desk {
         // notify-rust can block (D-Bus / NSUserNotification); keep it off the async runtime.
         let ev = ev.clone();
         std::thread::spawn(move || desktop(&ev));
     }
-    let targets: Vec<NotifyTarget> = n.targets.iter().filter(|t| wants(t, ev.kind)).cloned().collect();
+    let targets: Vec<NotifyTarget> = targets.into_iter().cloned().collect();
     if targets.is_empty() {
         return;
     }
@@ -319,6 +327,26 @@ mod tests {
         assert!(wants(&target(&[]), Kind::Done), "no kinds = all");
         assert!(wants(&target(&[Kind::Failed, Kind::NeedsApproval]), Kind::Failed));
         assert!(!wants(&target(&[Kind::Failed]), Kind::Done));
+    }
+
+    #[test]
+    fn routing_follows_notify_lists() {
+        fn names((d, ts): (bool, Vec<&NotifyTarget>)) -> (bool, Vec<&str>) {
+            (d, ts.into_iter().map(|t| t.name.as_str()).collect())
+        }
+        let mut n = Notifications::default();
+        for (name, kinds) in [("phone", vec![Kind::Failed]), ("team", vec![])] {
+            let mut t = target(&kinds);
+            t.name = name.into();
+            n.targets.push(t);
+        }
+        assert_eq!(names(route(&n, None, Kind::Failed)), (true, vec!["phone", "team"]));
+        assert_eq!(names(route(&n, None, Kind::Done)), (true, vec!["team"]), "phone only wants failed");
+        let only = ["phone".to_string()];
+        assert_eq!(names(route(&n, Some(&only), Kind::Failed)), (false, vec!["phone"]));
+        assert_eq!(names(route(&n, Some(&["desktop".into()]), Kind::Done)), (true, vec![]));
+        n.done = false;
+        assert_eq!(names(route(&n, Some(&["desktop".into()]), Kind::Done)), (false, vec![]), "the toggle still applies");
     }
 
     #[test]

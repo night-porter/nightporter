@@ -290,6 +290,9 @@ pub struct RepoSettings {
     pub trust: Trust,
     #[serde(default)]
     pub schedule: Vec<Window>,
+    /// Where notifications go: `desktop` and/or target names. `None` = everywhere.
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
     #[serde(default)]
     pub reply: ReplySettings,
     #[serde(default)]
@@ -326,7 +329,7 @@ impl Default for Trust {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Window {
     /// `mon-fri`, `sat,sun`, `daily`, `tue`.
@@ -336,6 +339,21 @@ pub struct Window {
     /// IANA time zone; defaults to the system zone.
     #[serde(default)]
     pub tz: Option<String>,
+    /// While this window is the first active one: its level, agent and notify list replace the
+    /// repo's. The safety caps still apply on top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<Vec<String>>,
+}
+
+impl Window {
+    /// Sets more than days and times (the TUI's one-line schedule field can't keep these).
+    pub fn is_plain(&self) -> bool {
+        self.tz.is_none() && self.level.is_none() && self.agent.is_none() && self.notify.is_none()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -408,8 +426,11 @@ impl Default for Maintainer {
 
 impl Config {
     pub fn load(paths: &Paths) -> Result<Self> {
-        let file = paths.config_file();
-        let text = match std::fs::read_to_string(&file) {
+        Self::load_file(&paths.config_file())
+    }
+
+    fn load_file(file: &Path) -> Result<Self> {
+        let text = match std::fs::read_to_string(file) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
@@ -440,7 +461,8 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
         };
-        self.resolve(over.as_ref()).with_context(|| format!("settings for {repo}"))
+        let s = self.resolve(over.as_ref()).with_context(|| format!("settings for {repo}"))?;
+        Ok(s.at(&jiff::Zoned::now()))
     }
 
     pub fn resolve(&self, over: Option<&toml::Table>) -> Result<RepoSettings> {
@@ -452,6 +474,10 @@ impl Config {
         }
         let s: RepoSettings = merged.try_into()?;
         crate::schedule::validate(&s.schedule)?;
+        let known = |n: &String| n == "desktop" || self.notifications.targets.iter().any(|t| &t.name == n);
+        if let Some(n) = s.notify.iter().chain(s.schedule.iter().filter_map(|w| w.notify.as_ref())).flatten().find(|n| !known(n)) {
+            bail!("unknown notification target {n:?} in notify (use desktop or a [[notifications.targets]] name)");
+        }
         Ok(s.clamped())
     }
 }
@@ -465,6 +491,26 @@ impl RepoSettings {
         }
         self.maintainer.level = self.maintainer.level.min(Level::Draft);
         self
+    }
+
+    /// Apply the first schedule window active at `now` (its `level`, `agent`, `notify`), then
+    /// the caps again: a window can't lift `trust.open`'s cap or raise maintainer jobs, and
+    /// CI-failure jobs still stop at draft unless `ci_auto`.
+    pub fn at(mut self, now: &jiff::Zoned) -> Self {
+        if let Ok(Some(w)) = crate::schedule::matching(&self.schedule, now) {
+            let w = w.clone();
+            if let Some(l) = w.level {
+                self.level = l;
+                self.maintainer.level = self.maintainer.level.min(l);
+            }
+            if let Some(a) = w.agent {
+                self.agent = a;
+            }
+            if w.notify.is_some() {
+                self.notify = w.notify;
+            }
+        }
+        self.clamped()
     }
 
     pub fn concurrency(&self) -> usize {
@@ -524,7 +570,10 @@ pub fn validate(path: &Path, text: &str) -> Result<()> {
     if path.file_name().is_some_and(|n| n == "config.toml") {
         Config::parse(text)?;
     } else {
-        Config::parse("")?.resolve(Some(&text.parse::<toml::Table>()?))?;
+        // Against the real config.toml (above repos/), so notify can name its targets.
+        let global = path.ancestors().map(|d| d.join("config.toml")).find(|p| p.is_file());
+        let cfg = global.and_then(|p| Config::load_file(&p).ok()).map_or_else(|| Config::parse(""), Ok)?;
+        cfg.resolve(Some(&text.parse::<toml::Table>()?))?;
     }
     Ok(())
 }
@@ -734,6 +783,64 @@ mod tests {
         let s = c.resolve(Some(&open)).unwrap();
         assert_eq!(s.level, Level::Suggest);
         assert_eq!(s.maintainer.level, Level::Suggest);
+    }
+
+    #[test]
+    fn first_active_window_overrides_level_agent_notify() {
+        let c = Config::parse(
+            r#"
+            [[notifications.targets]]
+            name = "phone"
+            type = "command"
+            command = ["true"]
+            [defaults]
+            level = "suggest"
+            notify = ["desktop", "phone"]
+            [[defaults.schedule]]
+            days = "mon-fri"
+            windows = ["09:00-18:00"]
+            tz = "Europe/Zurich"
+            level = "draft"
+            notify = ["desktop"]
+            [[defaults.schedule]]
+            days = "daily"
+            windows = ["00:00-24:00"]
+            tz = "Europe/Zurich"
+            level = "auto"
+            agent = "codex"
+            "#,
+        )
+        .unwrap();
+        let at = |t: &str| c.resolve(None).unwrap().at(&format!("{t}[Europe/Zurich]").parse().unwrap());
+        // Thursday 10:00: both windows match, the first wins; agent falls back to the repo's.
+        let day = at("2026-11-05T10:00");
+        assert_eq!((day.level, day.agent, day.notify.as_deref()), (Level::Draft, AgentKind::Claude, Some(&["desktop".to_string()][..])));
+        // Thursday 23:00: only the second; notify falls back to the repo's list.
+        let night = at("2026-11-05T23:00");
+        assert_eq!((night.level, night.agent), (Level::Auto, AgentKind::Codex));
+        assert_eq!(night.notify.unwrap(), ["desktop", "phone"]);
+        assert_eq!(night.maintainer.level, Level::Draft, "a window never raises maintainer jobs");
+        // The caps still win: trust.open keeps it at suggest whatever the window says.
+        let open: toml::Table = toml::from_str("[trust]\nopen = true").unwrap();
+        let s = c.resolve(Some(&open)).unwrap().at(&"2026-11-05T23:00[Europe/Zurich]".parse().unwrap());
+        assert_eq!(s.level, Level::Suggest);
+    }
+
+    #[test]
+    fn notify_names_must_exist() {
+        assert!(Config::parse("[defaults]\nnotify = [\"desktop\"]").is_ok());
+        assert!(Config::parse("[defaults]\nnotify = [\"phone\"]").is_err());
+        assert!(Config::parse("[[defaults.schedule]]\ndays = \"daily\"\nwindows = [\"00:00-24:00\"]\nnotify = [\"phone\"]").is_err());
+        // A repo file is checked against the config.toml it sits under.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("config.toml"),
+            "[[notifications.targets]]\nname = \"phone\"\ntype = \"command\"\ncommand = [\"true\"]",
+        )
+        .unwrap();
+        let repo = d.path().join("repos/github/o/r.toml");
+        assert!(validate(&repo, "notify = [\"phone\"]").is_ok());
+        assert!(validate(&repo, "notify = [\"pager\"]").is_err());
     }
 
     #[test]

@@ -33,6 +33,15 @@ failed = true
 done = true
 new_author = true
 
+# Also send notifications to webhooks (slack, discord, ntfy, json) or a command.
+# Check with `nightporter notify test`.
+# [[notifications.targets]]
+# name = "phone"
+# type = "webhook"
+# url_env = "NIGHTPORTER_NTFY_URL"   # or url = "https://ntfy.sh/your-topic"
+# format = "ntfy"
+# kinds = ["needs_approval", "failed"]
+
 [defaults]
 agent = "claude"            # claude | opencode | codex
 level = "draft"             # observe | suggest | draft | auto
@@ -58,6 +67,8 @@ allow_bots = []             # e.g. "coderabbitai[bot]"
 # [[defaults.schedule]]
 # days = "mon-fri"
 # windows = ["08:00-09:00", "11:00-13:00", "17:00-22:00"]
+# level = "draft"           # optional, while this window is open: level, agent, notify
+# notify = ["desktop"]
 
 [defaults.reply]
 style = "concise"           # concise | detailed-tech-lead | non-technical | path/to/style.md

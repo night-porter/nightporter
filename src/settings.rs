@@ -94,6 +94,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.prompt", Text, "Your own extra instructions file, relative to the config folder."),
     s("defaults.packs", List, "Enabled packs."),
     s("defaults.schedule", Schedule, "Active hours, e.g. mon-fri 08:00-09:00,17:00-22:00; sat 10:00-12:00. Empty = any time."),
+    s("defaults.notify", List, "Where notifications go: desktop and/or target names, e.g. desktop, phone. Empty = everywhere."),
     s("defaults.trust.roles", List, "Trusted roles: owner, maintainer, member, collaborator, contributor, none."),
     s("defaults.trust.allow_users", List, "Always-trusted usernames."),
     s("defaults.trust.deny_users", List, "Never-trusted usernames (repo files can't undo these)."),
@@ -216,8 +217,8 @@ fn item(s: &Setting, input: &str) -> Result<Option<toml_edit::Item>> {
 /// Write `input` for `s` into `config.toml` (empty = remove the key, back to the default).
 /// Nothing is written unless the whole file still validates.
 pub fn set(paths: &Paths, s: &Setting, input: &str) -> Result<String> {
-    if s.kind == Schedule && std::fs::read_to_string(paths.config_file()).unwrap_or_default().contains("tz =") {
-        bail!("your schedule has time zones, which this field would drop; press e to edit the file");
+    if s.kind == Schedule && Config::load(paths).and_then(|c| c.resolve(None)).is_ok_and(|r| r.schedule.iter().any(|w| !w.is_plain())) {
+        bail!("your schedule has time zones or per-window settings, which this field would drop; press e to edit the file");
     }
     let new = item(s, input)?;
     let (parents, last) = s.key.rsplit_once('.').map_or((None, s.key), |(p, l)| (Some(p), l));
@@ -293,6 +294,17 @@ pub fn edit_in_editor(path: &Path) -> Result<String> {
     };
     let _ = std::fs::remove_file(&tmp);
     result
+}
+
+/// `mon-fri 09:00-18:00 (draft, desktop)`: days, times and the window's own settings.
+fn window_text(w: &crate::config::Window) -> String {
+    let own: Vec<String> =
+        [w.level.map(|l| l.as_str().to_string()), w.agent.map(|a| a.bin().to_string()), w.notify.as_ref().map(|n| n.join("+"))]
+            .into_iter()
+            .flatten()
+            .collect();
+    let own = if own.is_empty() { String::new() } else { format!(" ({})", own.join(", ")) };
+    format!("{} {}{own}", w.days, w.windows.join(","))
 }
 
 /// Dotted keys a repo file sets, e.g. `level`, `reply.style`.
@@ -381,7 +393,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  packs          {}", list(&s.packs));
 
     let _ = writeln!(o, "\nWHEN AND HOW MUCH");
-    let sched: Vec<String> = s.schedule.iter().map(|w| format!("{} {}", w.days, w.windows.join(","))).collect();
+    let sched: Vec<String> = s.schedule.iter().map(window_text).collect();
     let _ = writeln!(o, "  hours          {}", if sched.is_empty() { "any time".into() } else { sched.join("; ") });
     let _ = writeln!(
         o,
@@ -390,6 +402,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
         crate::config::format_duration(s.timeout)
     );
     let _ = writeln!(o, "  CI-fix tries   {}   CI jobs at auto {}", s.max_ci_attempts, on(s.ci_auto));
+    let _ = writeln!(o, "  notify         {}", s.notify.as_ref().map_or_else(|| "everywhere".to_string(), |n| list(n)));
     if let Some(b) = s.max_budget_usd {
         let _ = writeln!(o, "  budget         ${b:.2} per run");
     }

@@ -476,7 +476,7 @@ fn note(ctx: &Ctx, j: &Job, kind: Kind, summary: &str) {
     if !j.meta.pr_url.is_empty() {
         ev.url = Some(j.meta.pr_url.clone());
     }
-    ctx.notify(&ev);
+    ctx.notify(&j.repo, &ev);
 }
 
 /// Commands the user can copy for a `suggest` job.

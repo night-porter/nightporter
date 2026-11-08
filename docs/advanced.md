@@ -49,6 +49,32 @@ tz = "Europe/Zurich"
 
 Events outside the windows are queued and run when the next window opens.
 
+A window can also change the `level`, `agent` and `notify` list while it is open. Draft and a
+desktop notification during the day, auto and your phone overnight:
+
+```toml
+[defaults]
+notify = ["desktop"]
+
+[[defaults.schedule]]
+days = "mon-fri"
+windows = ["09:00-18:00"]
+level = "draft"
+
+[[defaults.schedule]]
+days = "daily"
+windows = ["18:00-09:00"]
+level = "auto"
+notify = ["phone"]          # a [[notifications.targets]] name
+```
+
+The first window that is open wins. What it doesn't set comes from the repo's settings. Names in
+`notify` must be `desktop` or a target, or the config won't load. The level is chosen when a
+job is created, the agent when it starts, and the `notify` list when the notification is sent.
+A window's `level` can't get past the [limits](/configuration#limits-that-config-cannot-change):
+with `trust.open` it still stops at `suggest`, and CI-failure jobs still stop at `draft` unless
+`ci_auto` is on. The TUI's schedule field only edits days and times; use `e` for the rest.
+
 ## Who it listens to
 
 ```toml

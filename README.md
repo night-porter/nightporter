@@ -49,7 +49,8 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Claude Code, OpenCode and Codex
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
-- Several active windows per day; events outside them are queued
+- Several active windows per day; events outside them are queued. Each window can set its own
+  level, agent and notifications (draft by day, auto overnight)
 - Desktop notifications, plus webhooks (Slack, Discord, ntfy, JSON) and commands for your phone
   or chat; `nightporter notify test` checks them
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional

@@ -96,7 +96,7 @@ pub fn parse_schedule(a: &str) -> Result<Option<Window>> {
         return Ok(None);
     }
     let (days, ranges) = a.split_once(' ').context("use `<days> <HH:MM-HH:MM,...>`, e.g. `mon-fri 08:00-09:00,17:00-22:00`")?;
-    let w = Window { days: days.into(), windows: ranges.split(',').map(|r| r.trim().to_string()).collect(), tz: None };
+    let w = Window { days: days.into(), windows: ranges.split(',').map(|r| r.trim().to_string()).collect(), ..Default::default() };
     crate::schedule::validate(std::slice::from_ref(&w))?;
     Ok(Some(w))
 }
