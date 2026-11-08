@@ -14,9 +14,10 @@ const SIDEBAR = [
   {
     text: 'Guide',
     items: [
+      { text: "What's new in 0.3", link: '/whats-new' },
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Daily use', link: '/daily-use' },
-      { text: 'herdr, Rex, tmux and scripts', link: '/herdr' },
+      { text: 'herdr, Rex, tmux, Zellij', link: '/herdr' },
       { text: 'Troubleshooting', link: '/troubleshooting' },
     ],
   },
@@ -60,7 +61,7 @@ function writeLlms(srcDir: string, outDir: string) {
   const index = [
     '# Night Porter docs',
     '',
-    '> Night Porter handles your PRs while you’re away: a daemon and terminal UI that watch GitHub, GitLab and Forgejo/Gitea for review comments, failing CI and merge conflicts on your PRs and MRs, then run Claude Code, OpenCode, Codex or Gemini CLI on your local clone, within the rules you set. It never merges, force-pushes, closes or approves.',
+    '> Night Porter handles your PRs while you’re away: a daemon and terminal UI that watch GitHub, GitLab and Forgejo/Gitea for review comments, failing CI and merge conflicts on your PRs and MRs, then run Claude Code, OpenCode, Codex or Gemini CLI (experimental) on your local clone, within the rules you set. It never merges, force-pushes, closes or approves.',
     '',
     `Every page as one file: ${SITE}/llms-full.txt. Website: https://night-porter.com. Source: ${REPO}.`,
     ...pages.flatMap((g) => ['', `## ${g.text}`, '', ...g.items.map((i) => `- [${i.text}](${SITE}${i.link}): ${describe(i.md)}`)]),
@@ -117,6 +118,7 @@ export default defineConfig({
     nav: [
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Configuration', link: '/configuration' },
+      { text: "What's new", link: '/whats-new' },
       { text: 'Website', link: 'https://night-porter.com' },
     ],
     sidebar: SIDEBAR,

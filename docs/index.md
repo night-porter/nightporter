@@ -12,6 +12,9 @@ hero:
       text: Configuration
       link: /configuration
 features:
+  - title: What's new in 0.3
+    details: Day and night shifts, notifications on your phone, approve from a PR comment, Forgejo/Gitea, Gemini CLI (experimental).
+    link: /whats-new
   - title: Getting started
     details: Install, run the setup wizard, subscribe to a repo and see your first job.
     link: /getting-started
