@@ -101,7 +101,7 @@ enum Cmd {
     },
     /// Re-run a finished or failed job's requests as a new job.
     Retry { id: i64 },
-    /// Take over a job interactively in herdr or Rex (opens it with a briefed agent).
+    /// Take over a job interactively in herdr, Rex, tmux, Zellij or a new terminal (opens it with a briefed agent).
     Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
     Show { id: i64 },

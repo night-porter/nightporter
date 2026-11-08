@@ -77,7 +77,11 @@ pub static SETTINGS: &[Setting] = &[
         "Webhooks (Slack, Discord, ntfy, JSON) and commands that also get notifications. Press e to edit the file; check with nightporter notify test.",
     ),
     // Defaults for every repo (each repo file can override them)
-    s("defaults.agent", Choice(&["claude", "opencode", "codex", "gemini"]), "Coding agent: Claude Code, OpenCode, Codex or Gemini CLI."),
+    s(
+        "defaults.agent",
+        Choice(&["claude", "opencode", "codex", "gemini"]),
+        "Coding agent: Claude Code, OpenCode, Codex or Gemini CLI (experimental).",
+    ),
     s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),
     risky(
         "defaults.level",

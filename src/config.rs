@@ -219,7 +219,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Codex => "Codex",
-            AgentKind::Gemini => "Gemini CLI",
+            AgentKind::Gemini => "Gemini CLI (experimental)",
         }
     }
     /// Binary name, which is also the config value.
@@ -463,16 +463,20 @@ impl Config {
         expand_tilde(&self.code_dir)
     }
 
-    /// Effective settings for `repo`, reading its override file if present.
+    /// Effective settings for `repo` right now, reading its override file if present.
     pub fn settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
+        Ok(self.base_settings_for(paths, repo)?.at(&jiff::Zoned::now()))
+    }
+
+    /// `repo`'s settings before any schedule window applies: what its files say.
+    pub fn base_settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
         let file = paths.repo_file(repo);
         let over = match std::fs::read_to_string(&file) {
             Ok(t) => Some(t.parse::<toml::Table>().with_context(|| format!("in {}", file.display()))?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
         };
-        let s = self.resolve(over.as_ref()).with_context(|| format!("settings for {repo}"))?;
-        Ok(s.at(&jiff::Zoned::now()))
+        self.resolve(over.as_ref()).with_context(|| format!("settings for {repo}"))
     }
 
     pub fn resolve(&self, over: Option<&toml::Table>) -> Result<RepoSettings> {

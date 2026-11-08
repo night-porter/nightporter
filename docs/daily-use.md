@@ -20,7 +20,7 @@ Run `nightporter`. It has five tabs:
 | `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours |
 | `2` | Inbox | events from people you don’t trust yet |
 | `3` | History | every job, newest first, including done and dismissed ones; `/` searches (e.g. `dismissed`, a repo name) |
-| `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex → Gemini CLI), `e` edits the repo file, `R` rescans |
+| `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental), `e` edits the repo file, `R` rescans. `l` and `a` change the repo’s own setting; when a [schedule window](/advanced#working-hours) overrides it right now, the row says so, e.g. `(now auto, from window)` |
 | `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
 | `?` | Help | keys and commands |
 
