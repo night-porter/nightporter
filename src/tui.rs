@@ -1052,7 +1052,7 @@ Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ 
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
 Repos: Enter details   space subscribe/unsubscribe   l next level (observe → suggest → draft → auto)
-       a  switch agent (Claude Code → OpenCode → Codex)   e edit the repo's file   R rescan
+       a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI)   e edit the repo's file   R rescan
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
        e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
           never saved, so a typo can't break the daemon.

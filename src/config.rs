@@ -136,6 +136,7 @@ pub enum AgentKind {
     Claude,
     OpenCode,
     Codex,
+    Gemini,
 }
 
 impl AgentKind {
@@ -144,6 +145,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Codex => "Codex",
+            AgentKind::Gemini => "Gemini CLI",
         }
     }
     /// Binary name, which is also the config value.
@@ -152,9 +154,10 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::OpenCode => "opencode",
             AgentKind::Codex => "codex",
+            AgentKind::Gemini => "gemini",
         }
     }
-    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::OpenCode, AgentKind::Codex];
+    pub const ALL: [AgentKind; 4] = [AgentKind::Claude, AgentKind::OpenCode, AgentKind::Codex, AgentKind::Gemini];
     /// The next agent in [`Self::ALL`] (the TUI's `a` key cycles through them).
     pub fn next(self) -> Self {
         let i = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);

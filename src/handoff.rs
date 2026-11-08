@@ -69,6 +69,8 @@ fn rex(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
     match agent {
         AgentKind::Claude | AgentKind::Codex => cmd.arg(&brief),
         AgentKind::OpenCode => cmd.args(["--prompt", &brief]),
+        // A bare prompt makes `gemini` answer once and exit; `-i` keeps the session open.
+        AgentKind::Gemini => cmd.args(["-i", &brief]),
     };
     let out = cmd.output().context("run rex")?;
     if !out.status.success() {

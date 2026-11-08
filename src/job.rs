@@ -15,7 +15,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Files that configure or instruct the agent itself.
-const AGENT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", ".claude/", ".opencode/", "opencode.json", ".codex/", ".mcp.json", ".cursorrules"];
+const AGENT_FILES: &[&str] =
+    &["CLAUDE.md", "AGENTS.md", ".claude/", ".opencode/", "opencode.json", ".codex/", ".gemini/", "GEMINI.md", ".mcp.json", ".cursorrules"];
 
 const BUILD_FILES: &[&str] = &[
     "package.json",

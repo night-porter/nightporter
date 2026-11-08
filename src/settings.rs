@@ -67,7 +67,7 @@ pub static SETTINGS: &[Setting] = &[
     s("notifications.done", Bool, "Desktop notification when a job is done."),
     s("notifications.new_author", Bool, "Desktop notification when someone untrusted lands in the inbox."),
     // Defaults for every repo (each repo file can override them)
-    s("defaults.agent", Choice(&["claude", "opencode", "codex"]), "Coding agent: Claude Code, OpenCode or Codex."),
+    s("defaults.agent", Choice(&["claude", "opencode", "codex", "gemini"]), "Coding agent: Claude Code, OpenCode, Codex or Gemini CLI."),
     s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),
     risky(
         "defaults.level",

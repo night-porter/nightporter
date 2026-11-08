@@ -57,14 +57,20 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code   (then run `claude` once to log in)",
             AgentKind::OpenCode => "curl -fsSL https://opencode.ai/install | bash   (or brew install opencode)",
             AgentKind::Codex => "npm install -g @openai/codex   (or brew install --cask codex; then run `codex` once to log in)",
+            AgentKind::Gemini => {
+                "npm install -g @google/gemini-cli   (0.67 or newer; set GEMINI_API_KEY for the daemon or run `gemini` once to log in)"
+            }
         };
         out.push(tool(a.bin(), "--version", fix, false));
     }
     out.push(tool("gitleaks", "version", &install("gitleaks", "see https://github.com/gitleaks/gitleaks"), true));
     out.push(tool("herdr", "--version", "optional, for `nightporter handoff`: see https://herdr.dev", true));
-    // Claude Code's sandbox (on by default) needs these on Linux; macOS uses built-in Seatbelt.
-    if cfg!(target_os = "linux") && agents.contains(&AgentKind::Claude) {
+    // Claude Code's and Gemini CLI's sandboxes (on by default) need these on Linux; macOS uses
+    // built-in Seatbelt.
+    if cfg!(target_os = "linux") && (agents.contains(&AgentKind::Claude) || agents.contains(&AgentKind::Gemini)) {
         out.push(tool("bwrap", "--version", "sudo apt-get install bubblewrap   (or set sandbox = false)", false));
+    }
+    if cfg!(target_os = "linux") && agents.contains(&AgentKind::Claude) {
         out.push(tool("socat", "-V", "sudo apt-get install socat   (or set sandbox = false)", false));
     }
     out
