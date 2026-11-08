@@ -81,7 +81,8 @@ mod tests {
     use crate::forge::ForgeKind;
 
     fn accts() -> Vec<Account> {
-        toml::from_str::<toml::Table>("[[a]]\nforge='github'\n[[a]]\nforge='gitlab'\nhost='git.drupalcode.org'").unwrap()["a"]
+        toml::from_str::<toml::Table>("[[a]]\nforge='github'\n[[a]]\nforge='gitlab'\nhost='git.drupalcode.org'\n[[a]]\nforge='gitea'")
+            .unwrap()["a"]
             .clone()
             .try_into()
             .unwrap()
@@ -99,6 +100,9 @@ mod tests {
             parse_remote("git@git.drupalcode.org:project/token.git", &a),
             Some(RepoId::new(ForgeKind::GitLab, "git.drupalcode.org", "project/token"))
         );
+        let fj = Some(RepoId::new(ForgeKind::Forgejo, "codeberg.org", "o/r"));
+        assert_eq!(parse_remote("git@codeberg.org:o/r.git", &a), fj);
+        assert_eq!(parse_remote("https://codeberg.org/o/r.git", &a), fj);
         assert_eq!(parse_remote("git@bitbucket.org:o/r.git", &a), None);
     }
 

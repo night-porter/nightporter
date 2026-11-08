@@ -17,7 +17,7 @@ worktree_idle_days = 14
 # version. Anonymous; sends nothing about you or your repos. Night Porter never updates itself.
 check_updates = true
 
-# Forge accounts. `token = "cli"` asks gh/glab each time; "keyring" uses a PAT stored with
+# Forge accounts. `token = "cli"` asks gh/glab/tea each time; "keyring" uses a PAT stored with
 # `nightporter token set <forge> [host]`.
 [[accounts]]
 forge = "github"
@@ -25,6 +25,10 @@ forge = "github"
 # [[accounts]]
 # forge = "gitlab"
 # host = "git.drupalcode.org"
+# token = "keyring"
+
+# [[accounts]]
+# forge = "forgejo"         # Forgejo or Gitea; host defaults to codeberg.org
 # token = "keyring"
 
 [notifications]
@@ -51,7 +55,7 @@ sandbox = true              # OS sandbox for agent commands (Claude Code, Codex)
 roles = ["owner", "maintainer", "member", "collaborator"]
 allow_users = []
 deny_users = []
-allow_teams = []            # "org/team" (GitHub) or "group" (GitLab)
+allow_teams = []            # "org/team" (GitHub, Forgejo) or "group" (GitLab)
 allow_bots = []             # e.g. "coderabbitai[bot]"
 
 # Active windows. No [[defaults.schedule]] entries = always active.

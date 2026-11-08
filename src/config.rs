@@ -58,17 +58,14 @@ pub struct Account {
     pub forge: ForgeKind,
     #[serde(default)]
     pub host: Option<String>,
-    /// `cli` (gh/glab auth token) or `keyring`.
+    /// `cli` (gh/glab/tea) or `keyring`.
     #[serde(default)]
     pub token: TokenSource,
 }
 
 impl Account {
     pub fn host(&self) -> &str {
-        self.host.as_deref().unwrap_or(match self.forge {
-            ForgeKind::GitHub => "github.com",
-            ForgeKind::GitLab => "gitlab.com",
-        })
+        self.host.as_deref().unwrap_or(self.forge.default_host())
     }
 }
 

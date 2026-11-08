@@ -1,7 +1,7 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
 use crate::config::{Config, Level};
-use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger, github::GitHub, gitlab::GitLab};
+use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger, forgejo::Forgejo, github::GitHub, gitlab::GitLab};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
 use crate::paths::Paths;
@@ -75,6 +75,9 @@ pub async fn connect(cfg: &Config) -> Result<HashMap<(ForgeKind, String), tokio:
             }
             ForgeKind::GitLab => {
                 Forge::GitLab(GitLab::new(&host, Api::new(&base.unwrap_or_else(|| GitLab::api_base(&host)), token, true)?))
+            }
+            ForgeKind::Forgejo => {
+                Forge::Forgejo(Forgejo::new(&host, Api::new(&base.unwrap_or_else(|| Forgejo::api_base(&host)), token, false)?))
             }
         };
         f.login().await.with_context(|| format!("log in to {host}"))?;
@@ -224,6 +227,11 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
             g.sweep_every = cfg.sweep_interval;
         }
         Forge::GitLab(g) => {
+            g.subscribed = set;
+            g.labels = labels;
+            g.sweep_every = cfg.sweep_interval;
+        }
+        Forge::Forgejo(g) => {
             g.subscribed = set;
             g.labels = labels;
             g.sweep_every = cfg.sweep_interval;

@@ -1,4 +1,4 @@
-//! End-to-end: mock GitHub API + real git remote + stub agent. No network, no LLM.
+//! End-to-end: mock forge APIs + real git remote + stub agent. No network, no LLM.
 
 use crate::config::Config;
 use crate::daemon::{self, Ctx};
@@ -371,6 +371,127 @@ async fn gitlab_poll_reply_and_resolve() {
     let log = log.lock().unwrap();
     assert!(log.iter().any(|(m, p, b)| m == "POST" && p.ends_with("/discussions/d1/notes") && b.contains("done")));
     assert!(log.iter().any(|(m, p, _)| m == "PUT" && p.starts_with("/projects/grp%2Fproj/merge_requests/3/discussions/d1")));
+}
+
+/// A Forgejo server with one PR of mine (#3) and one issue (#4) on `o/r`.
+fn forgejo_routes() -> Vec<(&'static str, &'static str, String)> {
+    let pull = r#"{"number":3,"title":"T","body":"","user":{"login":"me"},"state":"open","merged":false,"draft":false,"mergeable":false,
+                   "head":{"ref":"f","sha":"abc","repo":{"ssh_url":"git@codeberg.org:me/r.git","clone_url":"https://codeberg.org/me/r.git"}},
+                   "base":{"ref":"main","sha":"x","repo":null}}"#;
+    vec![
+        ("GET", "/user", r#"{"login":"me"}"#.into()),
+        (
+            "GET",
+            "/notifications",
+            r#"[{"id":1,"subject":{"type":"Pull","url":"https://codeberg.org/api/v1/repos/o/r/pulls/3"},"repository":{"full_name":"o/r"}},
+                {"id":2,"subject":{"type":"Issue","url":"https://codeberg.org/api/v1/repos/o/r/issues/4"},"repository":{"full_name":"o/r"}},
+                {"id":3,"subject":{"type":"Pull","url":"https://codeberg.org/api/v1/repos/x/y/pulls/1"},"repository":{"full_name":"x/y"}}]"#
+                .into(),
+        ),
+        ("GET", "/repos/o/r/pulls/3", pull.into()),
+        (
+            "GET",
+            "/repos/o/r/issues/3/comments",
+            r#"[{"id":10,"user":{"login":"carol"},"body":"please add docs","html_url":"","created_at":"2026-11-05T10:00:00Z"}]"#.into(),
+        ),
+        (
+            "GET",
+            "/repos/o/r/pulls/3/reviews",
+            r#"[{"id":20,"user":{"login":"bob"},"state":"REQUEST_CHANGES","body":"needs work","submitted_at":"2026-11-05T10:00:00Z","comments_count":1},
+                {"id":21,"user":{"login":"alice"},"state":"APPROVED","body":"","submitted_at":"2026-11-05T10:00:00Z","comments_count":0},
+                {"id":22,"user":{"login":"dave"},"state":"COMMENT","body":"","submitted_at":"2026-11-05T10:01:00Z","comments_count":1}]"#
+                .into(),
+        ),
+        (
+            "GET",
+            "/repos/o/r/pulls/3/reviews/20/comments",
+            r#"[{"id":30,"user":{"login":"bob"},"body":"fix typo","path":"a.txt","position":1,"created_at":"2026-11-05T10:00:00Z"}]"#.into(),
+        ),
+        (
+            "GET",
+            "/repos/o/r/pulls/3/reviews/22/comments",
+            r#"[{"id":31,"user":{"login":"dave"},"body":"+1","path":"a.txt","position":1,"created_at":"2026-11-05T10:01:00Z"}]"#.into(),
+        ),
+        ("GET", "/repos/o/r/collaborators/bob/permission", r#"{"permission":"admin"}"#.into()),
+        (
+            "GET",
+            "/repos/o/r/issues/4/comments",
+            r#"[{"id":12,"user":{"login":"bob"},"body":"/nightporter triage","html_url":"","created_at":"2026-11-05T10:00:00Z"}]"#.into(),
+        ),
+        (
+            "GET",
+            "/repos/o/r/issues/4/timeline",
+            r#"[{"id":40,"type":"label","user":{"login":"bob"},"label":{"name":"nightporter"},"body":"1","created_at":"2026-11-05T10:00:00Z"},
+                {"id":41,"type":"label","user":{"login":"bob"},"label":{"name":"nightporter"},"body":"","created_at":"2026-11-05T10:00:01Z"}]"#
+                .into(),
+        ),
+        ("GET", "/repos/issues/search", r#"[{"number":3,"repository":{"full_name":"o/r"}}]"#.into()),
+        (
+            "GET",
+            "/repos/o/r/commits/abc/status",
+            r#"{"state":"failure","statuses":[{"context":"ci/woodpecker","status":"failure","target_url":"https://ci.example/1","description":"tests failed"},
+                                               {"context":"lint","status":"success"}]}"#
+                .into(),
+        ),
+        ("POST", "/repos/o/r/pulls/3/reviews", "{}".into()),
+        ("POST", "/repos/o/r/issues/3/comments", "{}".into()),
+    ]
+}
+
+#[tokio::test]
+async fn forgejo_poll_sweep_reply_and_resolve() {
+    use crate::forge::{Role, Target, Trigger, Verb, forgejo::Forgejo};
+    let (url, log) = mock(forgejo_routes()).await;
+    let mut fj = Forgejo::new("codeberg.org", Api::new(&url, "t".to_string().into(), false).unwrap());
+    fj.subscribed.insert("o/r".into());
+    fj.labels.insert("o/r".into(), "nightporter".into());
+    let mut f = Forge::Forgejo(fj);
+    f.login().await.unwrap();
+    assert_eq!(f.me(), "me");
+    let mut cur = crate::forge::Cursor::default();
+    assert_eq!(f.poll(&mut cur).await.unwrap(), []);
+    cur.since = Some("2026-01-01T00:00:00Z".into());
+    cur.last_sweep = None;
+    let evs = f.poll(&mut cur).await.unwrap();
+    // Unsubscribed repos cost no requests.
+    assert!(!log.lock().unwrap().iter().any(|(_, p, _)| p.starts_with("/repos/x/")));
+    // First sweep only records; `mergeable: false` alone isn't a conflict yet (could be "checking").
+    assert!(!evs.iter().any(|e| matches!(e.trigger, Trigger::MergeConflict | Trigger::CiFailure)));
+    assert_eq!(cur.seen_status.get("forgejo:codeberg.org/o/r#3").map(String::as_str), Some("conflict@abc,red"));
+
+    let get = |id: &str| evs.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("{id} in {evs:#?}"));
+    let rc = get("fj-codeberg.org-rc-30");
+    assert_eq!((rc.trigger, rc.role, rc.path.as_deref(), rc.line), (Trigger::ReviewComment, Role::Maintainer, Some("a.txt"), Some(1)));
+    // dave's reply is in bob's conversation, whose first comment is the one to resolve.
+    assert_eq!(get("fj-codeberg.org-rc-31").thread.as_deref(), Some("30"));
+    assert_eq!(get("fj-codeberg.org-rv-20").trigger, Trigger::Review);
+    assert!(!evs.iter().any(|e| e.id == "fj-codeberg.org-rv-21" || e.id == "fj-codeberg.org-rv-22"), "approvals and empty reviews");
+    assert_eq!(get("fj-codeberg.org-ic-10").role, Role::None, "not a collaborator");
+    assert_eq!(get("fj-codeberg.org-ic-12").verb, Some(Verb::Triage));
+    let label = get("fj-codeberg.org-label-40");
+    assert_eq!((label.target, label.verb), (Target::Issue, Some(Verb::Fix)));
+    assert!(!evs.iter().any(|e| e.id == "fj-codeberg.org-label-41"), "label removal");
+
+    // Second sweep at the same head: conflict and CI fire.
+    cur.last_sweep = None;
+    let sweep = f.poll(&mut cur).await.unwrap();
+    assert!(sweep.iter().any(|e| e.trigger == Trigger::MergeConflict && e.id.ends_with("-abc")));
+    assert!(sweep.iter().any(|e| e.trigger == Trigger::CiFailure && e.body.contains("ci/woodpecker") && !e.body.contains("lint")));
+
+    f.reply(&rc.repo, Target::Pr, 3, Some(rc), "done").await.unwrap();
+    f.reply(&rc.repo, Target::Pr, 3, None, "summary").await.unwrap();
+    // No resolve endpoint on this server (Forgejo): a clear error for the job log.
+    let err = f.resolve(&rc.repo, 3, "30").await.unwrap_err().to_string();
+    assert!(err.contains("no API to resolve"), "{err}");
+    let log = log.lock().unwrap();
+    let review = log.iter().find(|(m, p, _)| m == "POST" && p == "/repos/o/r/pulls/3/reviews").expect("reply as review");
+    let v: serde_json::Value = serde_json::from_str(&review.2).unwrap();
+    assert_eq!(
+        (v["event"].as_str(), v["comments"][0]["path"].as_str(), v["comments"][0]["new_position"].as_u64()),
+        (Some("COMMENT"), Some("a.txt"), Some(1))
+    );
+    assert!(log.iter().any(|(m, p, b)| m == "POST" && p == "/repos/o/r/issues/3/comments" && b.contains("summary")));
+    assert!(log.iter().any(|(m, p, _)| m == "POST" && p == "/repos/o/r/pulls/comments/30/resolve"));
 }
 
 #[tokio::test]
