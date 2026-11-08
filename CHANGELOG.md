@@ -4,7 +4,7 @@ All notable changes to Night Porter. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (0.x: expect breaking changes).
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-08
 
 ### Added
 
@@ -79,7 +79,7 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[0.3.0]: https://github.com/night-porter/nightporter/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/night-porter/nightporter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/night-porter/nightporter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/night-porter/nightporter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/night-porter/nightporter/releases/tag/v0.1.0
