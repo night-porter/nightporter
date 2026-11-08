@@ -6,7 +6,7 @@ use crate::config::{Level, RepoSettings};
 use crate::daemon::Ctx;
 use crate::forge::{Event, IssueInfo, PrInfo, PrState, Target, Verb};
 use crate::git::{self, git};
-use crate::notify::Kind;
+use crate::notify::{self, Kind};
 use crate::packs::{self, Hook};
 use crate::state::{CheckResult, Job, JobStatus};
 use crate::{agent, prompts};
@@ -99,17 +99,16 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     }
     j.status = JobStatus::Running;
     let lvl = level(&j);
-    let where_ = format!("{}#{}", j.repo, j.number);
 
     if lvl == Level::Observe {
-        ctx.notify(Kind::Done, &where_, &format!("{} new event(s)", events.len()));
+        note(ctx, &j, Kind::Done, &format!("{} new event(s)", events.len()));
         return finish(ctx, &mut j, format!("{} new event(s); observe only", events.len()));
     }
 
     let Some(w) = prepare(ctx, &mut j, &cfg.accounts, &s, &events).await? else {
         return Ok(());
     };
-    if await_run_approval(ctx, &mut j, &w, &where_).await? {
+    if await_run_approval(ctx, &mut j, &w).await? {
         return Ok(());
     }
 
@@ -121,7 +120,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     setup_env(ctx, &j, &s, &w, &job_dir).await?;
     let outcome = run_agent(ctx, &mut j, &s, &w, &job_dir, &events).await?;
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
-    conclude(ctx, &mut j, commits, lvl, &where_).await
+    conclude(ctx, &mut j, commits, lvl).await
 }
 
 /// Resolve where to fetch from and push to, and prepare the worktree. `None`: the job was
@@ -143,6 +142,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     let (pr, fetch_url, fetch_ref) = match j.target {
         Target::Pr => {
             let pr = forge.lock().await.pr(&j.repo, j.number).await?;
+            j.meta.title.clone_from(&pr.title);
             if pr.state != PrState::Open {
                 finish(ctx, j, format!("PR is {:?}; nothing to do", pr.state).to_lowercase())?;
                 return Ok(None);
@@ -163,7 +163,9 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             j.meta.push_url.clone_from(&repo_url);
             j.meta.push_ref.clone_from(&branch);
             j.meta.base.clone_from(&base);
-            issue = Some(forge.lock().await.issue(&j.repo, j.number).await?);
+            let i = forge.lock().await.issue(&j.repo, j.number).await?;
+            j.meta.title.clone_from(&i.title);
+            issue = Some(i);
             // A later request on the same issue continues the branch from earlier work.
             let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
             // Reproducing can mean running the reporter's snippet through allowed commands.
@@ -202,7 +204,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
 /// Untrusted code: someone else's branch can carry agent config (CLAUDE.md, opencode.json,
 /// .opencode plugins) and build scripts. Nothing runs on it until the user approves this exact
 /// head; a new push needs a new approval. `true`: the job now waits for that approval.
-async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work, where_: &str) -> Result<bool> {
+async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work) -> Result<bool> {
     if j.meta.untrusted_code {
         j.meta.build_files = changed_build_files(&w.clone, &w.repo_url, &j.meta.base, &git::base_ref(&w.branch), &j.head_before).await;
         if !j.meta.run_approved || j.meta.run_approved_head != j.head_before {
@@ -211,7 +213,7 @@ async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work, where_: &str) -> R
             j.status = JobStatus::AwaitingRunApproval;
             j.summary = format!("untrusted code at {}: approve before the agent or any setup runs", short(&j.head_before));
             ctx.db(|d| d.update_job(j))?;
-            ctx.notify(Kind::NeedsApproval, where_, "Untrusted code wants to run: review build files and approve");
+            note(ctx, j, Kind::NeedsApproval, "Untrusted code wants to run: review build files and approve");
             return Ok(true);
         }
     }
@@ -364,7 +366,7 @@ async fn inspect(
 }
 
 /// Nothing to deliver: finish. Otherwise set the status by level, then deliver or notify.
-async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level, where_: &str) -> Result<()> {
+async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level) -> Result<()> {
     if commits == 0 && j.replies.is_empty() {
         let summary = if j.summary.is_empty() { "nothing to do".into() } else { j.summary.clone() };
         return finish(ctx, j, summary);
@@ -378,10 +380,10 @@ async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level, where_: &s
     ctx.db(|d| d.update_job(j))?;
     match j.status {
         JobStatus::Approved => deliver(ctx, j.id).await?,
-        JobStatus::Ready => ctx.notify(Kind::Done, where_, "Suggestion ready to copy"),
+        JobStatus::Ready => note(ctx, j, Kind::Done, "Suggestion ready to copy"),
         _ => {
             let why = if clean { "draft ready".to_string() } else { format!("checks need you: {}", failed_names(&j.checks)) };
-            ctx.notify(Kind::NeedsApproval, where_, &why);
+            note(ctx, j, Kind::NeedsApproval, &why);
         }
     }
     Ok(())
@@ -399,7 +401,6 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let forge = ctx.forge(&j.repo)?;
     let verb = j.meta.verb;
     let has_code = !j.head_after.is_empty() && j.head_after != j.head_before && pushes_code(verb);
-    let where_ = format!("{}#{}", j.repo, j.number);
 
     let clone = PathBuf::from(&j.meta.clone);
     if has_code {
@@ -463,8 +464,19 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     j.status = JobStatus::Done;
     ctx.db(|d| d.update_job(&j))?;
     let pushed = if has_code { format!("pushed {} and ", short(&j.head_after)) } else { String::new() };
-    ctx.notify(Kind::Done, &where_, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
+    note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
     Ok(())
+}
+
+/// Notify about this job, linking its PR (or the draft PR it opened).
+fn note(ctx: &Ctx, j: &Job, kind: Kind, summary: &str) {
+    let mut ev = notify::Event::about(kind, &j.repo, j.target, j.number, summary);
+    ev.job = Some(j.id);
+    ev.pr_title = Some(j.meta.title.clone()).filter(|t| !t.is_empty());
+    if !j.meta.pr_url.is_empty() {
+        ev.url = Some(j.meta.pr_url.clone());
+    }
+    ctx.notify(&j.repo, &ev);
 }
 
 /// Commands the user can copy for a `suggest` job.

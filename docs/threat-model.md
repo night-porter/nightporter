@@ -193,6 +193,12 @@ now). It is anonymous: no ID and nothing about you or your repos is sent; GitHub
 address and the `nightporter/<version>` user agent. Night Porter never downloads or installs an
 update itself. Set `check_updates = false` to turn it off.
 
+Notification targets you add (`[[notifications.targets]]`) send each event's kind, repo, PR
+number, title and link, job id and a one-line summary to the webhook or command you name;
+never diffs, comments or tokens. Webhook URLs are never logged or shown in the TUI; keep them
+out of the file with `url_env`. The PR title is untrusted text: Slack messages escape it and
+Discord messages can't ping anyone.
+
 ## Out of scope
 
 - A trusted maintainer asking for something harmful on purpose. Trust is a decision you make;

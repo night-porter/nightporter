@@ -168,7 +168,18 @@ Run `nightporter --help` or `nightporter <command> --help` for the full list.
 ## Notifications
 
 You get a desktop notification when a job needs approval, fails or finishes, and when a new
-author lands in the inbox. Turn any of them off under `[notifications]` in `config.toml`.
+author lands in the inbox. Turn any of them off under `[notifications]` in `config.toml`. On
+Linux, clicking the notification opens the PR in your browser. macOS notifications can't do
+that (the click opens the app that shows them).
+
+To get them on your phone or in a chat too, add webhooks (Slack, Discord, ntfy, plain JSON) or a
+command under `[[notifications.targets]]`; see
+[Notification targets](/configuration#notification-targets). Check them with:
+
+```sh
+nightporter notify test          # every target, and the desktop
+nightporter notify test phone    # one target
+```
 
 ## Updates
 

@@ -151,11 +151,22 @@ enum Cmd {
         #[arg(long, default_value = "30m")]
         timeout: String,
     },
+    /// Notification targets (desktop, webhooks, commands).
+    Notify {
+        #[command(subcommand)]
+        cmd: NotifyCmd,
+    },
     /// Teach coding agents (Claude Code) how to work with Night Porter.
     Skill {
         #[command(subcommand)]
         cmd: SkillCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum NotifyCmd {
+    /// Send a sample event to one target (`desktop` for the popup), or to all of them.
+    Test { target: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -275,6 +286,7 @@ fn main() -> Result<()> {
             std::process::exit(code)
         }
         Cmd::Skill { cmd } => cmd_skill(&cmd),
+        Cmd::Notify { cmd: NotifyCmd::Test { target } } => notify_test(&paths, target.as_deref()),
         Cmd::Daemon => {
             init_tracing();
             rt()?.block_on(daemon::run(paths))
@@ -506,6 +518,13 @@ fn cmd_service(paths: &Paths, cmd: &ServiceCmd) -> Result<()> {
 
 /// The agent configured for a repo (Claude Code if the config can't be read).
 /// Commands that only read state.
+fn notify_test(paths: &Paths, target: Option<&str>) -> Result<()> {
+    let cfg = config::Config::load(paths)?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    println!("{}", rt.block_on(notify::test(&cfg.notifications, target))?);
+    Ok(())
+}
+
 fn read_only(cmd: &Cmd) -> bool {
     matches!(
         cmd,
