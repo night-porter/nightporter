@@ -44,6 +44,9 @@ pub struct Config {
     /// Once a day, ask GitHub for the latest release number (anonymous; see `update.rs`).
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Take `/nightporter approve|dismiss|retry|status` from your own comments on PRs/MRs.
+    #[serde(default = "yes")]
+    pub pr_commands: bool,
     /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr` or `rex`.
     #[serde(default)]
     pub handoff: Handoff,

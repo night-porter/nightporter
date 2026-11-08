@@ -59,6 +59,8 @@ Night Porter **never** merges, force-pushes, closes or approves.
   done and dismissed jobs
 - One view per repo (`nightporter repo <owner/name>`) of everything that shapes its jobs: level,
   agent, prompt files, reply style, trust, hours and checks
+- Control jobs from your phone: comment `/nightporter approve`, `dismiss`, `retry` or `status` on
+  the PR or MR (only your own account counts)
 - Start and stop from the TUI (`D`) or `nightporter start` / `nightporter stop`
 - A once-a-day, anonymous check for a new release (`check_updates`); it never updates itself
 - Leaves no files in your repositories (it uses its own branches and worktrees)

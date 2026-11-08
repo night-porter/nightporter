@@ -13,6 +13,8 @@ use std::fmt::Write as _;
 pub struct GitHub {
     pub host: String,
     pub me: String,
+    /// The token user's numeric id: commands on PRs are only taken from this id.
+    pub me_id: u64,
     pub api: Api,
     /// Maintainer label per repo (from config), to detect label requests.
     pub labels: HashMap<String, String>,
@@ -27,6 +29,8 @@ pub struct GitHub {
 #[derive(Deserialize)]
 struct User {
     login: String,
+    #[serde(default)]
+    id: u64,
     #[serde(rename = "type", default)]
     kind: String,
 }
@@ -72,6 +76,9 @@ struct Comment {
     line: Option<u64>,
     #[serde(default)]
     in_reply_to_id: Option<u64>,
+    /// Set when a GitHub App posted this on the user's behalf.
+    #[serde(default)]
+    performed_via_github_app: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +144,7 @@ impl GitHub {
         Self {
             host: host.into(),
             me: String::new(),
+            me_id: 0,
             api,
             labels: HashMap::new(),
             subscribed: HashSet::default(),
@@ -157,6 +165,7 @@ impl GitHub {
     pub async fn login(&mut self) -> Result<()> {
         let u: User = self.api.get("/user").await.context("GitHub login")?;
         self.me = u.login;
+        self.me_id = u.id;
         Ok(())
     }
 
@@ -568,6 +577,26 @@ impl GitHub {
             )
             .await?;
         Ok(v["html_url"].as_str().unwrap_or_default().to_string())
+    }
+
+    pub async fn controls(&self, repo: &RepoId, n: u64, since: &str) -> Result<Vec<super::ControlComment>> {
+        let cs: Vec<Comment> =
+            self.api.get_all(&format!("/repos/{}/issues/{n}/comments?per_page=100&since={since}", repo.path), 10).await?;
+        Ok(cs
+            .into_iter()
+            .filter_map(|c| {
+                let via_app = c.performed_via_github_app.as_ref().is_some_and(|v| !v.is_null());
+                let control = super::control_of(self.me_id, c.user.id, via_app, &c.body, &c.created_at, since)?;
+                Some(super::ControlComment { id: c.id.to_string(), control })
+            })
+            .collect())
+    }
+
+    pub async fn ack(&self, repo: &RepoId, comment: &str) -> Result<()> {
+        self.api
+            .send(Method::POST, &format!("/repos/{}/issues/comments/{comment}/reactions", repo.path), &json!({ "content": "+1" }))
+            .await?;
+        Ok(())
     }
 
     /// `org/team` membership, cached for an hour.

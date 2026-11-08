@@ -255,8 +255,54 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
         }
     }
     ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    if cfg.pr_commands
+        && let Err(e) = pr_commands(ctx, key).await
+    {
+        tracing::warn!("pr commands {}: {e:#}", key.1);
+    }
     let min = cursor.poll_interval_secs.unwrap_or(0);
     Ok(min)
+}
+
+/// Act on `/nightporter approve|dismiss|retry|status` comments you posted on a PR/MR that has a
+/// job. Only the token's own user id counts (see `forge::control_of`); each comment is acted on
+/// once (its id is recorded before acting) and gets a thumbs-up, or a short reply when it
+/// couldn't be done or asked for status.
+pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<()> {
+    // ponytail: newest job per PR, waiting or touched in 3 days; one API call each per poll.
+    let jobs = ctx.db(|d| d.command_jobs(crate::state::now() - 3 * 86400))?;
+    let forge = ctx.forges[key].lock().await;
+    for j in jobs.iter().filter(|j| j.repo.forge == key.0 && j.repo.host == key.1) {
+        let since = jiff::Timestamp::from_second(j.created_at)?.strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let cmds = match forge.controls(&j.repo, j.target, j.number, &since).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("{}#{} commands: {e:#}", j.repo, j.number);
+                continue;
+            }
+        };
+        for c in cmds {
+            let done_key = format!("cmd:{}:{}", j.repo.key(), c.id);
+            if ctx.db(|d| d.get(&done_key))?.is_some() {
+                continue;
+            }
+            ctx.db(|d| d.set(&done_key, "1"))?;
+            let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
+            tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
+            let sent = match res {
+                Ok(None) => forge.ack(&j.repo, j.target, j.number, &c.id).await,
+                Ok(Some(msg)) => forge.reply(&j.repo, j.target, j.number, None, &format!("{msg}\n{}", crate::prompts::FOOTER_MARK)).await,
+                Err(e) => {
+                    let msg = format!("Night Porter: {e:#}\n{}", crate::prompts::FOOTER_MARK);
+                    forge.reply(&j.repo, j.target, j.number, None, &msg).await
+                }
+            };
+            if let Err(e) = sent {
+                tracing::warn!("job {}: acknowledge command: {e:#}", j.id);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Classify one event: pending (trusted), inbox (unknown author) or dropped.
@@ -270,6 +316,11 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     // Night Porter's own replies are posted as you; never treat them as new requests.
     if own && e.body.contains(crate::prompts::FOOTER_MARK) {
         return drop("night porter reply");
+    }
+    // `/nightporter approve` and friends steer jobs (yours only, see `pr_commands`); from anyone
+    // they are never requests or review feedback.
+    if crate::forge::parse_control(&e.body).is_some() {
+        return drop("job command");
     }
     match e.mode() {
         Mode::MyPrs => {

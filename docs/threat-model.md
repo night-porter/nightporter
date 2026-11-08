@@ -19,7 +19,7 @@ security boundary is, and which protections cannot be turned off.
 
 | actor | trusted? | how they reach Night Porter |
 |---|---|---|
-| You | yes | config files, TUI approvals |
+| You | yes | config files, TUI approvals, `/nightporter approve` etc. in your own PR comments |
 | Maintainers (role in `trust.roles`, or allow-listed user, team or bot) | for **requests** | comments and reviews on your PRs, `/nightporter` commands, labels |
 | Anyone else on the forge | **no** | comments, issues, MRs, fork code |
 | Pack authors | no (reviewed by you at install, pinned to a commit) | prompt files |
@@ -57,6 +57,29 @@ security boundary is, and which protections cannot be turned off.
   builds and tools that a PR's code or a third-party check can control.
 - Team rules read every page of a team's members. If a `deny_teams` lookup fails, the author goes
   to the inbox instead of being trusted.
+
+### B1a. Job commands in PR comments
+
+`/nightporter approve|dismiss|retry|status` in a PR or MR comment steers Night Porter's newest job
+on it (`pr_commands = true` by default; `false` turns it off). Why this is safe to have on:
+
+- Only the token's own user counts, matched by numeric user ID (not login, which can be
+  renamed). Trust rules don't apply: maintainers, allow-listed users and bots can't issue them.
+  A GitHub comment posted by an app on your behalf (`performed_via_github_app`) doesn't count.
+  If the user ID is unknown, nothing counts.
+- Anyone who can post as you already holds your forge account (or a token Night Porter itself
+  could use), and could push to your branch directly; a comment gives them nothing more.
+- Agent-written replies are posted as you, so they are the one way text could come back with
+  your user ID: they have `/nightporter` neutralised and carry the hidden marker, and comments
+  with the marker are never read as commands.
+- The comment must be newer than the job, and each comment ID is recorded before it is acted
+  on, so an old or repeated comment never acts again (or on a later job).
+- `approve` only releases a job waiting for push approval, with no override for blocking checks;
+  approving a run of someone else's code (B4) still needs the TUI, which shows the changed build
+  files. B3 checks still run before the push. It never touches the PR itself: there is no merge,
+  close or forge approval.
+- Command comments, from anyone, are dropped at intake: never a request, never review feedback
+  for the agent.
 
 ### B2. The agent holds no forge credentials
 

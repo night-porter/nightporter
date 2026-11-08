@@ -475,3 +475,71 @@ async fn real_agent_smoke() {
     assert_ne!(j.replies, []);
     assert!(j.diff.contains("smoke.txt"), "the sandboxed agent must still be able to commit:\n{}", j.diff);
 }
+
+#[tokio::test]
+async fn pr_commands_only_from_my_user_id_once() {
+    let comments = r#"[
+        {"id":21,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:00Z"},
+        {"id":22,"user":{"login":"alice","id":2,"type":"User"},"author_association":"MEMBER","body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:01Z"},
+        {"id":23,"user":{"login":"me","id":1,"type":"User"},"performed_via_github_app":{"id":9},"body":"/nightporter retry","html_url":"","created_at":"2099-01-01T00:00:02Z"},
+        {"id":24,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:03Z"}]"#;
+    let w = world_with(
+        "",
+        vec![
+            ("GET", "/user", r#"{"login":"me","id":1,"type":"User"}"#.into()),
+            ("GET", "/repos/o/r/issues/1/comments", comments.into()),
+            ("POST", "/repos/o/r/issues/comments/21/reactions", "{}".into()),
+        ],
+    )
+    .await;
+    let ctx = &w.ctx;
+    let key = (ForgeKind::GitHub, "github.com".to_string());
+    daemon::poll(ctx, &key).await.unwrap();
+    // Command comments are never requests, whoever wrote them.
+    let dropped = ctx.db(|d| d.events_with(crate::state::Disposition::Dropped)).unwrap();
+    assert!(dropped.iter().any(|(e, _)| e.id == "gh-github.com-ic-22"));
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    job::run(ctx, id).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::AwaitingApproval);
+    let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
+    assert!(!prompt.contains("/nightporter"), "a command reached the agent");
+
+    daemon::pr_commands(ctx, &key).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Approved);
+    let posts = |w: &World| w.log.lock().unwrap().iter().filter(|(m, _, _)| m == "POST").cloned().collect::<Vec<_>>();
+    let p = posts(&w);
+    // 21 approved (thumbs-up); 22 (alice) and 23 (an app as me) ignored; 24 can't approve twice.
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert_eq!(p[0].1, "/repos/o/r/issues/comments/21/reactions");
+    assert_eq!(p[1].1, "/repos/o/r/issues/1/comments");
+    assert!(p[1].2.contains("nothing to approve") && p[1].2.contains(crate::prompts::FOOTER_MARK));
+    // Each comment is acted on once.
+    daemon::pr_commands(ctx, &key).await.unwrap();
+    assert_eq!(posts(&w).len(), 2);
+}
+
+#[tokio::test]
+async fn gitlab_pr_commands_and_award() {
+    use crate::forge::{Control, ControlComment, Target, gitlab::GitLab};
+    let (url, log) = mock(vec![
+        ("GET", "/user", r#"{"id":1,"username":"me"}"#.into()),
+        (
+            "GET",
+            "/projects/grp%2Fproj/merge_requests/3/notes",
+            r#"[{"id":12,"author":{"id":2,"username":"me2"},"body":"/nightporter dismiss","system":false,"created_at":"2099-01-01T00:00:02Z"},
+                {"id":11,"author":{"id":1,"username":"me"},"body":"/nightporter retry","system":false,"created_at":"2099-01-01T00:00:01Z"},
+                {"id":10,"author":{"id":1,"username":"me"},"body":"/nightporter status","system":false,"created_at":"2000-01-01T00:00:00Z"}]"#
+                .into(),
+        ),
+        ("POST", "/projects/grp%2Fproj/merge_requests/3/notes/11/award_emoji", "{}".into()),
+    ])
+    .await;
+    let mut f = Forge::GitLab(GitLab::new("git.example.org", Api::new(&url, "t".to_string().into(), true).unwrap()));
+    f.login().await.unwrap();
+    let repo = RepoId::new(ForgeKind::GitLab, "git.example.org", "grp/proj");
+    let got = f.controls(&repo, Target::Pr, 3, "2026-11-05T10:00:00Z").await.unwrap();
+    assert_eq!(got, vec![ControlComment { id: "11".into(), control: Control::Retry }]);
+    f.ack(&repo, Target::Pr, 3, "11").await.unwrap();
+    assert!(log.lock().unwrap().iter().any(|(m, p, _)| m == "POST" && p.contains("/notes/11/award_emoji?name=thumbsup")));
+}
