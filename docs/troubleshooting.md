@@ -45,11 +45,14 @@ Work through these in order:
 
 - `nightporter show <id>` has the agent’s log.
 - **Timeout**: raise `timeout` for that repo.
-- **Sandbox on Linux**: install `bubblewrap` and `socat`.
+- **Sandbox on Linux**: install `bubblewrap` and `socat` (Gemini CLI: `bubblewrap`).
 - **Tests need Docker or DDEV**: set `sandbox = false` for that repo. See
   [Sandboxing](/advanced#sandboxing).
-- **Commands blocked**: add them to `allow_commands` (Claude Code). Codex has no allow list: its
+- **Commands blocked**: add them to `allow_commands` (Claude Code, Gemini CLI). Codex has no allow list: its
   sandbox allows writes to the worktree only and no network; `sandbox = false` lifts that.
+- **Gemini CLI refused**: `too old` means updating to 0.67 or newer
+  (`npm install -g @google/gemini-cli`). `the branch has .gemini/settings.json` (or `.env`) means
+  that repo needs another agent. See [Gemini CLI](/advanced#gemini-cli).
 
 Fix the cause, then `nightporter retry <id>`.
 

@@ -53,9 +53,9 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | key | default | description |
 |---|---|---|
 | `subscribed` | `false` | repo files only |
-| `agent` | `claude` | `claude` (Claude Code), `opencode` or `codex` |
+| `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+) |
 | `agent_args` | `[]` | extra CLI args, e.g. `["--model", "opus"]` |
-| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code only: Codex has no per-command allow list |
+| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
@@ -64,9 +64,9 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
-| `sandbox` | `true` | OS sandbox for the agent's shell commands. Claude Code: Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux; fails closed. Codex: its own sandbox (`--sandbox workspace-write`, network off; `danger-full-access` when `false`). Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
-| `sandbox_domains` | `[]` | domains sandboxed commands may reach (Claude Code only; Codex jobs have no network) |
-| `sandbox_read_allow` | `[]` | extra folders in your home folder that sandboxed commands may read, e.g. `["~/.config/mytool"]`; `["~/"]` lifts the home-folder restriction. The worktree and common toolchain folders (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache`, …) are always readable. |
+| `sandbox` | `true` | OS sandbox for the agent's shell commands. Claude Code: Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux; fails closed. Codex: its own sandbox (`--sandbox workspace-write`, network off; `danger-full-access` when `false`). Gemini CLI: its tool sandbox (Seatbelt on macOS, bubblewrap on Linux; network off). Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
+| `sandbox_domains` | `[]` | domains sandboxed commands may reach (Claude Code only; Codex and Gemini CLI jobs have no network) |
+| `sandbox_read_allow` | `[]` | extra folders in your home folder that sandboxed commands may read, e.g. `["~/.config/mytool"]`; `["~/"]` lifts the home-folder restriction. The worktree and common toolchain folders (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache`, …) are always readable. Claude Code only: Gemini CLI's sandbox reads the worktree, its git dir and the folders on your `PATH`. |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
 | `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |
@@ -87,7 +87,7 @@ global deny.
 - Maintainer mode is capped at `draft`.
 - The secrets, protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*`, keys, and the agent instruction files `CLAUDE.md`,
-  `AGENTS.md`, `.claude/`, `.opencode/`, `.codex/`.
+  `AGENTS.md`, `GEMINI.md`, `.claude/`, `.opencode/`, `.codex/`, `.gemini/`, `.cursor/`.
 - Night Porter never merges, force-pushes, closes or approves.
 
 ## Examples

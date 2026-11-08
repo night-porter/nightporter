@@ -6,7 +6,7 @@ description: "Install Night Porter with Homebrew, the install script or Cargo, r
 
 Night Porter watches GitHub and GitLab for activity on your PRs and MRs: review comments, failing
 CI and merge conflicts. When something happens, it runs your coding agent (Claude Code,
-OpenCode or Codex) in a separate git worktree, checks the result, and then pushes and replies, or waits
+OpenCode, Codex or Gemini CLI) in a separate git worktree, checks the result, and then pushes and replies, or waits
 for you. How far it goes is up to you.
 
 ::: warning Early development
@@ -20,13 +20,14 @@ Night Porter is 0.x. Expect breaking changes.
 | `git` | everything |
 | `gh` | GitHub |
 | `glab` | GitLab (gitlab.com or self-hosted) |
-| `claude`, `opencode` or `codex` | the agent (Codex: `npm install -g @openai/codex` or `brew install --cask codex`) |
+| `claude`, `opencode`, `codex` or `gemini` | the agent (Codex: `npm install -g @openai/codex` or `brew install --cask codex`; Gemini CLI 0.67 or newer: `npm install -g @google/gemini-cli`) |
 | `gitleaks` | optional, a stronger secrets check |
 | `herdr` or Rex | optional, for [taking over jobs](/herdr) |
-| `bubblewrap` and `socat` | Linux only, for Claude Code’s sandbox |
+| `bubblewrap` and `socat` | Linux only, for Claude Code’s sandbox (Gemini CLI needs `bubblewrap`) |
 
 Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run `claude`,
-`opencode` or `codex` once so it’s logged in too.
+`opencode` or `codex` once so it’s logged in too. Gemini CLI needs a paid Gemini API key
+(`GEMINI_API_KEY` in the daemon’s environment) or a Gemini Code Assist Standard/Enterprise login.
 
 ## 2. Install Night Porter
 
@@ -90,7 +91,7 @@ screen readers and in scripts.
 It asks for:
 
 1. **Forges**: GitHub, GitLab or both, and the host if it’s self-hosted.
-2. **Default agent**: Claude Code, OpenCode or Codex.
+2. **Default agent**: Claude Code, OpenCode, Codex or Gemini CLI.
 3. **A tool check**: the same as `nightporter doctor`. Nothing is installed for you; it prints
    the command to fix each problem.
 4. **Where your clones live** (`~/coding` by default). Night Porter works on the clones you
@@ -147,7 +148,7 @@ nightporter unsubscribe acme/api
 ```
 
 Or press `4` in the TUI: the space bar (or `s`) toggles a repo, `l` cycles its autonomy level (it
-asks before `auto`) and `a` switches its agent (Claude Code → OpenCode → Codex). These write the
+asks before `auto`) and `a` switches its agent (Claude Code → OpenCode → Codex → Gemini CLI). These write the
 repo file for you. `Enter` on a repo, or `nightporter repo acme/api`, shows everything that shapes
 work on it: level, agent, prompt files, reply style, trust, hours and checks.
 

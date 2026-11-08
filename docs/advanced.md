@@ -96,9 +96,9 @@ max_ci_attempts = 3
 
 ```toml
 [defaults]
-agent = "claude"                                # or "opencode", "codex"
+agent = "claude"                                # or "opencode", "codex", "gemini"
 agent_args = ["--model", "opus"]
-allow_commands = ["npm test", "npm run lint"]   # prefix match, Claude Code only
+allow_commands = ["npm test", "npm run lint"]   # prefix match, Claude Code and Gemini CLI
 prompt = "prompts/house-style.md"               # relative to the config dir
 ```
 
@@ -147,6 +147,35 @@ are ignored (`--ignore-user-config --ignore-rules --ephemeral`); the login still
 `CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and `sandbox_domains`
 don't apply, and `max_budget_usd` is Claude Code only. Install it with
 `npm install -g @openai/codex` or `brew install --cask codex`, then run `codex` once to log in.
+
+### Gemini CLI
+
+With `agent = "gemini"`, Night Porter runs `gemini -p` (0.67 or newer; older versions are
+refused because they ignore the sandbox setting) with:
+
+- its own system settings file (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`, which wins over your
+  `~/.gemini/settings.json`): Gemini's tool sandbox on (Seatbelt on macOS, bubblewrap on Linux),
+  network off for commands, hooks off, auto-update off, the repo's `.env` not loaded;
+- its own admin policy (`--admin-policy`, which wins over your policies): only the git
+  subcommands Night Porter allows plus your `allow_commands`, the usual deny list, no web tools,
+  and no command may ask to widen the sandbox;
+- `--approval-mode default` (never YOLO), `--extensions none` and no MCP servers.
+
+The sandbox lets commands read the worktree, its git dir and the folders on your `PATH` (plus
+their parent when they end in `bin`, e.g. `~/.cargo`), and write the worktree and temp folders.
+`sandbox_read_allow` and `sandbox_domains` don't apply. A branch that carries
+`.gemini/settings.json` or `.gemini/.env` isn't run with Gemini CLI: headless Gemini has to trust
+the workspace, and it would load those files. `sandbox = false` turns the tool sandbox off.
+Gemini CLI itself won't edit build files (`package.json`, lockfiles, `Cargo.toml`,
+`Makefile`, `Dockerfile`, …) without a person confirming, so in these unattended runs it can't
+change them. Gemini CLI reports no cost, so `max_budget_usd` doesn't apply. Install it with
+`npm install -g @google/gemini-cli`; it needs a paid `GEMINI_API_KEY` in the daemon's
+environment, or a Gemini Code Assist Standard/Enterprise login (Google moved consumer accounts to
+Antigravity in June 2026).
+
+Cursor CLI and Amp aren't supported: neither can run a job with only Night Porter's settings
+(both load sandbox, hook or permission files from the repo, which override yours) and a sandbox
+that fails closed. See the [threat model](/threat-model#agent-sandboxes).
 
 OpenCode has no sandbox.
 

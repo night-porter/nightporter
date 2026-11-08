@@ -23,7 +23,7 @@ security boundary is, and which protections cannot be turned off.
 | Maintainers (role in `trust.roles`, or allow-listed user, team or bot) | for **requests** | comments and reviews on your PRs, `/nightporter` commands, labels |
 | Anyone else on the forge | **no** | comments, issues, MRs, fork code |
 | Pack authors | no (reviewed by you at install, pinned to a commit) | prompt files |
-| The agent (Claude Code / OpenCode / Codex) | **no**; treated as possibly confused or injected | runs in a worktree |
+| The agent (Claude Code / OpenCode / Codex / Gemini CLI) | **no**; treated as possibly confused or injected | runs in a worktree |
 
 ## Boundaries and controls
 
@@ -78,7 +78,7 @@ security boundary is, and which protections cannot be turned off.
   sandboxed commands can't read your home folder except the worktree, its git dir and common
   toolchain folders (`sandbox_read_allow` adds more). The agent's git uses its own config with
   only your name and email.
-- The prompt reaches Claude Code and Codex on stdin, not as a command-line argument (visible in `ps`).
+- The prompt reaches Claude Code, Codex and Gemini CLI on stdin, not as a command-line argument (visible in `ps`).
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
@@ -92,10 +92,25 @@ security boundary is, and which protections cannot be turned off.
   `~/.codex/config.toml` (MCP servers, hooks, profiles) and execpolicy rules don't load; the login
   still comes from `CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and
   `sandbox_domains` don't apply.
+- With Gemini CLI (0.67 or newer; older versions are refused, since they silently ignore the
+  sandbox setting), Night Porter writes a system settings file to the job directory
+  (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`, which overrides user and workspace settings) that turns on
+  Gemini's tool sandbox with the network off, and turns off hooks, the repo's `.env` and
+  auto-update. An admin policy (`--admin-policy`, above your own policies) denies every shell
+  command except the allowed git subcommands and `allow_commands`, always denies the deny list,
+  web fetch/search and the memory tool, and denies any command that asks for
+  `additional_permissions` (Gemini's way to widen the sandbox for one call). It runs with
+  `--approval-mode default` (never YOLO), `--extensions none` and no MCP servers. Headless Gemini
+  must trust the workspace, so a branch with `.gemini/settings.json` or `.gemini/.env` is refused.
 - Gaps: OpenCode has no sandbox and no read denies (and its prompt is still an argument). Codex's
   sandbox limits writes and network but not reads: its commands can read files in your home
   folder (credentials stay out of its environment, and with the network off it can't send them
   anywhere, but a reply it writes could quote them; draft level shows you every reply first).
+  Gemini CLI's sandbox limits reads to the worktree, its git dir, system folders and the folders
+  on your `PATH` (with the parent of each `bin`, so `~/.cargo/bin` opens `~/.cargo` including
+  `credentials.toml`, and `~/bin` opens your whole home folder); it can't deny paths inside those
+  the way Claude Code does. Its sandbox and policy setup have been checked against its source
+  (v0.67.0 and main, 2026-11-06), not yet in a real run.
   Repos with `sandbox = false` (e.g. for
   Docker/DDEV tests) run `allow_commands` as you. Keep `allow_commands` small there, and treat
   `auto` mode with that in mind.
@@ -130,7 +145,7 @@ commit SHA.
 Any job on a branch you didn't write (any maintainer request on someone else's PR or MR), and any
 `reproduce` that runs an environment or allowed commands, needs
 your approval **before the agent starts at all**: the branch can carry agent configuration
-(CLAUDE.md, `.codex/`, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
+(CLAUDE.md, GEMINI.md, `.codex/`, opencode.json, plugins) and build scripts. The approval is bound to the head SHA you
 saw; if they push again, Night Porter asks again. The same applies to your own PR when its head
 branch lives in someone else's fork. Commits someone else pushed to your own branch are not
 detected. `reproduce` jobs that may run commands need
@@ -170,6 +185,37 @@ now). It is anonymous: no ID and nothing about you or your repos is sent; GitHub
 address and the `nightporter/<version>` user agent. Night Porter never downloads or installs an
 update itself. Set `check_updates = false` to turn it off.
 
+### Agent sandboxes
+
+What each agent gets, as Night Porter configures it (`sandbox = true`, the default). Environment
+scrubbing, the empty `gh`/`glab` config, the git overrides and the B3 checks apply to all of them.
+
+| | Claude Code | Codex | Gemini CLI | OpenCode |
+|---|---|---|---|---|
+| OS sandbox for commands | yes (Seatbelt / bubblewrap), fails closed | yes (Seatbelt / Landlock) | yes (Seatbelt / bubblewrap); version-gated | **no** |
+| Command allow list | yes | **no** (sandbox only) | yes (admin policy) | yes |
+| Commands' network | off, or listed domains | off | off | **open** |
+| Commands' writes | worktree | worktree | worktree, temp folders | **anywhere** |
+| Commands' reads | worktree, git dir, toolchain folders; secrets inside them denied | **anywhere** | worktree, git dir, system and `PATH` folders | **anywhere** |
+| File tools outside the worktree | blocked | as commands | as commands | denied (`external_directory`) |
+| Repo agent config ignored | yes (`--setting-sources user`) | yes (`--ignore-user-config`) | refused if `.gemini/settings.json` or `.gemini/.env` | **no** (`--pure` skips plugins only) |
+| Your hooks / MCP / plugins | hooks off; MCP off; plugins load | config not loaded | hooks, extensions, MCP off | MCP off |
+| Prompt off the command line | yes | yes | yes | **no** |
+
+Not supported, and why:
+
+- **Cursor CLI** (`cursor-agent`): a run can't be limited to Night Porter's settings. The repo's
+  `.cursor/sandbox.json` overrides your own and can open the network, and the repo's
+  `.cursor/hooks.json`, `.cursor/mcp.json` and plugins load; `--disable-project-configs` only skips
+  `.cursor/cli.json`, and there is no documented config-directory override. Cursor says a
+  locked-down headless mode doesn't exist yet (forum, 2026-10-15). Where its sandbox can't start
+  (Linux without Landlock), it asks for approval instead, which `--force` answers yes. Revisit if
+  it gets per-run setting sources (its TypeScript SDK has them).
+- **Amp** (`amp -x`): no OS sandbox; tools run without asking by default; the repo's
+  `.amp/settings.json` overrides user settings, including `amp.permissions`, and
+  `--settings-file` only replaces the user file.
+- **Antigravity** (Google's successor to Gemini CLI for consumer accounts): not evaluated.
+
 ## Out of scope
 
 - A trusted maintainer asking for something harmful on purpose. Trust is a decision you make;
@@ -187,4 +233,5 @@ look like options.
 - [x] Claude Code's sandbox applies in `-p` mode (macOS, real run, 2026-11-05)
 - [ ] Same check on Linux (bubblewrap)
 - [ ] Sandbox for OpenCode runs (macOS `sandbox-exec`, Linux bubblewrap)
+- [ ] Gemini CLI's tool sandbox and admin policy in a real headless run (macOS and Linux)
 - [x] First independent review (2026-11-05): findings fixed, see git history
