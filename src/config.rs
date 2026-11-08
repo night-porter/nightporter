@@ -102,11 +102,78 @@ pub struct Notifications {
     pub done: bool,
     #[serde(default = "yes")]
     pub new_author: bool,
+    /// Webhooks and commands (`[[notifications.targets]]`); the toggles above are for the
+    /// desktop popup only.
+    #[serde(default)]
+    pub targets: Vec<NotifyTarget>,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { needs_approval: true, failed: true, done: true, new_author: true }
+        Self { needs_approval: true, failed: true, done: true, new_author: true, targets: Vec::new() }
+    }
+}
+
+/// One `[[notifications.targets]]` entry: a webhook or a command.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyTarget {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: TargetType,
+    /// Webhook URL. Never logged or shown: it often holds a secret.
+    #[serde(default, skip_serializing)]
+    pub url: Option<String>,
+    /// Read the webhook URL from this environment variable instead (of the daemon's process).
+    #[serde(default)]
+    pub url_env: Option<String>,
+    #[serde(default)]
+    pub format: WebhookFormat,
+    /// argv for `type = "command"`; run without a shell, the event as JSON on stdin.
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Only these kinds; empty = all.
+    #[serde(default)]
+    pub kinds: Vec<crate::notify::Kind>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetType {
+    Webhook,
+    Command,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookFormat {
+    #[default]
+    Json,
+    Slack,
+    Discord,
+    Ntfy,
+}
+
+impl Notifications {
+    fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for t in &self.targets {
+            let n = &t.name;
+            if n.is_empty() || n == "desktop" || !seen.insert(n) {
+                bail!("notification target name {n:?} is empty, reserved (desktop) or used twice");
+            }
+            match t.kind {
+                TargetType::Webhook => match (&t.url, &t.url_env) {
+                    (Some(u), None) if u.starts_with("https://") || u.starts_with("http://") => {}
+                    (None, Some(_)) => {}
+                    (Some(_), None) => bail!("notification target {n:?}: url must start with https:// or http://"),
+                    _ => bail!("notification target {n:?}: a webhook needs exactly one of url or url_env"),
+                },
+                TargetType::Command if t.command.is_empty() => bail!("notification target {n:?}: command is empty"),
+                TargetType::Command => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -355,6 +422,7 @@ impl Config {
         if cfg.version > VERSION {
             bail!("config version {} is newer than this nightporter ({VERSION}); upgrade nightporter", cfg.version);
         }
+        cfg.notifications.validate()?;
         // Validate defaults eagerly so typos surface at load, not at the first event.
         cfg.resolve(None)?;
         Ok(cfg)

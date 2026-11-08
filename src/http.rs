@@ -107,6 +107,20 @@ impl Api {
     }
 }
 
+/// A client with no credentials, for notification webhooks: short timeout, few redirects.
+pub fn plain() -> reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("nightporter/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .unwrap_or_default()
+    })
+    .clone()
+}
+
 async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response> {
     let s = resp.status();
     if s.is_success() {

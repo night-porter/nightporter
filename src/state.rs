@@ -142,6 +142,9 @@ pub struct JobMeta {
     pub build_files: Vec<String>,
     #[serde(default)]
     pub pr_url: String,
+    /// The PR/MR or issue title, for notifications.
+    #[serde(default)]
+    pub title: String,
     /// Indexes of replies already posted (delivery can be retried without double-posting).
     #[serde(default)]
     pub posted: Vec<usize>,

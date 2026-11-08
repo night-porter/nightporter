@@ -51,8 +51,8 @@ impl Ctx {
             tracing::warn!("{msg}");
         }
     }
-    pub fn notify(&self, kind: Kind, title: &str, body: &str) {
-        notify::send(&self.cfg().notifications, kind, title, body);
+    pub fn notify(&self, ev: &notify::Event) {
+        notify::send(&self.cfg().notifications, ev);
     }
     fn subscribed(&self, cfg: &Config) -> Vec<(RepoId, crate::config::RepoSettings)> {
         self.clones()
@@ -116,7 +116,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let n = db.recover()?;
     if n > 0 {
         tracing::warn!("{n} job(s) were interrupted by a restart; their requests are queued again");
-        notify::send(&cfg.notifications, Kind::Failed, "restarted", &format!("{n} interrupted job(s) re-queued"));
+        notify::send(&cfg.notifications, &notify::Event::new(Kind::Failed, "restarted", &format!("{n} interrupted job(s) re-queued")));
     }
     let forges = connect(&cfg).await?;
     let clones = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts);
@@ -320,11 +320,15 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     let new = ctx.db(|d| d.add_event(&e, disp, &reason))?;
     // One notification per waiting author, not one per comment (a stranger can post a lot).
     if new && disp == Disposition::Inbox && ctx.db(|d| d.inbox_count(&e.repo, &e.author))? == 1 {
-        ctx.notify(
+        let mut ev = notify::Event::about(
             Kind::NewAuthor,
-            &format!("@{} on {}#{}", e.author, e.repo, e.number),
-            "New author waiting in the inbox: allow or ignore?",
+            &e.repo,
+            e.target,
+            e.number,
+            &format!("@{} is waiting in the inbox: allow or ignore?", e.author),
         );
+        ev.title = format!("@{} on {}", e.author, ev.title);
+        ctx.notify(&ev);
     }
     Ok(())
 }
@@ -374,7 +378,14 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
                 for id in &ids {
                     ctx.db(|d| d.set_disposition(id, Disposition::Dropped, "CI-fix attempts exhausted"))?;
                 }
-                ctx.notify(Kind::Failed, &format!("{repo}#{n}"), &format!("CI still failing after {tries} attempts; stopped retrying"));
+                let target = evs[0].0.target;
+                ctx.notify(&notify::Event::about(
+                    Kind::Failed,
+                    &repo,
+                    target,
+                    n,
+                    &format!("CI still failing after {tries} attempts; stopped retrying"),
+                ));
                 continue;
             }
             ctx.db(|d| d.set_ci_attempts(&repo, n, tries + 1))?;
@@ -433,7 +444,9 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             if let Err(e) = res {
                 tracing::error!("job {id}: {e:#}");
                 let _ = c.db(|d| d.fail(id, &format!("{e:#}")));
-                c.notify(Kind::Failed, &format!("job {id} failed"), &format!("{e:#}"));
+                let mut ev = notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &format!("job {id} failed: {e:#}"));
+                ev.job = Some(id);
+                c.notify(&ev);
             }
             c.running.lock().unwrap().remove(&id);
         });

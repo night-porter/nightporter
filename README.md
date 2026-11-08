@@ -50,6 +50,8 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
 - Several active windows per day; events outside them are queued
+- Desktop notifications, plus webhooks (Slack, Discord, ntfy, JSON) and commands for your phone
+  or chat; `nightporter notify test` checks them
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional
   AI-disclosure footer
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)

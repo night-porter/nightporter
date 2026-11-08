@@ -66,6 +66,11 @@ pub static SETTINGS: &[Setting] = &[
     s("notifications.failed", Bool, "Desktop notification when a job fails."),
     s("notifications.done", Bool, "Desktop notification when a job is done."),
     s("notifications.new_author", Bool, "Desktop notification when someone untrusted lands in the inbox."),
+    s(
+        "notifications.targets",
+        Info,
+        "Webhooks (Slack, Discord, ntfy, JSON) and commands that also get notifications. Press e to edit the file; check with nightporter notify test.",
+    ),
     // Defaults for every repo (each repo file can override them)
     s("defaults.agent", Choice(&["claude", "opencode", "codex"]), "Coding agent: Claude Code, OpenCode or Codex."),
     s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),

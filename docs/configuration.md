@@ -21,7 +21,7 @@ Files:
 
 `NIGHTPORTER_HOME=/some/dir` moves both to `/some/dir/{config,data}` (handy for testing).
 Other environment variables: `NIGHTPORTER_LOG` (log filter, e.g. `nightporter=debug`),
-`NIGHTPORTER_NO_NOTIFY` (no desktop notifications) and `NO_COLOR` (no colours in the TUI).
+`NIGHTPORTER_NO_NOTIFY` (no notifications at all) and `NO_COLOR` (no colours in the TUI).
 
 Repo files are keyed by forge, not host, so a gitlab.com repo and a self-hosted GitLab repo with
 the same `owner/repo` path share one file.
@@ -46,7 +46,8 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `handoff` | `auto` | where `h` opens a job: `auto`, `herdr` or `rex` |
 | `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
 | `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
-| `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author` |
+| `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author`: the desktop notification for each kind |
+| `[[notifications.targets]]` | none | webhooks and commands that also get notifications; see [Notification targets](#notification-targets) |
 
 ## Per-repo keys (`[defaults]` or a repo file)
 
@@ -89,6 +90,48 @@ global deny.
   include CI configs, CODEOWNERS, `.env*`, keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `.claude/`, `.opencode/`, `.codex/`.
 - Night Porter never merges, force-pushes, closes or approves.
+
+## Notification targets
+
+Besides the desktop notification, each event can go to webhooks and commands:
+
+```toml
+[[notifications.targets]]
+name = "phone"
+type = "webhook"
+url_env = "NIGHTPORTER_NTFY_URL"   # e.g. https://ntfy.sh/my-secret-topic
+format = "ntfy"
+kinds = ["needs_approval", "failed"]
+
+[[notifications.targets]]
+name = "team"
+type = "webhook"
+url = "https://hooks.slack.com/services/..."
+format = "slack"
+
+[[notifications.targets]]
+name = "log"
+type = "command"
+command = ["/usr/local/bin/np-hook", "--quiet"]
+```
+
+| key | description |
+|---|---|
+| `name` | your name for it, used by `notify` lists and `nightporter notify test <name>`. `desktop` is taken |
+| `type` | `webhook` or `command` |
+| `url` / `url_env` | webhooks: the URL, or the environment variable that holds it (one of the two). The variable must be set where the daemon runs (launchd and systemd don't read your shell profile) |
+| `format` | webhooks: `json` (default), `slack`, `discord` or `ntfy` |
+| `command` | commands: the program and its arguments. Run without a shell; the event comes as JSON on stdin |
+| `kinds` | only these: `needs_approval`, `failed`, `done`, `new_author`. Default: all |
+
+Every event has `kind`, `title` (e.g. `owner/repo#7`), `summary`, and where they apply `repo`,
+`number`, `pr_title`, `url` (the PR or MR) and `job`. `json` webhooks and commands get exactly
+that. `slack` and `discord` get a short message with the link; `ntfy` gets the PR title and
+summary as the message, a `Title`, `Tags` by kind and a `Click` link to the PR.
+
+Sending is best effort: a target gets 10 seconds, failures are logged, nothing is retried.
+Webhook URLs are never logged. `nightporter notify test [name]` sends a sample event (ignoring
+`kinds`) and prints what worked.
 
 ## Examples
 
