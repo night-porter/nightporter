@@ -55,7 +55,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | key | default | description |
 |---|---|---|
 | `subscribed` | `false` | repo files only |
-| `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+) |
+| `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+, experimental) |
 | `agent_args` | `[]` | extra CLI args, e.g. `["--model", "opus"]` |
 | `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |

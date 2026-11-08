@@ -115,7 +115,7 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
   `~/.codex/config.toml` (MCP servers, hooks, profiles) and execpolicy rules don't load; the login
   still comes from `CODEX_HOME`. Codex has no per-command allow list, so `allow_commands` and
   `sandbox_domains` don't apply.
-- With Gemini CLI (0.67 or newer; older versions are refused, since they silently ignore the
+- With Gemini CLI (experimental: not yet run against a real Gemini CLI; 0.67 or newer; older versions are refused, since they silently ignore the
   sandbox setting), Night Porter writes a system settings file to the job directory
   (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`, which overrides user and workspace settings) that turns on
   Gemini's tool sandbox with the network off, and turns off hooks, the repo's `.env` and

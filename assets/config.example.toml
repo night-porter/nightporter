@@ -47,7 +47,7 @@ new_author = true
 # kinds = ["needs_approval", "failed"]
 
 [defaults]
-agent = "claude"            # claude | opencode | codex
+agent = "claude"            # claude | opencode | codex | gemini (experimental)
 level = "draft"             # observe | suggest | draft | auto
 triggers = ["review_comment", "review", "comment", "ci_failure", "merge_conflict"]
 debounce = "2m"
@@ -56,7 +56,7 @@ max_ci_attempts = 3
 # ci_auto = false
 timeout = "30m"
 # max_budget_usd = 2.0      # Claude Code only
-sandbox = true              # OS sandbox for agent commands (Claude Code, Codex); fails closed
+sandbox = true              # OS sandbox for agent commands (Claude Code, Codex, Gemini CLI); fails closed
 # sandbox_domains = []      # domains sandboxed commands may reach
 # allow_commands = ["npm test", "cargo test"]
 

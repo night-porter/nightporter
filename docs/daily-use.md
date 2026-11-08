@@ -92,7 +92,7 @@ and checks. `e` there edits the repo's file.
 
 ## From your phone
 
-Away from the TUI, comment on the PR or MR (in the GitHub or GitLab app, say):
+Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Gitea app or web page, say):
 
 | comment | does |
 |---|---|

@@ -4,9 +4,9 @@ description: "Take over a Night Porter job interactively in herdr, Rex, tmux, Ze
 
 # Working with herdr, Rex, tmux and Zellij
 
-Night Porter works with [herdr](https://herdr.dev) and
-[Rex](https://www.superlogical.com/rex). They’re where you run and watch agents; Night Porter is
-what runs while you’re not there.
+Night Porter works with [herdr](https://herdr.dev),
+[Rex](https://www.superlogical.com/rex), tmux and Zellij, or opens a new terminal window. They’re
+where you run and watch agents; Night Porter is what runs while you’re not there.
 
 ## Take over a job
 

@@ -1,9 +1,10 @@
 # Working with Night Porter
 
 Night Porter is a daemon plus a terminal UI that runs on the user's machine. While they're away it
-watches GitHub and GitLab for review comments, failing CI and merge conflicts on their PRs, runs a
-coding agent on each one in a separate git worktree, checks the result, and then pushes and
-replies, or waits for the user's approval. Docs: https://docs.night-porter.com
+watches GitHub, GitLab and Forgejo/Gitea (Codeberg, gitea.com, self-hosted) for review comments,
+failing CI and merge conflicts on their PRs, runs a coding agent (Claude Code, OpenCode, Codex, or
+Gemini CLI, which is experimental) on each one in a separate git worktree, checks the result, and
+then pushes and replies, or waits for the user's approval. Docs: https://docs.night-porter.com
 
 ## Looking around (always fine)
 
@@ -19,6 +20,10 @@ nightporter events --json   # one JSON line per job or inbox change, until inter
 nightporter wait <id>       # until done (exit 0), failed/rejected (1), needs the user (2), timeout (3)
 ```
 
+A repo's level, agent and notifications can change by time of day: a `[[schedule]]` window may set
+its own `level`, `agent` and `notify` (say draft by day, auto overnight). `nightporter repo` shows
+the windows; the Repos tab notes `(now auto, from window)` while one overrides the repo's own value.
+
 ## Acting (only when the user asks for that specific action)
 
 ```sh
@@ -28,7 +33,10 @@ nightporter retry <id>      # run the same requests again
 nightporter dismiss <id>... # put jobs away: nothing pushed or posted; they stay in History
 nightporter restore <id>    # bring a dismissed job back
 nightporter purge <id>...   # delete finished or dismissed jobs and their logs for good (asks; --yes skips)
-nightporter handoff <id>    # open the job in herdr or Rex with a briefed agent
+nightporter handoff <id>    # open the job with a briefed agent in herdr, Rex, tmux, Zellij or a new
+                            # terminal (config `handoff`; `auto` falls back to printing the command)
+nightporter notify test [target]  # send a sample notification to the desktop and/or webhook and
+                            # command targets ([[notifications.targets]]); it reaches real people
 nightporter inbox allow-once <event> | allow <user> --repo <r> | deny <user> --repo <r> | ignore <event>
 nightporter inbox restore <event>   # put an ignored event back in the inbox
 nightporter pause | resume  # stop or restart new jobs
@@ -39,6 +47,12 @@ nightporter update          # check GitHub for a newer release; prints the upgra
 
 These commands refuse to run inside a Night Porter job (`NIGHTPORTER_JOB` is set), so the
 unattended agent can't approve its own work.
+
+The user can also act from their phone by commenting `/nightporter approve`, `dismiss`, `retry` or
+`status` on the PR or MR. Only comments from the user the token belongs to count (matched by user
+id); Night Porter acts on its newest job for that PR and reacts with a thumbs-up. Never post these
+comments yourself unless the user asks for that exact action: on the forge they are the user's
+approval.
 
 ## Rules
 

@@ -176,6 +176,12 @@ don't apply, and `max_budget_usd` is Claude Code only. Install it with
 
 ### Gemini CLI
 
+::: warning Experimental
+Gemini CLI support is new in 0.3 and hasn't been run against a real Gemini CLI yet, only
+against tests. Try it on a repo where `draft` or `suggest` is the level, and
+[report](/reporting-issues) what you see.
+:::
+
 With `agent = "gemini"`, Night Porter runs `gemini -p` (0.67 or newer; older versions are
 refused because they ignore the sandbox setting) with:
 
