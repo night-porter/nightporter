@@ -47,7 +47,7 @@ pub static SETTINGS: &[Setting] = &[
     // Global
     s("code_dir", Text, "Folder where your clones live."),
     s("scan_depth", Int, "How many folders deep to look for clones under code_dir."),
-    s("accounts", Info, "Forge accounts (GitHub / GitLab and host). Press S for the setup wizard, or e to edit the file."),
+    s("accounts", Info, "Forge accounts (GitHub / GitLab / Forgejo and host). Press S for the setup wizard, or e to edit the file."),
     s("poll_interval", Text, "How often to check for new activity, e.g. 2m. Never faster than the forge allows."),
     s("sweep_interval", Text, "How often to sweep open PRs for merge conflicts and CI, e.g. 10m."),
     s("max_concurrent_jobs", Int, "Jobs running at once, across all repos."),
@@ -103,7 +103,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.trust.roles", List, "Trusted roles: owner, maintainer, member, collaborator, contributor, none."),
     s("defaults.trust.allow_users", List, "Always-trusted usernames."),
     s("defaults.trust.deny_users", List, "Never-trusted usernames (repo files can't undo these)."),
-    s("defaults.trust.allow_teams", List, "Trusted teams: org/team on GitHub, group on GitLab."),
+    s("defaults.trust.allow_teams", List, "Trusted teams: org/team on GitHub and Forgejo, group on GitLab."),
     s("defaults.trust.deny_teams", List, "Never-trusted teams."),
     s("defaults.trust.allow_bots", List, "Trusted bots, e.g. coderabbitai[bot]. Bots are never trusted by role."),
     risky("defaults.trust.open", Bool, "true", "Trust everyone. Caps the level at suggest."),

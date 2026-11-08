@@ -1,5 +1,6 @@
-//! Forge-neutral types plus enum dispatch over GitHub and GitLab.
+//! Forge-neutral types plus enum dispatch over GitHub, GitLab and Forgejo/Gitea.
 
+pub mod forgejo;
 pub mod github;
 pub mod gitlab;
 
@@ -12,6 +13,9 @@ use std::fmt;
 pub enum ForgeKind {
     GitHub,
     GitLab,
+    /// Forgejo and Gitea (one API). `gitea` is accepted in config.
+    #[serde(alias = "gitea")]
+    Forgejo,
 }
 
 impl ForgeKind {
@@ -19,12 +23,21 @@ impl ForgeKind {
         match self {
             ForgeKind::GitHub => "github",
             ForgeKind::GitLab => "gitlab",
+            ForgeKind::Forgejo => "forgejo",
+        }
+    }
+    pub fn default_host(self) -> &'static str {
+        match self {
+            ForgeKind::GitHub => "github.com",
+            ForgeKind::GitLab => "gitlab.com",
+            ForgeKind::Forgejo => "codeberg.org",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "github" => Some(Self::GitHub),
             "gitlab" => Some(Self::GitLab),
+            "forgejo" | "gitea" => Some(Self::Forgejo),
             _ => None,
         }
     }
@@ -293,10 +306,11 @@ pub struct Reply {
     pub body: String,
 }
 
-/// A forge client. Enum dispatch (two forges, no trait objects needed).
+/// A forge client. Enum dispatch (three forges, no trait objects needed).
 pub enum Forge {
     GitHub(github::GitHub),
     GitLab(gitlab::GitLab),
+    Forgejo(forgejo::Forgejo),
 }
 
 impl Forge {
@@ -306,6 +320,7 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.controls(repo, number, since).await,
             Forge::GitLab(g) => g.controls(repo, target, number, since).await,
+            Forge::Forgejo(g) => g.controls(repo, number, since).await,
         }
     }
     /// Acknowledge a command comment with a thumbs-up.
@@ -313,18 +328,21 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.ack(repo, comment).await,
             Forge::GitLab(g) => g.ack(repo, target, number, comment).await,
+            Forge::Forgejo(g) => g.ack(repo, comment).await,
         }
     }
     pub fn me(&self) -> &str {
         match self {
             Forge::GitHub(g) => &g.me,
             Forge::GitLab(g) => &g.me,
+            Forge::Forgejo(g) => &g.me,
         }
     }
     pub async fn login(&mut self) -> Result<()> {
         match self {
             Forge::GitHub(g) => g.login().await,
             Forge::GitLab(g) => g.login().await,
+            Forge::Forgejo(g) => g.login().await,
         }
     }
     /// New events since the last poll. `cursor` is opaque, persisted by the caller.
@@ -338,18 +356,21 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.poll(cursor).await,
             Forge::GitLab(g) => g.poll(cursor).await,
+            Forge::Forgejo(g) => g.poll(cursor).await,
         }
     }
     pub async fn pr(&self, repo: &RepoId, number: u64) -> Result<PrInfo> {
         match self {
             Forge::GitHub(g) => g.pr(repo, number).await,
             Forge::GitLab(g) => g.mr(repo, number).await,
+            Forge::Forgejo(g) => g.pr(repo, number).await,
         }
     }
     pub async fn issue(&self, repo: &RepoId, number: u64) -> Result<IssueInfo> {
         match self {
             Forge::GitHub(g) => g.issue(repo, number).await,
             Forge::GitLab(g) => g.issue(repo, number).await,
+            Forge::Forgejo(g) => g.issue(repo, number).await,
         }
     }
     /// Reply in the event's thread when it has one, else a top-level comment on the PR/issue.
@@ -357,12 +378,14 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.reply(repo, target, number, to, body).await,
             Forge::GitLab(g) => g.reply(repo, target, number, to, body).await,
+            Forge::Forgejo(g) => g.reply(repo, number, to, body).await,
         }
     }
     pub async fn resolve(&self, repo: &RepoId, number: u64, thread: &str) -> Result<()> {
         match self {
             Forge::GitHub(g) => g.resolve(repo, thread).await,
             Forge::GitLab(g) => g.resolve(repo, number, thread).await,
+            Forge::Forgejo(g) => g.resolve(repo, thread).await,
         }
     }
     /// Open a draft PR/MR (maintainer `fix`). Returns its URL.
@@ -370,12 +393,14 @@ impl Forge {
         match self {
             Forge::GitHub(g) => g.open_draft(repo, head, base, title, body).await,
             Forge::GitLab(g) => g.open_draft(repo, head, base, title, body).await,
+            Forge::Forgejo(g) => g.open_draft(repo, head, base, title, body).await,
         }
     }
     pub async fn in_team(&self, team: &str, user: &str) -> Result<bool> {
         match self {
             Forge::GitHub(g) => g.in_team(team, user).await,
             Forge::GitLab(g) => g.in_group(team, user).await,
+            Forge::Forgejo(g) => g.in_team(team, user).await,
         }
     }
 }
@@ -476,5 +501,13 @@ mod tests {
         assert_eq!(Role::from_gitlab(40), Role::Maintainer);
         assert_eq!(Role::from_gitlab(30), Role::Collaborator);
         assert!(Role::Owner > Role::Contributor);
+    }
+
+    #[test]
+    fn forgejo_kind() {
+        assert_eq!(ForgeKind::parse("gitea"), Some(ForgeKind::Forgejo));
+        assert_eq!(toml::from_str::<toml::Table>("f='gitea'").unwrap()["f"].clone().try_into::<ForgeKind>().unwrap(), ForgeKind::Forgejo);
+        let r = RepoId::new(ForgeKind::Forgejo, "Codeberg.org", "o/r");
+        assert_eq!(RepoId::parse_key(&r.key()), Some(r));
     }
 }

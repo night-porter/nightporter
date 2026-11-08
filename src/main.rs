@@ -213,7 +213,7 @@ enum InboxCmd {
 
 #[derive(Subcommand)]
 enum TokenCmd {
-    /// Store a token for `github` or `gitlab` (optionally a self-hosted host) in the keychain.
+    /// Store a token for `github`, `gitlab` or `forgejo` (optionally a self-hosted host) in the keychain.
     Set { forge: String, host: Option<String> },
 }
 
@@ -493,8 +493,8 @@ fn cmd_update(db: &Db) -> Result<()> {
 }
 
 fn cmd_token_set(forge: &str, host: Option<String>) -> Result<()> {
-    let f = ForgeKind::parse(forge).context("forge must be github or gitlab")?;
-    let host = host.unwrap_or_else(|| if f == ForgeKind::GitHub { "github.com".into() } else { "gitlab.com".into() });
+    let f = ForgeKind::parse(forge).context("forge must be github, gitlab or forgejo")?;
+    let host = host.unwrap_or_else(|| f.default_host().into());
     eprint!("Paste the token for {host} and press Enter (input is hidden): ");
     let t = read_secret()?;
     if t.is_empty() {
@@ -649,7 +649,7 @@ fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
     Ok(())
 }
 
-fn read_secret() -> Result<String> {
+pub(crate) fn read_secret() -> Result<String> {
     use std::io::BufRead;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     if tty {

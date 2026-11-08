@@ -35,6 +35,8 @@ const DENIED: &[&str] = &[
     "git filter-branch",
     "gh",
     "glab",
+    "tea",
+    "fj",
     "curl",
     "wget",
     "ssh",
@@ -51,6 +53,7 @@ const SECRET_PATHS: &[&str] = &[
     "~/.aws/**",
     "~/.config/gh/**",
     "~/.config/glab-cli/**",
+    "~/.config/tea/**",
     "~/.git-credentials",
     "~/.netrc",
     "~/.docker/config.json",
@@ -178,9 +181,10 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
             if is_model_key(&u) {
                 return true;
             }
-            let forge = ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
-                .iter()
-                .any(|p| u.starts_with(p));
+            let forge =
+                ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "GITEA_", "FORGEJO_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
+                    .iter()
+                    .any(|p| u.starts_with(p));
             let secretish =
                 ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY", "AUTH", "COOKIE", "SESSION", "DSN", "DATABASE_URL"]
                     .iter()

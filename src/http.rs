@@ -14,7 +14,7 @@ pub struct Api {
     http: reqwest::Client,
     pub base: String,
     token: SecretString,
-    /// `Authorization: Bearer` (GitHub) vs `PRIVATE-TOKEN` (GitLab).
+    /// `Authorization: Bearer` (GitHub, Forgejo/Gitea) vs `PRIVATE-TOKEN` (GitLab).
     gitlab: bool,
 }
 
@@ -141,7 +141,7 @@ pub fn next_link(h: &header::HeaderMap) -> Option<String> {
     link.split(',').find(|p| p.contains("rel=\"next\"")).and_then(|p| Some(p.split_once('<')?.1.split_once('>')?.0.to_string()))
 }
 
-/// Get a token: from `gh`/`glab` (they refresh it themselves) or from the OS keychain.
+/// Get a token: from `gh`/`glab`/`tea` (they refresh it themselves) or from the OS keychain.
 /// Never read from config files or environment of the agent.
 pub async fn token(forge: ForgeKind, host: &str, source: TokenSource) -> Result<SecretString> {
     if let Some(t) = std::env::var("NIGHTPORTER_TEST_TOKEN").ok().filter(|_| cfg!(debug_assertions)) {
@@ -158,6 +158,8 @@ pub async fn token(forge: ForgeKind, host: &str, source: TokenSource) -> Result<
             let (bin, args): (&str, Vec<&str>) = match forge {
                 ForgeKind::GitHub => ("gh", vec!["auth", "token", "--hostname", host]),
                 ForgeKind::GitLab => ("glab", vec!["config", "get", "token", "--host", host]),
+                // ponytail: blocking, but it runs once per account at daemon start.
+                ForgeKind::Forgejo => return tea_token(host),
             };
             let out =
                 tokio::process::Command::new(bin).args(&args).output().await.with_context(|| format!("run `{bin}` (is it installed?)"))?;
@@ -168,6 +170,36 @@ pub async fn token(forge: ForgeKind, host: &str, source: TokenSource) -> Result<
             Ok(t.into())
         }
     }
+}
+
+/// `tea` (the Gitea CLI, also works with Forgejo) has no "print token" command, but it is a git
+/// credential helper: `tea login helper get` answers `password=<token>` for a host, refreshing
+/// OAuth logins first. Its output is never logged; errors only say what to run.
+pub fn tea_token(host: &str) -> Result<SecretString> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("tea")
+        .args(["login", "helper", "get"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("run `tea` (is it installed?)")?;
+    if let Some(mut i) = child.stdin.take() {
+        i.write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let token = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("password="))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if !out.status.success() || token.is_empty() {
+        bail!(
+            "`tea` has no login for {host}; run `tea login add --url https://{host}`, or store a token with `nightporter token set forgejo {host}` and set `token = \"keyring\"`"
+        );
+    }
+    Ok(token.into())
 }
 
 pub fn store_token(forge: ForgeKind, host: &str, token: &str) -> Result<()> {

@@ -52,9 +52,10 @@ impl Event {
 pub fn web_url(repo: &RepoId, target: Target, n: u64) -> String {
     let what = match (repo.forge, target) {
         (ForgeKind::GitHub, Target::Pr) => "pull",
-        (ForgeKind::GitHub, Target::Issue) => "issues",
         (ForgeKind::GitLab, Target::Pr) => "-/merge_requests",
         (ForgeKind::GitLab, Target::Issue) => "-/issues",
+        (ForgeKind::Forgejo, Target::Pr) => "pulls",
+        (ForgeKind::GitHub | ForgeKind::Forgejo, Target::Issue) => "issues",
     };
     format!("https://{}/{}/{what}/{n}", repo.host, repo.path)
 }

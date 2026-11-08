@@ -10,7 +10,7 @@ description: "Fix Night Porter problems: start with nightporter doctor, then wha
 nightporter doctor
 ```
 
-It checks your config, the tools, your `gh`/`glab` logins, the code directory, free disk space
+It checks your config, the tools, your `gh`/`glab` logins and Forgejo/Gitea tokens, the code directory, free disk space
 and whether the daemon is running. Every problem comes with a `fix:` line.
 
 ## Read the log

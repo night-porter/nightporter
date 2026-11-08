@@ -9,8 +9,8 @@
 
 [Website](https://night-porter.com) · [Demo video](https://www.youtube.com/watch?v=vjD-h2O7WUI) · [Docs](https://docs.night-porter.com) · [X](https://x.com/NightPorterDev) · [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) · [Mastodon](https://mastodon.social/@nightporter)
 
-Night Porter is like an IRC bouncer for your pull requests. It watches GitHub and GitLab for
-review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
+Night Porter is like an IRC bouncer for your pull requests. It watches GitHub, GitLab and Forgejo/Gitea
+(Codeberg) for review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
 (Claude Code, OpenCode or Codex) on your local clone to deal with them, within the rules you set.
 
 Most agent tools are cockpits: you start the agent and watch it. Night Porter is the night
@@ -21,8 +21,8 @@ when that something was written by a stranger.
 
 ## How it works
 
-1. **Watch.** A small daemon polls GitHub notifications and your open GitLab MRs (no webhooks, no
-   public endpoint).
+1. **Watch.** A small daemon polls GitHub and Forgejo/Gitea notifications and your open GitLab MRs
+   (no webhooks, no public endpoint).
 2. **Filter.** Only repos you subscribed to, only events you enabled, and only from people you
    trust. Comments from strangers wait in an inbox until you decide.
 3. **Work.** After a short quiet period, Night Porter batches the new activity on a PR and runs
@@ -45,7 +45,8 @@ Night Porter **never** merges, force-pushes, closes or approves.
 
 ## Features
 
-- GitHub (github.com) and GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`)
+- GitHub (github.com), GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`) and
+  Forgejo/Gitea (codeberg.org, gitea.com and self-hosted)
 - Claude Code, OpenCode and Codex
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
@@ -109,11 +110,12 @@ Windows (experimental), archives and building from source: see
 ```sh
 nightporter setup      # first-run wizard
 nightporter            # open the TUI
-nightporter doctor     # check gh / glab / agents / git
+nightporter doctor     # check gh / glab / forge tokens / agents / git
 nightporter stop       # turn the background daemon off (nightporter start turns it on)
 ```
 
-Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude`, `opencode` and/or `codex`.
+Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab) and/or a Forgejo/Gitea access token
+(or a `tea` login), plus `claude`, `opencode` and/or `codex`.
 `gitleaks` is optional but recommended. herdr, Rex, tmux or Zellij is optional, for taking over jobs interactively.
 
 ## Configuration

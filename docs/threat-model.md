@@ -10,7 +10,7 @@ security boundary is, and which protections cannot be turned off.
 
 ## Assets
 
-1. **Forge credentials**: GitHub/GitLab tokens, and your git SSH keys.
+1. **Forge credentials**: GitHub/GitLab/Forgejo tokens, and your git SSH keys.
 2. **Your repositories**: their history, branches and the code that gets merged.
 3. **Your machine**: files, other projects and secrets in your home directory.
 4. **Your reputation**: comments and commits posted under your name.
@@ -88,8 +88,8 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
   own API key. `SSH_AUTH_SOCK` is removed, `GIT_SSH_COMMAND` fails, credential helpers are
   cleared and git hooks are disabled for the agent's commits. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` point to empty directories, so `gh` and `glab`
   inside the agent are logged out.
-- The generated agent settings deny `git push`, `gh`, `glab` and network commands, deny
-  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, ...) and Night
+- The generated agent settings deny `git push`, `gh`, `glab`, `tea`, `fj` and network commands, deny
+  reading credential files (`~/.ssh`, `~/.config/gh`, `~/.config/tea`, `~/.git-credentials`, ...) and Night
   Porter's own config, state database, log and other jobs' files, and only
   allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
 - Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
@@ -138,7 +138,7 @@ Run on every push, in every mode, including `auto`:
 | check | can be disabled? |
 |---|---|
 | secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
-| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
+| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab, Forgejo/Gitea Actions, Woodpecker and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |
@@ -176,7 +176,7 @@ before it is applied. A step that needs write access shows a warning at install 
 
 ### B6. Credentials at rest
 
-Tokens come from `gh`/`glab` or from the OS keychain. They are never stored in config, logs, job
+Tokens come from `gh`/`glab`/`tea` or from the OS keychain. They are never stored in config, logs, job
 directories or the state database, and they are kept in `secrecy` types in memory.
 
 ### B7. Nothing left in your repos

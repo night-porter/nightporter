@@ -46,7 +46,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `handoff` | `auto` | where `h` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print` ([details](/herdr#take-over-a-job)) |
 | `pr_commands` | `true` | act on `/nightporter approve`, `dismiss`, `retry` and `status` in your own comments on a PR or MR (see [From your phone](/daily-use#from-your-phone)). Only the token's own user, checked by user id |
 | `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
-| `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
+| `[[accounts]]` | | `forge = "github" \| "gitlab" \| "forgejo"` (`"gitea"` works too), `host` (default github.com / gitlab.com / codeberg.org), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`/`tea`; store a keyring token with `nightporter token set <forge> [host]`). See [Forgejo and Gitea](#forgejo-and-gitea) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author`: the desktop notification for each kind |
 | `[[notifications.targets]]` | none | webhooks and commands that also get notifications; see [Notification targets](#notification-targets) |
 
@@ -71,10 +71,10 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `sandbox_read_allow` | `[]` | extra folders in your home folder that sandboxed commands may read, e.g. `["~/.config/mytool"]`; `["~/"]` lifts the home-folder restriction. The worktree and common toolchain folders (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.nvm`, `~/go`, `~/.composer`, `~/.cache`, …) are always readable. |
 | `prompt` | none | your own extra instructions file (relative to the config dir) |
 | `packs` | `[]` | enabled packs |
-| `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |
+| `[trust]` | | `roles` (`owner`, `maintainer`, `member`, `collaborator`, `contributor`, `none`), `allow_users`, `deny_users`, `allow_teams` / `deny_teams` (`"org/team"` on GitHub and Forgejo/Gitea, `"group"` on GitLab), `allow_bots` (bots are never trusted by role), `open` |
 | `notify` | everywhere | where notifications go: `"desktop"` and/or [target](#notification-targets) names, e.g. `["desktop", "phone"]` |
 | `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz`, and optionally `level`, `agent`, `notify` for that window; see [Working hours](/advanced#working-hours) |
-| `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`) |
+| `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`) |
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`) |
@@ -164,3 +164,37 @@ teardown = ["ddev stop"]
 cleanup = ["ddev delete -O -y"]
 prompt = "prompts/drupal.md"
 ```
+
+## Forgejo and Gitea
+
+One integration covers Forgejo and Gitea: codeberg.org, gitea.com and self-hosted servers.
+
+```toml
+[[accounts]]
+forge = "forgejo"          # or "gitea"
+host = "codeberg.org"      # the default; set it for gitea.com or your own server
+token = "keyring"          # or "cli" to use your `tea` login for this host
+```
+
+- **Token**: `token = "cli"` reads it from [`tea`](https://gitea.com/gitea/tea) (`tea login helper
+  get`, which also refreshes OAuth logins). Otherwise create an access token with the scopes
+  `read:user`, `read:notification`, `write:issue`, `write:repository` and `read:organization`, and
+  store it with `nightporter token set forgejo <host>`. `forgejo-cli` (`fj`) can't hand out its
+  token, so it isn't used.
+- **What's watched**: notifications (comments, reviews and line comments on your PRs, and
+  `/nightporter` commands and the maintainer label on others' issues and PRs), plus the open-PR
+  sweep for merge conflicts and CI. CI means commit statuses, which Forgejo/Gitea Actions,
+  Woodpecker and most other CI systems report.
+- **Roles**: Forgejo and Gitea don't say how a commenter relates to the repo, so Night Porter asks
+  for their repo permission (`owner` → owner, `admin` → maintainer, `write` → collaborator, `read` →
+  contributor). Only repo admins can see other people's permission; otherwise the repo owner is
+  `owner`, collaborators are `collaborator` and everyone else is `none`, including org members
+  who aren't collaborators. Trust them with `allow_teams` or `allow_users`.
+- **Replies to line comments** are posted as a one-comment review on the same file and line,
+  which the web UI shows in the same conversation. If the agent's push moved that line, it may
+  show up as a new conversation. Replies to comments on removed lines go to the PR conversation.
+- **Resolving threads** (`resolve_threads`) works on Gitea 1.25 and later. Forgejo has no API for
+  it, so the job log says so and the conversation stays open.
+- **Merge conflicts** fire after two sweeps in a row see one at the same commit, because the
+  server also reports "not mergeable" while it is still checking a new push.
+- **Draft PRs** (maintainer `fix`) are opened with a `WIP:` title prefix.

@@ -4,7 +4,7 @@ description: "Install Night Porter with Homebrew, the install script or Cargo, r
 
 # Getting started
 
-Night Porter watches GitHub and GitLab for activity on your PRs and MRs: review comments, failing
+Night Porter watches GitHub, GitLab and Forgejo/Gitea (Codeberg) for activity on your PRs and MRs: review comments, failing
 CI and merge conflicts. When something happens, it runs your coding agent (Claude Code,
 OpenCode or Codex) in a separate git worktree, checks the result, and then pushes and replies, or waits
 for you. How far it goes is up to you.
@@ -20,6 +20,7 @@ Night Porter is 0.x. Expect breaking changes.
 | `git` | everything |
 | `gh` | GitHub |
 | `glab` | GitLab (gitlab.com or self-hosted) |
+| an access token, or `tea` | Forgejo/Gitea (codeberg.org, gitea.com or self-hosted), see below |
 | `claude`, `opencode` or `codex` | the agent (Codex: `npm install -g @openai/codex` or `brew install --cask codex`) |
 | `gitleaks` | optional, a stronger secrets check |
 | herdr, Rex, tmux or Zellij | optional, for [taking over jobs](/herdr) |
@@ -27,6 +28,21 @@ Night Porter is 0.x. Expect breaking changes.
 
 Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run `claude`,
 `opencode` or `codex` once so it’s logged in too.
+
+**Forgejo and Gitea** (Codeberg, gitea.com, self-hosted) use one integration. Night Porter takes
+the token from [`tea`](https://gitea.com/gitea/tea) if you have a `tea` login for the host
+(`tea login add --url https://codeberg.org`); `tea` works with Forgejo too. Otherwise the setup
+wizard asks you to paste an access token and keeps it in the OS keychain. Create it under
+**Settings → Applications** (for Codeberg: <https://codeberg.org/user/settings/applications>)
+with these scopes:
+
+| scope | used for |
+|---|---|
+| `read:user` | who you are |
+| `read:notification` | new comments and reviews |
+| `write:issue` | reading issues and PR comments, posting replies |
+| `write:repository` | PRs, reviews, CI statuses, line-comment replies, opening draft PRs |
+| `read:organization` | `allow_teams` / `deny_teams` |
 
 ## 2. Install Night Porter
 
@@ -89,7 +105,8 @@ screen readers and in scripts.
 
 It asks for:
 
-1. **Forges**: GitHub, GitLab or both, and the host if it’s self-hosted.
+1. **Forges**: GitHub, GitLab, Forgejo/Gitea or several, and the host if it’s self-hosted. For
+   Forgejo/Gitea it uses your `tea` login, or asks for a token (see above).
 2. **Default agent**: Claude Code, OpenCode or Codex.
 3. **A tool check**: the same as `nightporter doctor`. Nothing is installed for you; it prints
    the command to fix each problem.
