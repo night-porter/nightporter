@@ -10,7 +10,7 @@ description: "How to report a Night Porter bug or a security vulnerability, and 
 and include:
 
 - `nightporter --version` and your OS
-- the forge (GitHub, GitLab, self-hosted) and the agent with its version
+- the forge (GitHub, GitLab, Forgejo/Gitea, self-hosted) and the agent with its version
 - what happened, what you expected, and how to reproduce it
 - the relevant config and log lines, **with tokens and private repo names removed**
 

@@ -3,7 +3,7 @@
 
 use crate::checks::blocking_failed as checks_blocking;
 use crate::config::edit_file;
-use crate::forge::RepoId;
+use crate::forge::{Control, RepoId};
 use crate::paths::Paths;
 use crate::state::{Db, Disposition, JobStatus};
 use anyhow::{Context, Result, bail};
@@ -56,6 +56,21 @@ pub fn retry(db: &Db, id: i64) -> Result<usize> {
         bail!("job {id} is still {}", j.status.label());
     }
     db.requeue_events(id)
+}
+
+/// A `/nightporter <command>` you posted on the PR (see `daemon::pr_commands`). Returns a status
+/// line to reply with, or `None` to just acknowledge. Stricter than the TUI: `approve` only
+/// releases a job waiting for push approval, never past blocking checks, and never approves
+/// running someone else's code (that needs the TUI, which shows the changed build files).
+pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
+    let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    match c {
+        Control::Approve if j.status != JobStatus::AwaitingApproval => bail!("job {id} is {}, nothing to approve here", j.status.label()),
+        Control::Approve => approve(db, id, false).map(|_| None),
+        Control::Dismiss => dismiss(db, id).map(|()| None),
+        Control::Retry => retry(db, id).map(|_| None),
+        Control::Status => Ok(Some(format!("Night Porter job {id}: {}", j.status.label()))),
+    }
 }
 
 /// Put a job away without acting on it: it leaves the Queue, nothing is pushed or posted, and

@@ -20,7 +20,7 @@ Run `nightporter`. It has five tabs:
 | `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours |
 | `2` | Inbox | events from people you don’t trust yet |
 | `3` | History | every job, newest first, including done and dismissed ones; `/` searches (e.g. `dismissed`, a repo name) |
-| `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex), `e` edits the repo file, `R` rescans |
+| `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental), `e` edits the repo file, `R` rescans. `l` and `a` change the repo’s own setting; when a [schedule window](/advanced#working-hours) overrides it right now, the row says so, e.g. `(now auto, from window)` |
 | `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
 | `?` | Help | keys and commands |
 
@@ -58,7 +58,7 @@ invalid file from the editor is never written; you can fix it or throw the edit 
 | `x` | dismiss: put the job away without replying or pushing. Its status becomes `dismissed` and it stays in History |
 | `u` | undo the last dismiss, or restore the selected dismissed job |
 | `X` | delete a finished or dismissed job for good, with its logs (asks first) |
-| `h` | take over in [herdr or Rex](/herdr) |
+| `h` | take over in [herdr, Rex, tmux or Zellij](/herdr) |
 | `c` | copy the push command (for `suggest` jobs) |
 | `y` | copy the reply text |
 
@@ -90,6 +90,30 @@ style (with the style text), language and footer, the repo's own `CLAUDE.md` / `
 `prompt` and `env.prompt` files (with their contents), packs, hours, limits, trust lists, sandbox
 and checks. `e` there edits the repo's file.
 
+## From your phone
+
+Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Gitea app or web page, say):
+
+| comment | does |
+|---|---|
+| `/nightporter approve` | push and post a job that is **NEEDS APPROVAL** (like `a`) |
+| `/nightporter dismiss` | put the job away (like `x`) |
+| `/nightporter retry` | run a finished or failed job's requests again (like `t`) |
+| `/nightporter status` | Night Porter replies with the job's status |
+
+The command acts on Night Porter's newest job for that PR, and only when the comment is newer
+than the job. Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
+be (for example, nothing is waiting for approval). Each comment is acted on once.
+
+Only comments from your own account count: the user the token belongs to, checked by user ID.
+Comments by collaborators, maintainers, bots or apps posting for you are ignored, and no command
+comment ever reaches the agent as feedback. `approve` from a comment is stricter than `a`: it
+can't approve past a failed blocking check (`A`), and it can't let the agent run someone else's
+code (**NEEDS RUN APPROVAL**); use the TUI for those. "Approve" is always Night Porter's job,
+never the PR: Night Porter still never merges, closes or approves a PR. Night Porter looks at
+PRs whose newest job is waiting for you or changed in the last three days, once per
+`poll_interval`. Set `pr_commands = false` to turn it off.
+
 ## The CLI
 
 Everything in the TUI also works from the command line, which is handy for scripts and screen
@@ -105,7 +129,7 @@ nightporter retry 42
 nightporter dismiss 42 43        # put away, nothing pushed or posted
 nightporter restore 42           # bring a dismissed job back
 nightporter purge 42 43          # delete for good, with logs (asks; --yes to skip)
-nightporter handoff 42           # take over in herdr or Rex
+nightporter handoff 42           # take over in herdr, Rex, tmux or Zellij
 nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
 nightporter events --json        # follow every job and inbox change
 
@@ -144,7 +168,18 @@ Run `nightporter --help` or `nightporter <command> --help` for the full list.
 ## Notifications
 
 You get a desktop notification when a job needs approval, fails or finishes, and when a new
-author lands in the inbox. Turn any of them off under `[notifications]` in `config.toml`.
+author lands in the inbox. Turn any of them off under `[notifications]` in `config.toml`. On
+Linux, clicking the notification opens the PR in your browser. macOS notifications can't do
+that (the click opens the app that shows them).
+
+To get them on your phone or in a chat too, add webhooks (Slack, Discord, ntfy, plain JSON) or a
+command under `[[notifications.targets]]`; see
+[Notification targets](/configuration#notification-targets). Check them with:
+
+```sh
+nightporter notify test          # every target, and the desktop
+nightporter notify test phone    # one target
+```
 
 ## Updates
 

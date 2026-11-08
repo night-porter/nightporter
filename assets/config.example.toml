@@ -17,7 +17,7 @@ worktree_idle_days = 14
 # version. Anonymous; sends nothing about you or your repos. Night Porter never updates itself.
 check_updates = true
 
-# Forge accounts. `token = "cli"` asks gh/glab each time; "keyring" uses a PAT stored with
+# Forge accounts. `token = "cli"` asks gh/glab/tea each time; "keyring" uses a PAT stored with
 # `nightporter token set <forge> [host]`.
 [[accounts]]
 forge = "github"
@@ -27,14 +27,27 @@ forge = "github"
 # host = "git.drupalcode.org"
 # token = "keyring"
 
+# [[accounts]]
+# forge = "forgejo"         # Forgejo or Gitea; host defaults to codeberg.org
+# token = "keyring"
+
 [notifications]
 needs_approval = true
 failed = true
 done = true
 new_author = true
 
+# Also send notifications to webhooks (slack, discord, ntfy, json) or a command.
+# Check with `nightporter notify test`.
+# [[notifications.targets]]
+# name = "phone"
+# type = "webhook"
+# url_env = "NIGHTPORTER_NTFY_URL"   # or url = "https://ntfy.sh/your-topic"
+# format = "ntfy"
+# kinds = ["needs_approval", "failed"]
+
 [defaults]
-agent = "claude"            # claude | opencode | codex
+agent = "claude"            # claude | opencode | codex | gemini (experimental)
 level = "draft"             # observe | suggest | draft | auto
 triggers = ["review_comment", "review", "comment", "ci_failure", "merge_conflict"]
 debounce = "2m"
@@ -43,7 +56,7 @@ max_ci_attempts = 3
 # ci_auto = false
 timeout = "30m"
 # max_budget_usd = 2.0      # Claude Code only
-sandbox = true              # OS sandbox for agent commands (Claude Code, Codex); fails closed
+sandbox = true              # OS sandbox for agent commands (Claude Code, Codex, Gemini CLI); fails closed
 # sandbox_domains = []      # domains sandboxed commands may reach
 # allow_commands = ["npm test", "cargo test"]
 
@@ -51,13 +64,15 @@ sandbox = true              # OS sandbox for agent commands (Claude Code, Codex)
 roles = ["owner", "maintainer", "member", "collaborator"]
 allow_users = []
 deny_users = []
-allow_teams = []            # "org/team" (GitHub) or "group" (GitLab)
+allow_teams = []            # "org/team" (GitHub, Forgejo) or "group" (GitLab)
 allow_bots = []             # e.g. "coderabbitai[bot]"
 
 # Active windows. No [[defaults.schedule]] entries = always active.
 # [[defaults.schedule]]
 # days = "mon-fri"
 # windows = ["08:00-09:00", "11:00-13:00", "17:00-22:00"]
+# level = "draft"           # optional, while this window is open: level, agent, notify
+# notify = ["desktop"]
 
 [defaults.reply]
 style = "concise"           # concise | detailed-tech-lead | non-technical | path/to/style.md

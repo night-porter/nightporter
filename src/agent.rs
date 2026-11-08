@@ -35,6 +35,8 @@ const DENIED: &[&str] = &[
     "git filter-branch",
     "gh",
     "glab",
+    "tea",
+    "fj",
     "curl",
     "wget",
     "ssh",
@@ -51,6 +53,7 @@ const SECRET_PATHS: &[&str] = &[
     "~/.aws/**",
     "~/.config/gh/**",
     "~/.config/glab-cli/**",
+    "~/.config/tea/**",
     "~/.git-credentials",
     "~/.netrc",
     "~/.docker/config.json",
@@ -132,6 +135,7 @@ const MODEL_KEYS: &[&str] = &[
     "OPENROUTER_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
 ];
 const MODEL_PREFIXES: &[&str] = &["ANTHROPIC_", "CLAUDE_", "OPENCODE_", "CODEX_"];
 
@@ -178,9 +182,10 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
             if is_model_key(&u) {
                 return true;
             }
-            let forge = ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
-                .iter()
-                .any(|p| u.starts_with(p));
+            let forge =
+                ["GH_", "GITHUB_", "GITLAB_", "GLAB_", "GITEA_", "FORGEJO_", "CI_JOB_TOKEN", "NIGHTPORTER_", "SSH_AUTH_SOCK", "GIT_"]
+                    .iter()
+                    .any(|p| u.starts_with(p));
             let secretish =
                 ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY", "AUTH", "COOKIE", "SESSION", "DSN", "DATABASE_URL"]
                     .iter()
@@ -336,6 +341,30 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
         AgentKind::Codex => {
             cmd.stdin(std::process::Stdio::piped()).args(codex_args(s, job_dir, read_only));
         }
+        AgentKind::Gemini => {
+            // Fail closed: no run on a version whose sandbox we haven't checked, or on a branch
+            // carrying Gemini config we can't keep out.
+            let v = Command::new(&bin).arg("--version").output().await.with_context(|| format!("start `{bin}` (is it installed?)"))?;
+            let v = String::from_utf8_lossy(&v.stdout);
+            if !v.lines().any(gemini_version_ok) {
+                bail!("Gemini CLI {} is too old: Night Porter needs {}.{} or newer for its sandbox", v.trim(), GEMINI_MIN.0, GEMINI_MIN.1);
+            }
+            if let Some(f) = GEMINI_REPO_CONFIG.iter().find(|f| wt.join(f).exists()) {
+                bail!("the branch has {f}, which Gemini CLI would load as its own configuration; use another agent for this repo");
+            }
+            if let Some(d) = GEMINI_SYSTEM_POLICY_DIRS.iter().map(Path::new).find(|d| has_toml(d)) {
+                bail!("{} holds Gemini CLI policies, which make it ignore Night Porter's policy; use another agent", d.display());
+            }
+            let settings = job_dir.join("gemini-settings.json");
+            std::fs::write(&settings, serde_json::to_vec_pretty(&gemini_settings(s, job_dir))?)?;
+            let policy = job_dir.join("gemini-policy.toml");
+            std::fs::write(&policy, gemini_policy(s, read_only))?;
+            cmd.env("GEMINI_CLI_SYSTEM_SETTINGS_PATH", &settings)
+                .env("GEMINI_SANDBOX", "false")
+                .env_remove("SANDBOX")
+                .stdin(std::process::Stdio::piped())
+                .args(gemini_args(&policy));
+        }
     }
     cmd.args(&s.agent_args);
     let mut child = cmd
@@ -396,6 +425,94 @@ fn codex_args(s: &RepoSettings, job_dir: &Path, read_only: bool) -> Vec<String> 
     a
 }
 
+/// Oldest Gemini CLI whose tool sandbox and policy engine we rely on. Older versions ignore
+/// `security.toolSandboxing` without a word, so they're refused rather than run unsandboxed.
+const GEMINI_MIN: (u32, u32) = (0, 67);
+
+/// `gemini --version` prints e.g. `0.67.0` or `0.69.0-nightly.20261104.g89e9d25d6`.
+fn gemini_version_ok(out: &str) -> bool {
+    let mut v = out.trim().split(['.', '-']).map(str::parse::<u32>);
+    matches!((v.next(), v.next()), (Some(Ok(major)), Some(Ok(minor))) if (major, minor) >= GEMINI_MIN)
+}
+
+/// Repo files Gemini CLI would load as configuration in a trusted workspace (headless runs must
+/// trust it). Their settings merge into ours (`context.includeDirectories` widens the sandbox) and
+/// `.gemini/.env` is read even with `ignoreLocalEnv`, so a branch carrying them isn't run.
+const GEMINI_REPO_CONFIG: &[&str] = &[".gemini/settings.json", ".gemini/.env"];
+
+/// System policy folders: any `.toml` in them makes Gemini CLI drop `--admin-policy` (its own
+/// defaults then still allow `google_web_search`, a way out for data), so the run is refused.
+const GEMINI_SYSTEM_POLICY_DIRS: &[&str] = &["/etc/gemini-cli/policies", "/Library/Application Support/GeminiCli/policies"];
+
+fn has_toml(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|it| it.flatten().any(|e| e.path().extension().is_some_and(|x| x == "toml")))
+}
+
+/// Gemini CLI system settings (via `GEMINI_CLI_SYSTEM_SETTINGS_PATH`, which overrides user and
+/// workspace settings): shell commands and file tools run in its tool sandbox (Seatbelt /
+/// bubblewrap: reads limited to the worktree, its git dir and PATH folders, writes to the
+/// worktree, no network), no hooks, no repo `.env`, no auto-update.
+pub fn gemini_settings(s: &RepoSettings, job_dir: &Path) -> serde_json::Value {
+    json!({
+        // Redaction off: Night Porter already scrubbed the environment, and Gemini's redaction
+        // would drop the `GIT_CONFIG_KEY_*` overrides that keep git hooks and helpers off.
+        "security": { "toolSandboxing": s.sandbox, "environmentVariableRedaction": { "enabled": false } },
+        "tools": { "sandbox": false, "sandboxNetworkAccess": false, "sandboxAllowedPaths": [] },
+        // Sandboxed git reads the agent's git config (name and email only).
+        "context": { "includeDirectories": [job_dir.join("git")] },
+        "hooksConfig": { "enabled": false },
+        "advanced": { "ignoreLocalEnv": true },
+        "general": { "enableAutoUpdate": false, "enableAutoUpdateNotification": false }
+    })
+}
+
+/// Gemini CLI admin policy (`--admin-policy`; admin rules beat user ones). Shell commands are
+/// denied unless allow-listed, deny-listed ones always, and so is any call that asks to widen
+/// the sandbox (`additional_permissions`: network or extra paths). No web tools, no memory file.
+pub fn gemini_policy(s: &RepoSettings, read_only: bool) -> String {
+    let git = GIT_ALLOWED.iter().copied().filter(|c| !read_only || !WRITE_GIT.contains(c));
+    let allowed: Vec<&str> = git.chain(s.allow_commands.iter().map(String::as_str)).collect();
+    let rule = |tool: serde_json::Value, extra: serde_json::Value, decision: &str, priority: u32| {
+        let mut r = json!({ "toolName": tool, "decision": decision, "priority": priority });
+        r.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        r
+    };
+    let shell = json!("run_shell_command");
+    let edits = json!(["write_file", "replace"]);
+    let rules = vec![
+        rule(shell.clone(), json!({}), "deny", 1),
+        rule(shell.clone(), json!({ "commandPrefix": allowed }), "allow", 100),
+        rule(edits, json!({}), if read_only { "deny" } else { "allow" }, if read_only { 900 } else { 100 }),
+        rule(shell.clone(), json!({ "commandPrefix": DENIED }), "deny", 900),
+        rule(json!(["web_fetch", "google_web_search", "save_memory"]), json!({}), "deny", 900),
+        rule(shell, json!({ "argsPattern": "\"additional_permissions\"" }), "deny", 950),
+    ];
+    toml::to_string(&json!({ "rule": rules })).unwrap_or_default()
+}
+
+/// `gemini` arguments. The prompt arrives on stdin, which Gemini CLI puts before `-p`'s text.
+/// No extensions, no MCP servers (the allow list names one that can't exist), no YOLO.
+fn gemini_args(policy: &Path) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "-p",
+        "Follow the instructions given on standard input.",
+        "--output-format",
+        "json",
+        "--approval-mode",
+        "default",
+        "--skip-trust",
+        "--extensions",
+        "none",
+        "--allowed-mcp-server-names",
+        "nightporter-none",
+        "--admin-policy",
+    ]
+    .map(String::from)
+    .to_vec();
+    a.push(policy.to_string_lossy().into());
+    a
+}
+
 /// Kill whatever is left in the agent's process group.
 fn kill_group(pid: Option<u32>) {
     #[cfg(unix)]
@@ -434,6 +551,20 @@ pub fn parse_output(kind: AgentKind, stdout: &str) -> Result<Outcome> {
             }
             (r.result, r.total_cost_usd)
         }
+        AgentKind::Gemini => {
+            #[derive(Deserialize)]
+            struct R {
+                #[serde(default)]
+                response: String,
+                #[serde(default)]
+                error: Option<serde_json::Value>,
+            }
+            let r: R = serde_json::from_str(stdout.trim()).context("gemini output was not JSON")?;
+            if let Some(e) = r.error {
+                bail!("agent reported an error: {}", tail(&e.to_string(), 400));
+            }
+            (r.response, None)
+        }
         AgentKind::OpenCode | AgentKind::Codex => (stdout.to_string(), None),
     };
     let block = last_block(&text).context("agent did not end with a ```nightporter block")?;
@@ -470,7 +601,53 @@ mod tests {
         let out = "done\n```nightporter\n{\"summary\":\"ok\",\"replies\":[]}\n```";
         assert_eq!(parse_output(AgentKind::Codex, out).unwrap().summary, "ok");
         assert_eq!(AgentKind::Claude.next().next(), AgentKind::Codex);
-        assert_eq!(AgentKind::Codex.next(), AgentKind::Claude);
+        assert_eq!(AgentKind::Codex.next(), AgentKind::Gemini);
+        assert_eq!(AgentKind::Gemini.next(), AgentKind::Claude);
+    }
+
+    #[test]
+    fn gemini_runs_sandboxed_with_admin_policy() {
+        let s = crate::config::Config::parse("[defaults]\nallow_commands = [\"npm test\"]").unwrap().resolve(None).unwrap();
+        let v = gemini_settings(&s, Path::new("/j"));
+        assert_eq!((v["security"]["toolSandboxing"].as_bool(), v["tools"]["sandboxNetworkAccess"].as_bool()), (Some(true), Some(false)));
+        assert_eq!((v["hooksConfig"]["enabled"].as_bool(), v["advanced"]["ignoreLocalEnv"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(v["context"]["includeDirectories"][0], "/j/git");
+        let off = crate::config::Config::parse("[defaults]\nsandbox = false").unwrap().resolve(None).unwrap();
+        assert_eq!(gemini_settings(&off, Path::new("/j"))["security"]["toolSandboxing"].as_bool(), Some(false));
+
+        let p: toml::Table = gemini_policy(&s, false).parse().unwrap();
+        let rules = p["rule"].as_array().unwrap();
+        let find = |pred: &dyn Fn(&toml::Table) -> bool| rules.iter().filter_map(toml::Value::as_table).find(|r| pred(r)).cloned().unwrap();
+        let allow = find(&|r| r["decision"].as_str() == Some("allow") && r.contains_key("commandPrefix"));
+        let prefixes = allow["commandPrefix"].to_string();
+        assert!(prefixes.contains("git commit") && prefixes.contains("npm test") && !prefixes.contains("git push"), "{prefixes}");
+        let deny = find(&|r| r["decision"].as_str() == Some("deny") && r.contains_key("commandPrefix"));
+        assert!(deny["commandPrefix"].to_string().contains("git push") && deny["priority"].as_integer() > allow["priority"].as_integer());
+        let widen = find(&|r| r.contains_key("argsPattern"));
+        assert_eq!((widen["decision"].as_str(), widen["priority"].as_integer()), (Some("deny"), Some(950)));
+        assert!(gemini_policy(&s, false).contains("google_web_search"));
+        let ro: toml::Table = gemini_policy(&s, true).parse().unwrap();
+        let ro = ro["rule"].to_string();
+        assert!(!ro.contains("\"git commit\"") && ro.contains("write_file"), "{ro}");
+
+        let a = gemini_args(Path::new("/j/gemini-policy.toml")).join(" ");
+        assert!(
+            a.contains("--approval-mode default") && a.contains("--extensions none") && a.ends_with("--admin-policy /j/gemini-policy.toml"),
+            "{a}"
+        );
+        assert!(!a.contains("yolo"));
+
+        assert!(gemini_version_ok("0.67.0\n") && gemini_version_ok("0.69.0-nightly.20261104.g89e9d25d6") && gemini_version_ok("1.0.0"));
+        assert!(!gemini_version_ok("0.66.2") && !gemini_version_ok("") && !gemini_version_ok("gemini"));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_toml(tmp.path()) && !has_toml(&tmp.path().join("missing")));
+        std::fs::write(tmp.path().join("org.toml"), "").unwrap();
+        assert!(has_toml(tmp.path()));
+
+        let out = r#"{"session_id":"x","response":"done\n```nightporter\n{\"summary\":\"ok\",\"replies\":[]}\n```","stats":{}}"#;
+        assert_eq!(parse_output(AgentKind::Gemini, out).unwrap().summary, "ok");
+        assert!(parse_output(AgentKind::Gemini, r#"{"error":{"type":"FatalToolExecutionError","message":"no"}}"#).is_err());
+        assert!(parse_output(AgentKind::Gemini, "not json").is_err());
     }
 
     #[test]

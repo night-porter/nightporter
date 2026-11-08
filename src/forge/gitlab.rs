@@ -14,6 +14,8 @@ use std::fmt::Write as _;
 pub struct GitLab {
     pub host: String,
     pub me: String,
+    /// The token user's numeric id: commands on MRs are only taken from this id.
+    pub me_id: u64,
     pub api: Api,
     /// Maintainer label per subscribed repo (`group/name`) with maintainer mode on.
     pub labels: HashMap<String, String>,
@@ -113,6 +115,7 @@ impl GitLab {
         Self {
             host: host.into(),
             me: String::new(),
+            me_id: 0,
             api,
             labels: HashMap::new(),
             subscribed: HashSet::new(),
@@ -135,6 +138,7 @@ impl GitLab {
     pub async fn login(&mut self) -> Result<()> {
         let u: User = self.api.get("/user").await.context("GitLab login")?;
         self.me = u.username;
+        self.me_id = u.id;
         Ok(())
     }
 
@@ -457,6 +461,28 @@ impl GitLab {
             )
             .await?;
         Ok(v["web_url"].as_str().unwrap_or_default().to_string())
+    }
+
+    pub async fn controls(&self, repo: &RepoId, target: Target, iid: u64, since: &str) -> Result<Vec<super::ControlComment>> {
+        let kind = if target == Target::Issue { "issues" } else { "merge_requests" };
+        let notes: Vec<Note> =
+            self.api.get_all(&format!("/projects/{}/{kind}/{iid}/notes?per_page=100&sort=desc", enc(&repo.path)), 3).await?;
+        Ok(notes
+            .into_iter()
+            .rev()
+            .filter(|n| !n.system)
+            .filter_map(|n| {
+                let control = super::control_of(self.me_id, n.author.id, false, &n.body, &n.created_at, since)?;
+                Some(super::ControlComment { id: n.id.to_string(), control })
+            })
+            .collect())
+    }
+
+    pub async fn ack(&self, repo: &RepoId, target: Target, iid: u64, note: &str) -> Result<()> {
+        let kind = if target == Target::Issue { "issues" } else { "merge_requests" };
+        let path = format!("/projects/{}/{kind}/{iid}/notes/{note}/award_emoji?name=thumbsup", enc(&repo.path));
+        self.api.send(Method::POST, &path, &json!({})).await?;
+        Ok(())
     }
 
     pub async fn in_group(&self, group: &str, user: &str) -> Result<bool> {

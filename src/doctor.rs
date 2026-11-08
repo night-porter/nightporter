@@ -36,12 +36,34 @@ fn auth(bin: &str, host: &str) -> Check {
     }
 }
 
+/// Forgejo/Gitea: a keychain token, or a `tea` login for the host. The token itself is never shown.
+fn forgejo_auth(host: &str) -> Check {
+    let keyring = keyring::Entry::new("nightporter", &format!("forgejo:{host}")).and_then(|e| e.get_password()).is_ok();
+    let tea = !keyring && crate::http::tea_token(host).is_ok();
+    Check {
+        name: format!("forgejo token ({host})"),
+        ok: keyring || tea,
+        optional: false,
+        detail: if keyring {
+            "in the keychain".into()
+        } else if tea {
+            "from tea".into()
+        } else {
+            "no token".into()
+        },
+        fix: format!("nightporter token set forgejo {host}   (scopes: {}; then token = \"keyring\")", crate::forge::forgejo::SCOPES),
+    }
+}
+
 pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check> {
     let brew = cfg!(target_os = "macos");
     let install = |pkg: &str, other: &str| if brew { format!("brew install {pkg}") } else { other.to_string() };
     let mut out = vec![tool("git", "--version", &install("git", "install git with your package manager"), false)];
     if forges.iter().any(|(f, _)| *f == ForgeKind::GitHub) {
         out.push(tool("gh", "--version", &install("gh", "see https://cli.github.com"), false));
+    }
+    if forges.iter().any(|(f, _)| *f == ForgeKind::Forgejo) {
+        out.push(tool("tea", "--version", &install("tea", "see https://gitea.com/gitea/tea"), true));
     }
     if forges.iter().any(|(f, _)| *f == ForgeKind::GitLab) {
         out.push(tool("glab", "--version", &install("glab", "see https://gitlab.com/gitlab-org/cli"), false));
@@ -50,6 +72,7 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
         match f {
             ForgeKind::GitHub => out.push(auth("gh", host)),
             ForgeKind::GitLab => out.push(auth("glab", host)),
+            ForgeKind::Forgejo => out.push(forgejo_auth(host)),
         }
     }
     for a in agents {
@@ -57,14 +80,20 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
             AgentKind::Claude => "npm install -g @anthropic-ai/claude-code   (then run `claude` once to log in)",
             AgentKind::OpenCode => "curl -fsSL https://opencode.ai/install | bash   (or brew install opencode)",
             AgentKind::Codex => "npm install -g @openai/codex   (or brew install --cask codex; then run `codex` once to log in)",
+            AgentKind::Gemini => {
+                "npm install -g @google/gemini-cli   (0.67 or newer; set GEMINI_API_KEY for the daemon or run `gemini` once to log in)"
+            }
         };
         out.push(tool(a.bin(), "--version", fix, false));
     }
     out.push(tool("gitleaks", "version", &install("gitleaks", "see https://github.com/gitleaks/gitleaks"), true));
     out.push(tool("herdr", "--version", "optional, for `nightporter handoff`: see https://herdr.dev", true));
-    // Claude Code's sandbox (on by default) needs these on Linux; macOS uses built-in Seatbelt.
-    if cfg!(target_os = "linux") && agents.contains(&AgentKind::Claude) {
+    // Claude Code's and Gemini CLI's sandboxes (on by default) need these on Linux; macOS uses
+    // built-in Seatbelt.
+    if cfg!(target_os = "linux") && (agents.contains(&AgentKind::Claude) || agents.contains(&AgentKind::Gemini)) {
         out.push(tool("bwrap", "--version", "sudo apt-get install bubblewrap   (or set sandbox = false)", false));
+    }
+    if cfg!(target_os = "linux") && agents.contains(&AgentKind::Claude) {
         out.push(tool("socat", "-V", "sudo apt-get install socat   (or set sandbox = false)", false));
     }
     out

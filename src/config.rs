@@ -44,7 +44,10 @@ pub struct Config {
     /// Once a day, ask GitHub for the latest release number (anonymous; see `update.rs`).
     #[serde(default = "yes")]
     pub check_updates: bool,
-    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr` or `rex`.
+    /// Take `/nightporter approve|dismiss|retry|status` from your own comments on PRs/MRs.
+    #[serde(default = "yes")]
+    pub pr_commands: bool,
+    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print`.
     #[serde(default)]
     pub handoff: Handoff,
     /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
@@ -58,28 +61,32 @@ pub struct Account {
     pub forge: ForgeKind,
     #[serde(default)]
     pub host: Option<String>,
-    /// `cli` (gh/glab auth token) or `keyring`.
+    /// `cli` (gh/glab/tea) or `keyring`.
     #[serde(default)]
     pub token: TokenSource,
 }
 
 impl Account {
     pub fn host(&self) -> &str {
-        self.host.as_deref().unwrap_or(match self.forge {
-            ForgeKind::GitHub => "github.com",
-            ForgeKind::GitLab => "gitlab.com",
-        })
+        self.host.as_deref().unwrap_or(self.forge.default_host())
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Handoff {
-    /// The terminal you're in, else whichever of herdr or Rex is installed.
+    /// The multiplexer you're in, else herdr or Rex if installed, else a new terminal window,
+    /// else print the command.
     #[default]
     Auto,
     Herdr,
     Rex,
+    Tmux,
+    Zellij,
+    /// A new terminal window (iTerm2 or Terminal on macOS; `$TERMINAL` or a common one on Linux).
+    Terminal,
+    /// Print the command to run yourself.
+    Print,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -102,11 +109,78 @@ pub struct Notifications {
     pub done: bool,
     #[serde(default = "yes")]
     pub new_author: bool,
+    /// Webhooks and commands (`[[notifications.targets]]`); the toggles above are for the
+    /// desktop popup only.
+    #[serde(default)]
+    pub targets: Vec<NotifyTarget>,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { needs_approval: true, failed: true, done: true, new_author: true }
+        Self { needs_approval: true, failed: true, done: true, new_author: true, targets: Vec::new() }
+    }
+}
+
+/// One `[[notifications.targets]]` entry: a webhook or a command.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyTarget {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: TargetType,
+    /// Webhook URL. Never logged or shown: it often holds a secret.
+    #[serde(default, skip_serializing)]
+    pub url: Option<String>,
+    /// Read the webhook URL from this environment variable instead (of the daemon's process).
+    #[serde(default)]
+    pub url_env: Option<String>,
+    #[serde(default)]
+    pub format: WebhookFormat,
+    /// argv for `type = "command"`; run without a shell, the event as JSON on stdin.
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Only these kinds; empty = all.
+    #[serde(default)]
+    pub kinds: Vec<crate::notify::Kind>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetType {
+    Webhook,
+    Command,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookFormat {
+    #[default]
+    Json,
+    Slack,
+    Discord,
+    Ntfy,
+}
+
+impl Notifications {
+    fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for t in &self.targets {
+            let n = &t.name;
+            if n.is_empty() || n == "desktop" || !seen.insert(n) {
+                bail!("notification target name {n:?} is empty, reserved (desktop) or used twice");
+            }
+            match t.kind {
+                TargetType::Webhook => match (&t.url, &t.url_env) {
+                    (Some(u), None) if u.starts_with("https://") || u.starts_with("http://") => {}
+                    (None, Some(_)) => {}
+                    (Some(_), None) => bail!("notification target {n:?}: url must start with https:// or http://"),
+                    _ => bail!("notification target {n:?}: a webhook needs exactly one of url or url_env"),
+                },
+                TargetType::Command if t.command.is_empty() => bail!("notification target {n:?}: command is empty"),
+                TargetType::Command => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -136,6 +210,7 @@ pub enum AgentKind {
     Claude,
     OpenCode,
     Codex,
+    Gemini,
 }
 
 impl AgentKind {
@@ -144,6 +219,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Codex => "Codex",
+            AgentKind::Gemini => "Gemini CLI (experimental)",
         }
     }
     /// Binary name, which is also the config value.
@@ -152,9 +228,10 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::OpenCode => "opencode",
             AgentKind::Codex => "codex",
+            AgentKind::Gemini => "gemini",
         }
     }
-    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::OpenCode, AgentKind::Codex];
+    pub const ALL: [AgentKind; 4] = [AgentKind::Claude, AgentKind::OpenCode, AgentKind::Codex, AgentKind::Gemini];
     /// The next agent in [`Self::ALL`] (the TUI's `a` key cycles through them).
     pub fn next(self) -> Self {
         let i = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
@@ -223,6 +300,9 @@ pub struct RepoSettings {
     pub trust: Trust,
     #[serde(default)]
     pub schedule: Vec<Window>,
+    /// Where notifications go: `desktop` and/or target names. `None` = everywhere.
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
     #[serde(default)]
     pub reply: ReplySettings,
     #[serde(default)]
@@ -259,7 +339,7 @@ impl Default for Trust {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Window {
     /// `mon-fri`, `sat,sun`, `daily`, `tue`.
@@ -269,6 +349,21 @@ pub struct Window {
     /// IANA time zone; defaults to the system zone.
     #[serde(default)]
     pub tz: Option<String>,
+    /// While this window is the first active one: its level, agent and notify list replace the
+    /// repo's. The safety caps still apply on top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<Vec<String>>,
+}
+
+impl Window {
+    /// Sets more than days and times (the TUI's one-line schedule field can't keep these).
+    pub fn is_plain(&self) -> bool {
+        self.tz.is_none() && self.level.is_none() && self.agent.is_none() && self.notify.is_none()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -341,8 +436,11 @@ impl Default for Maintainer {
 
 impl Config {
     pub fn load(paths: &Paths) -> Result<Self> {
-        let file = paths.config_file();
-        let text = match std::fs::read_to_string(&file) {
+        Self::load_file(&paths.config_file())
+    }
+
+    fn load_file(file: &Path) -> Result<Self> {
+        let text = match std::fs::read_to_string(file) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
@@ -355,6 +453,7 @@ impl Config {
         if cfg.version > VERSION {
             bail!("config version {} is newer than this nightporter ({VERSION}); upgrade nightporter", cfg.version);
         }
+        cfg.notifications.validate()?;
         // Validate defaults eagerly so typos surface at load, not at the first event.
         cfg.resolve(None)?;
         Ok(cfg)
@@ -364,8 +463,13 @@ impl Config {
         expand_tilde(&self.code_dir)
     }
 
-    /// Effective settings for `repo`, reading its override file if present.
+    /// Effective settings for `repo` right now, reading its override file if present.
     pub fn settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
+        Ok(self.base_settings_for(paths, repo)?.at(&jiff::Zoned::now()))
+    }
+
+    /// `repo`'s settings before any schedule window applies: what its files say.
+    pub fn base_settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
         let file = paths.repo_file(repo);
         let over = match std::fs::read_to_string(&file) {
             Ok(t) => Some(t.parse::<toml::Table>().with_context(|| format!("in {}", file.display()))?),
@@ -384,6 +488,10 @@ impl Config {
         }
         let s: RepoSettings = merged.try_into()?;
         crate::schedule::validate(&s.schedule)?;
+        let known = |n: &String| n == "desktop" || self.notifications.targets.iter().any(|t| &t.name == n);
+        if let Some(n) = s.notify.iter().chain(s.schedule.iter().filter_map(|w| w.notify.as_ref())).flatten().find(|n| !known(n)) {
+            bail!("unknown notification target {n:?} in notify (use desktop or a [[notifications.targets]] name)");
+        }
         Ok(s.clamped())
     }
 }
@@ -397,6 +505,26 @@ impl RepoSettings {
         }
         self.maintainer.level = self.maintainer.level.min(Level::Draft);
         self
+    }
+
+    /// Apply the first schedule window active at `now` (its `level`, `agent`, `notify`), then
+    /// the caps again: a window can't lift `trust.open`'s cap or raise maintainer jobs, and
+    /// CI-failure jobs still stop at draft unless `ci_auto`.
+    pub fn at(mut self, now: &jiff::Zoned) -> Self {
+        if let Ok(Some(w)) = crate::schedule::matching(&self.schedule, now) {
+            let w = w.clone();
+            if let Some(l) = w.level {
+                self.level = l;
+                self.maintainer.level = self.maintainer.level.min(l);
+            }
+            if let Some(a) = w.agent {
+                self.agent = a;
+            }
+            if w.notify.is_some() {
+                self.notify = w.notify;
+            }
+        }
+        self.clamped()
     }
 
     pub fn concurrency(&self) -> usize {
@@ -456,7 +584,10 @@ pub fn validate(path: &Path, text: &str) -> Result<()> {
     if path.file_name().is_some_and(|n| n == "config.toml") {
         Config::parse(text)?;
     } else {
-        Config::parse("")?.resolve(Some(&text.parse::<toml::Table>()?))?;
+        // Against the real config.toml (above repos/), so notify can name its targets.
+        let global = path.ancestors().map(|d| d.join("config.toml")).find(|p| p.is_file());
+        let cfg = global.and_then(|p| Config::load_file(&p).ok()).map_or_else(|| Config::parse(""), Ok)?;
+        cfg.resolve(Some(&text.parse::<toml::Table>()?))?;
     }
     Ok(())
 }
@@ -666,6 +797,64 @@ mod tests {
         let s = c.resolve(Some(&open)).unwrap();
         assert_eq!(s.level, Level::Suggest);
         assert_eq!(s.maintainer.level, Level::Suggest);
+    }
+
+    #[test]
+    fn first_active_window_overrides_level_agent_notify() {
+        let c = Config::parse(
+            r#"
+            [[notifications.targets]]
+            name = "phone"
+            type = "command"
+            command = ["true"]
+            [defaults]
+            level = "suggest"
+            notify = ["desktop", "phone"]
+            [[defaults.schedule]]
+            days = "mon-fri"
+            windows = ["09:00-18:00"]
+            tz = "Europe/Zurich"
+            level = "draft"
+            notify = ["desktop"]
+            [[defaults.schedule]]
+            days = "daily"
+            windows = ["00:00-24:00"]
+            tz = "Europe/Zurich"
+            level = "auto"
+            agent = "codex"
+            "#,
+        )
+        .unwrap();
+        let at = |t: &str| c.resolve(None).unwrap().at(&format!("{t}[Europe/Zurich]").parse().unwrap());
+        // Thursday 10:00: both windows match, the first wins; agent falls back to the repo's.
+        let day = at("2026-11-05T10:00");
+        assert_eq!((day.level, day.agent, day.notify.as_deref()), (Level::Draft, AgentKind::Claude, Some(&["desktop".to_string()][..])));
+        // Thursday 23:00: only the second; notify falls back to the repo's list.
+        let night = at("2026-11-05T23:00");
+        assert_eq!((night.level, night.agent), (Level::Auto, AgentKind::Codex));
+        assert_eq!(night.notify.unwrap(), ["desktop", "phone"]);
+        assert_eq!(night.maintainer.level, Level::Draft, "a window never raises maintainer jobs");
+        // The caps still win: trust.open keeps it at suggest whatever the window says.
+        let open: toml::Table = toml::from_str("[trust]\nopen = true").unwrap();
+        let s = c.resolve(Some(&open)).unwrap().at(&"2026-11-05T23:00[Europe/Zurich]".parse().unwrap());
+        assert_eq!(s.level, Level::Suggest);
+    }
+
+    #[test]
+    fn notify_names_must_exist() {
+        assert!(Config::parse("[defaults]\nnotify = [\"desktop\"]").is_ok());
+        assert!(Config::parse("[defaults]\nnotify = [\"phone\"]").is_err());
+        assert!(Config::parse("[[defaults.schedule]]\ndays = \"daily\"\nwindows = [\"00:00-24:00\"]\nnotify = [\"phone\"]").is_err());
+        // A repo file is checked against the config.toml it sits under.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("config.toml"),
+            "[[notifications.targets]]\nname = \"phone\"\ntype = \"command\"\ncommand = [\"true\"]",
+        )
+        .unwrap();
+        let repo = d.path().join("repos/github/o/r.toml");
+        assert!(validate(&repo, "notify = [\"phone\"]").is_ok());
+        assert!(validate(&repo, "notify = [\"pager\"]").is_err());
     }
 
     #[test]

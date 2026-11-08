@@ -7,9 +7,11 @@ use jiff::civil::{Time, Weekday};
 
 /// True when `now` falls in any window. No windows = always active.
 pub fn is_active(windows: &[Window], now: &Zoned) -> Result<bool> {
-    if windows.is_empty() {
-        return Ok(true);
-    }
+    Ok(windows.is_empty() || matching(windows, now)?.is_some())
+}
+
+/// The first window `now` falls in (its overrides win).
+pub fn matching<'a>(windows: &'a [Window], now: &Zoned) -> Result<Option<&'a Window>> {
     for w in windows {
         let local = match &w.tz {
             Some(tz) => now.in_tz(tz).with_context(|| format!("unknown time zone {tz:?}"))?,
@@ -29,11 +31,11 @@ pub fn is_active(windows: &[Window], now: &Zoned) -> Result<bool> {
                 (days.contains(&today) && t >= start) || (days.contains(&yesterday) && t < end)
             };
             if hit {
-                return Ok(true);
+                return Ok(Some(w));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Validate windows without evaluating them (used when config is loaded/edited).
@@ -111,7 +113,12 @@ mod tests {
     use super::*;
 
     fn w(days: &str, ranges: &[&str]) -> Window {
-        Window { days: days.into(), windows: ranges.iter().map(ToString::to_string).collect(), tz: Some("Europe/Zurich".into()) }
+        Window {
+            days: days.into(),
+            windows: ranges.iter().map(ToString::to_string).collect(),
+            tz: Some("Europe/Zurich".into()),
+            ..Default::default()
+        }
     }
     fn at(s: &str) -> Zoned {
         format!("{s}[Europe/Zurich]").parse().unwrap()
@@ -139,6 +146,17 @@ mod tests {
         assert!(is_active(&s, &at("2026-11-06T23:00")).unwrap()); // Fri night
         assert!(is_active(&s, &at("2026-11-07T05:00")).unwrap()); // Sat early = Fri window
         assert!(!is_active(&s, &at("2026-11-06T05:00")).unwrap()); // Fri early = Thu window
+    }
+
+    #[test]
+    fn first_matching_window_wins() {
+        let mut a = w("mon-fri", &["09:00-18:00"]);
+        a.level = Some(crate::config::Level::Draft);
+        let b = w("daily", &["00:00-24:00"]);
+        let s = [a, b];
+        assert_eq!(matching(&s, &at("2026-11-05T10:00")).unwrap().unwrap().level, Some(crate::config::Level::Draft));
+        assert_eq!(matching(&s, &at("2026-11-05T20:00")).unwrap().unwrap().level, None);
+        assert!(matching(&[], &at("2026-11-05T20:00")).unwrap().is_none());
     }
 
     #[test]

@@ -101,7 +101,7 @@ enum Cmd {
     },
     /// Re-run a finished or failed job's requests as a new job.
     Retry { id: i64 },
-    /// Take over a job interactively in herdr or Rex (opens it with a briefed agent).
+    /// Take over a job interactively in herdr, Rex, tmux, Zellij or a new terminal (opens it with a briefed agent).
     Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
     Show { id: i64 },
@@ -151,11 +151,22 @@ enum Cmd {
         #[arg(long, default_value = "30m")]
         timeout: String,
     },
+    /// Notification targets (desktop, webhooks, commands).
+    Notify {
+        #[command(subcommand)]
+        cmd: NotifyCmd,
+    },
     /// Teach coding agents (Claude Code) how to work with Night Porter.
     Skill {
         #[command(subcommand)]
         cmd: SkillCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum NotifyCmd {
+    /// Send a sample event to one target (`desktop` for the popup), or to all of them.
+    Test { target: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -202,7 +213,7 @@ enum InboxCmd {
 
 #[derive(Subcommand)]
 enum TokenCmd {
-    /// Store a token for `github` or `gitlab` (optionally a self-hosted host) in the keychain.
+    /// Store a token for `github`, `gitlab` or `forgejo` (optionally a self-hosted host) in the keychain.
     Set { forge: String, host: Option<String> },
 }
 
@@ -275,6 +286,7 @@ fn main() -> Result<()> {
             std::process::exit(code)
         }
         Cmd::Skill { cmd } => cmd_skill(&cmd),
+        Cmd::Notify { cmd: NotifyCmd::Test { target } } => notify_test(&paths, target.as_deref()),
         Cmd::Daemon => {
             init_tracing();
             rt()?.block_on(daemon::run(paths))
@@ -481,8 +493,8 @@ fn cmd_update(db: &Db) -> Result<()> {
 }
 
 fn cmd_token_set(forge: &str, host: Option<String>) -> Result<()> {
-    let f = ForgeKind::parse(forge).context("forge must be github or gitlab")?;
-    let host = host.unwrap_or_else(|| if f == ForgeKind::GitHub { "github.com".into() } else { "gitlab.com".into() });
+    let f = ForgeKind::parse(forge).context("forge must be github, gitlab or forgejo")?;
+    let host = host.unwrap_or_else(|| f.default_host().into());
     eprint!("Paste the token for {host} and press Enter (input is hidden): ");
     let t = read_secret()?;
     if t.is_empty() {
@@ -506,6 +518,13 @@ fn cmd_service(paths: &Paths, cmd: &ServiceCmd) -> Result<()> {
 
 /// The agent configured for a repo (Claude Code if the config can't be read).
 /// Commands that only read state.
+fn notify_test(paths: &Paths, target: Option<&str>) -> Result<()> {
+    let cfg = config::Config::load(paths)?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    println!("{}", rt.block_on(notify::test(&cfg.notifications, target))?);
+    Ok(())
+}
+
 fn read_only(cmd: &Cmd) -> bool {
     matches!(
         cmd,
@@ -630,7 +649,7 @@ fn inbox(paths: &Paths, cmd: InboxCmd) -> Result<()> {
     Ok(())
 }
 
-fn read_secret() -> Result<String> {
+pub(crate) fn read_secret() -> Result<String> {
     use std::io::BufRead;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     if tty {
