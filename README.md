@@ -7,7 +7,7 @@
 
 **Handles your PRs while you're away.**
 
-[Website](https://night-porter.com) · [Docs](https://docs.night-porter.com) · [X](https://x.com/NightPorterDev) · [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) · [Mastodon](https://mastodon.social/@nightporter)
+[Website](https://night-porter.com) · [Demo video](https://www.youtube.com/watch?v=vjD-h2O7WUI) · [Docs](https://docs.night-porter.com) · [X](https://x.com/NightPorterDev) · [Bluesky](https://bsky.app/profile/did:plc:zojgcz6b634zmhrkl7hjlozs) · [Mastodon](https://mastodon.social/@nightporter)
 
 Night Porter is like an IRC bouncer for your pull requests. It watches GitHub and GitLab for
 review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
