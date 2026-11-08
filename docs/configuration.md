@@ -43,7 +43,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `retention_days` | `30` | history kept in the state db |
 | `worktree_idle_days` | `14` | idle worktrees are removed after this |
 | `marketplaces` | `[]` | extra marketplace git URLs |
-| `handoff` | `auto` | where `h` opens a job: `auto`, `herdr` or `rex` |
+| `handoff` | `auto` | where `h` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print` ([details](/herdr#take-over-a-job)) |
 | `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
 | `[[accounts]]` | | `forge = "github" \| "gitlab"`, `host` (default github.com / gitlab.com), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`; store a keyring token with `nightporter token set <forge> [host]`) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author` |

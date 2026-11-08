@@ -16,7 +16,7 @@ const SIDEBAR = [
     items: [
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Daily use', link: '/daily-use' },
-      { text: 'herdr, Rex and scripts', link: '/herdr' },
+      { text: 'herdr, Rex, tmux and scripts', link: '/herdr' },
       { text: 'Troubleshooting', link: '/troubleshooting' },
     ],
   },

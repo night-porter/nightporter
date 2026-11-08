@@ -63,16 +63,17 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - A once-a-day, anonymous check for a new release (`check_updates`); it never updates itself
 - Leaves no files in your repositories (it uses its own branches and worktrees)
 
-## Works with herdr and Rex
+## Works with herdr, Rex, tmux and Zellij
 
 [herdr](https://herdr.dev) and [Rex](https://www.superlogical.com/rex) are where you run and
 watch agents; Night Porter is what runs while you're not there. They fit together:
 
-- **Take over a job in herdr or Rex.** On a finished or waiting job, press `h` in the TUI (or run
-  `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr or Rex (`handoff`
-  in the config picks; `auto` by default),
+- **Take over a job.** On a finished or waiting job, press `h` in the TUI (or run
+  `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr, Rex, tmux, Zellij
+  or a new terminal window (`handoff` in the config picks; `auto` uses the one you're in),
   starts your agent, and briefs it: what was asked, what it changed, which checks need you,
-  and what is drafted but not posted. You continue from there, interactively.
+  and what is drafted but not posted. You continue from there, interactively. With none of
+  them around, it prints the command to run.
 - **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
 
   ```sh
@@ -108,7 +109,7 @@ nightporter stop       # turn the background daemon off (nightporter start turns
 ```
 
 Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab), plus `claude`, `opencode` and/or `codex`.
-`gitleaks` is optional but recommended. `herdr` or Rex is optional, for taking over jobs interactively.
+`gitleaks` is optional but recommended. herdr, Rex, tmux or Zellij is optional, for taking over jobs interactively.
 
 ## Configuration
 

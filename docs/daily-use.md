@@ -58,7 +58,7 @@ invalid file from the editor is never written; you can fix it or throw the edit 
 | `x` | dismiss: put the job away without replying or pushing. Its status becomes `dismissed` and it stays in History |
 | `u` | undo the last dismiss, or restore the selected dismissed job |
 | `X` | delete a finished or dismissed job for good, with its logs (asks first) |
-| `h` | take over in [herdr or Rex](/herdr) |
+| `h` | take over in [herdr, Rex, tmux or Zellij](/herdr) |
 | `c` | copy the push command (for `suggest` jobs) |
 | `y` | copy the reply text |
 
@@ -105,7 +105,7 @@ nightporter retry 42
 nightporter dismiss 42 43        # put away, nothing pushed or posted
 nightporter restore 42           # bring a dismissed job back
 nightporter purge 42 43          # delete for good, with logs (asks; --yes to skip)
-nightporter handoff 42           # take over in herdr or Rex
+nightporter handoff 42           # take over in herdr, Rex, tmux or Zellij
 nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
 nightporter events --json        # follow every job and inbox change
 
