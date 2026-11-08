@@ -61,6 +61,11 @@ pub static SETTINGS: &[Setting] = &[
         Bool,
         "Once a day, ask GitHub for the latest release number and tell you when there's a new one. Sends nothing about you or your repos.",
     ),
+    s(
+        "pr_commands",
+        Bool,
+        "Act on /nightporter approve, dismiss, retry and status in your own comments on a PR (only your account, checked by user id).",
+    ),
     s("marketplaces", List, "Extra pack marketplace git URLs."),
     s("notifications.needs_approval", Bool, "Desktop notification when a job needs your approval."),
     s("notifications.failed", Bool, "Desktop notification when a job fails."),

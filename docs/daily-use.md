@@ -90,6 +90,30 @@ style (with the style text), language and footer, the repo's own `CLAUDE.md` / `
 `prompt` and `env.prompt` files (with their contents), packs, hours, limits, trust lists, sandbox
 and checks. `e` there edits the repo's file.
 
+## From your phone
+
+Away from the TUI, comment on the PR or MR (in the GitHub or GitLab app, say):
+
+| comment | does |
+|---|---|
+| `/nightporter approve` | push and post a job that is **NEEDS APPROVAL** (like `a`) |
+| `/nightporter dismiss` | put the job away (like `x`) |
+| `/nightporter retry` | run a finished or failed job's requests again (like `t`) |
+| `/nightporter status` | Night Porter replies with the job's status |
+
+The command acts on Night Porter's newest job for that PR, and only when the comment is newer
+than the job. Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
+be (for example, nothing is waiting for approval). Each comment is acted on once.
+
+Only comments from your own account count: the user the token belongs to, checked by user ID.
+Comments by collaborators, maintainers, bots or apps posting for you are ignored, and no command
+comment ever reaches the agent as feedback. `approve` from a comment is stricter than `a`: it
+can't approve past a failed blocking check (`A`), and it can't let the agent run someone else's
+code (**NEEDS RUN APPROVAL**); use the TUI for those. "Approve" is always Night Porter's job,
+never the PR: Night Porter still never merges, closes or approves a PR. Night Porter looks at
+PRs whose newest job is waiting for you or changed in the last three days, once per
+`poll_interval`. Set `pr_commands = false` to turn it off.
+
 ## The CLI
 
 Everything in the TUI also works from the command line, which is handy for scripts and screen

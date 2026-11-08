@@ -206,6 +206,50 @@ pub fn parse_command(body: &str) -> Option<Verb> {
     })
 }
 
+/// A job command you post on the PR/MR yourself (e.g. from the forge's mobile app). Acts on Night
+/// Porter's newest job for that PR, never on the PR itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Approve,
+    Dismiss,
+    Retry,
+    Status,
+}
+
+/// Parse `/nightporter approve|dismiss|retry|status` from the first line that starts with it.
+pub fn parse_control(body: &str) -> Option<Control> {
+    body.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        if it.next()? != "/nightporter" {
+            return None;
+        }
+        match it.next()? {
+            "approve" => Some(Control::Approve),
+            "dismiss" => Some(Control::Dismiss),
+            "retry" => Some(Control::Retry),
+            "status" => Some(Control::Status),
+            _ => None,
+        }
+    })
+}
+
+/// A [`Control`] comment written by the token's own user (checked by user id).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlComment {
+    /// The forge's comment/note id (for the reaction and the processed-once record).
+    pub id: String,
+    pub control: Control,
+}
+
+/// The command in a comment, if the token's own user posted it after `since`.
+/// `me_id == 0` (unknown) never matches. Night Porter's own posts never count.
+pub fn control_of(me_id: u64, author_id: u64, via_app: bool, body: &str, created_at: &str, since: &str) -> Option<Control> {
+    if me_id == 0 || author_id != me_id || via_app || body.contains(crate::prompts::FOOTER_MARK) || !newer(created_at, Some(since)) {
+        return None;
+    }
+    parse_control(body)
+}
+
 /// What we need to check out and push a PR/MR.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PrInfo {
@@ -256,6 +300,21 @@ pub enum Forge {
 }
 
 impl Forge {
+    /// Comments on `number` posted after `since` by the token's own user that are job commands,
+    /// oldest first.
+    pub async fn controls(&self, repo: &RepoId, target: Target, number: u64, since: &str) -> Result<Vec<ControlComment>> {
+        match self {
+            Forge::GitHub(g) => g.controls(repo, number, since).await,
+            Forge::GitLab(g) => g.controls(repo, target, number, since).await,
+        }
+    }
+    /// Acknowledge a command comment with a thumbs-up.
+    pub async fn ack(&self, repo: &RepoId, target: Target, number: u64, comment: &str) -> Result<()> {
+        match self {
+            Forge::GitHub(g) => g.ack(repo, comment).await,
+            Forge::GitLab(g) => g.ack(repo, target, number, comment).await,
+        }
+    }
     pub fn me(&self) -> &str {
         match self {
             Forge::GitHub(g) => &g.me,
@@ -387,6 +446,27 @@ mod tests {
         assert_eq!(parse_command("  /nightporter triage"), Some(Verb::Triage));
         assert_eq!(parse_command("/nightporter merge"), None);
         assert_eq!(parse_command("see /nightporter fix"), None);
+    }
+
+    #[test]
+    fn controls() {
+        assert_eq!(parse_control("/nightporter approve"), Some(Control::Approve));
+        assert_eq!(parse_control("lgtm\n  /nightporter retry now"), Some(Control::Retry));
+        assert_eq!(parse_control("/nightporter dismiss"), Some(Control::Dismiss));
+        assert_eq!(parse_control("/nightporter status"), Some(Control::Status));
+        assert_eq!(parse_control("/nightporter merge"), None);
+        assert_eq!(parse_control("/nightporter fix"), None);
+        assert_eq!(parse_control("please /nightporter approve"), None);
+        assert_eq!(parse_control("/nightporterapprove"), None);
+        let at = "2026-11-05T10:00:01Z";
+        let since = "2026-11-05T10:00:00Z";
+        assert_eq!(control_of(7, 7, false, "/nightporter approve", at, since), Some(Control::Approve));
+        assert_eq!(control_of(7, 8, false, "/nightporter approve", at, since), None, "someone else");
+        assert_eq!(control_of(0, 0, false, "/nightporter approve", at, since), None, "unknown id");
+        assert_eq!(control_of(7, 7, true, "/nightporter approve", at, since), None, "an app acting as me");
+        assert_eq!(control_of(7, 7, false, "/nightporter approve", since, since), None, "older than the job");
+        let ours = format!("/nightporter approve\n{}", crate::prompts::FOOTER_MARK);
+        assert_eq!(control_of(7, 7, false, &ours, at, since), None, "our own post");
     }
 
     #[test]

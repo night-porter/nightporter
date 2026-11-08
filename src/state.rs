@@ -392,6 +392,17 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The newest job on each PR/issue that a `/nightporter` command on the forge may act on:
+    /// waiting for you, or updated since `since` (bounds the API calls per poll).
+    pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
+        let mut st = self.0.prepare(&format!(
+            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY repo, target, number)
+               AND (status IN ('awaiting_approval','awaiting_run_approval','ready') OR updated_at >= ?1) ORDER BY id"
+        ))?;
+        let rows = st.query_map([since], row_job)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Any job on this PR that isn't finished (one job per PR at a time).
     pub fn pr_busy(&self, repo: &RepoId, number: u64) -> Result<bool> {
         Ok(self.0.query_row(
