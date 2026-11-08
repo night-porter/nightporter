@@ -44,7 +44,7 @@ pub struct Config {
     /// Once a day, ask GitHub for the latest release number (anonymous; see `update.rs`).
     #[serde(default = "yes")]
     pub check_updates: bool,
-    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr` or `rex`.
+    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print`.
     #[serde(default)]
     pub handoff: Handoff,
     /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
@@ -75,11 +75,18 @@ impl Account {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Handoff {
-    /// The terminal you're in, else whichever of herdr or Rex is installed.
+    /// The multiplexer you're in, else herdr or Rex if installed, else a new terminal window,
+    /// else print the command.
     #[default]
     Auto,
     Herdr,
     Rex,
+    Tmux,
+    Zellij,
+    /// A new terminal window (iTerm2 or Terminal on macOS; `$TERMINAL` or a common one on Linux).
+    Terminal,
+    /// Print the command to run yourself.
+    Print,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

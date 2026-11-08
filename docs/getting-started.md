@@ -22,7 +22,7 @@ Night Porter is 0.x. Expect breaking changes.
 | `glab` | GitLab (gitlab.com or self-hosted) |
 | `claude`, `opencode` or `codex` | the agent (Codex: `npm install -g @openai/codex` or `brew install --cask codex`) |
 | `gitleaks` | optional, a stronger secrets check |
-| `herdr` or Rex | optional, for [taking over jobs](/herdr) |
+| herdr, Rex, tmux or Zellij | optional, for [taking over jobs](/herdr) |
 | `bubblewrap` and `socat` | Linux only, for Claude Code’s sandbox |
 
 Log in to `gh` and/or `glab` first (`gh auth login`, `glab auth login`), and run `claude`,

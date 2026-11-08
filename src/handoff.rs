@@ -1,12 +1,13 @@
-//! Taking over a job interactively: open it in herdr (<https://herdr.dev>) or Rex
-//! (<https://www.superlogical.com/rex>) at the job's worktree, with an agent that's already briefed.
+//! Taking over a job interactively: open it in herdr (<https://herdr.dev>), Rex
+//! (<https://www.superlogical.com/rex>), tmux, Zellij or a new terminal window at the job's
+//! worktree, with an agent that's already briefed (or print the command to do it by hand).
 
 use crate::config::{AgentKind, Handoff};
 use crate::paths::Paths;
 use crate::state::{Db, Job, JobStatus};
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
     if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
@@ -17,22 +18,43 @@ pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
     }
     let choice = crate::config::Config::load(paths).map(|c| c.handoff).unwrap_or_default();
     let agent = crate::agent_for(paths, &j.repo);
-    match pick(choice)? {
+    let target = pick(choice, |k| std::env::var_os(k).is_some(), available);
+    let res = match target {
+        Handoff::Herdr => crate::herdr::handoff(db, j, agent),
         Handoff::Rex => rex(db, j, agent),
-        _ => crate::herdr::handoff(db, j, agent),
+        t => launch(paths, db, j, agent, t),
+    };
+    match res {
+        // `auto` never leaves you with nothing: say what failed and how to do it by hand.
+        Err(e) if choice == Handoff::Auto && target != Handoff::Print => {
+            Ok(format!("{} ({e:#})", launch(paths, db, j, agent, Handoff::Print)?))
+        }
+        r => r,
     }
 }
 
-/// `auto`: the terminal you're in (herdr or Rex), else whichever is installed, herdr first.
-fn pick(choice: Handoff) -> Result<Handoff> {
-    Ok(match choice {
-        Handoff::Auto if std::env::var_os("HERDR_BIN_PATH").is_some() => Handoff::Herdr,
-        Handoff::Auto if std::env::var_os("REX_SESSION").is_some() => Handoff::Rex,
-        Handoff::Auto if on_path("herdr").is_some() => Handoff::Herdr,
-        Handoff::Auto if rex_bin().is_some() => Handoff::Rex,
-        Handoff::Auto => bail!("neither herdr nor Rex was found; install one (https://herdr.dev, https://www.superlogical.com/rex)"),
-        c => c,
-    })
+/// `auto`: the multiplexer you're in, else herdr or Rex if installed, else a new terminal
+/// window, else print the command. `env` says whether a variable is set; `has` whether a
+/// target is installed / usable here.
+fn pick(choice: Handoff, env: impl Fn(&str) -> bool, has: impl Fn(Handoff) -> bool) -> Handoff {
+    if choice != Handoff::Auto {
+        return choice;
+    }
+    let inside = [("HERDR_BIN_PATH", Handoff::Herdr), ("REX_SESSION", Handoff::Rex), ("TMUX", Handoff::Tmux), ("ZELLIJ", Handoff::Zellij)];
+    if let Some((_, t)) = inside.iter().find(|(k, _)| env(k)) {
+        return *t;
+    }
+    [Handoff::Herdr, Handoff::Rex, Handoff::Terminal].into_iter().find(|t| has(*t)).unwrap_or(Handoff::Print)
+}
+
+fn available(t: Handoff) -> bool {
+    match t {
+        Handoff::Herdr => on_path("herdr").is_some(),
+        Handoff::Rex => rex_bin().is_some(),
+        // Over SSH a new window would open on the far end's screen (or nowhere).
+        Handoff::Terminal => std::env::var_os("SSH_CONNECTION").is_none() && terminal().is_some(),
+        _ => false,
+    }
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
@@ -55,21 +77,155 @@ fn rex_bin() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Unique (so you can take over the same job twice) and safe as a Rex label or tmux/Zellij name.
+fn label(j: &Job) -> String {
+    let slug: String = j.repo.path.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    format!("np-{slug}-{}-{}", j.number, crate::state::now() % 100_000)
+}
+
+/// The agent's interactive command line, with `brief` as its first prompt.
+fn agent_cmd(agent: AgentKind, brief: &str) -> Vec<String> {
+    let mut v = vec![agent.bin().to_string()];
+    match agent {
+        AgentKind::Claude | AgentKind::Codex => v.push(brief.into()),
+        AgentKind::OpenCode => v.extend(["--prompt".into(), brief.into()]),
+    }
+    v
+}
+
+/// POSIX single-quoting: safe for any string (paths and briefings come from strangers).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `cd <worktree> && <agent> "$(cat <brief file>)"`: the briefing is read from a file at run
+/// time, never pasted into the command.
+fn shell_line(worktree: &str, agent: AgentKind, brief_file: &Path) -> String {
+    const BRIEF: &str = "\0brief";
+    let cmd: Vec<String> = agent_cmd(agent, BRIEF)
+        .iter()
+        .map(|a| if a == BRIEF { format!("\"$(cat {})\"", sh_quote(&brief_file.to_string_lossy())) } else { sh_quote(a) })
+        .collect();
+    format!("cd {} && {}", sh_quote(worktree), cmd.join(" "))
+}
+
+/// tmux, Zellij, a new terminal window, or printing: all run (or show) a small script in the
+/// job's directory that starts the briefed agent at the worktree.
+fn launch(paths: &Paths, db: &Db, j: &Job, agent: AgentKind, target: Handoff) -> Result<String> {
+    let dir = paths.job_dir(j.id);
+    std::fs::create_dir_all(&dir)?;
+    let brief = dir.join("handoff-brief.md");
+    std::fs::write(&brief, crate::herdr::briefing(db, j))?;
+    let line = shell_line(&j.worktree, agent, &brief);
+    if target == Handoff::Print {
+        return Ok(format!("run this in a terminal to take over: {line}"));
+    }
+    // `.command` so macOS terminals run it when opened.
+    let script = dir.join("handoff.command");
+    std::fs::write(&script, format!("#!/bin/sh\n{line}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let script = script.to_string_lossy().into_owned();
+    let label = label(j);
+    let wt = j.worktree.as_str();
+    let who = agent.label();
+    match target {
+        Handoff::Tmux if std::env::var_os("TMUX").is_some() => {
+            run("tmux", &["new-window", "-n", &label, "-c", wt, "--", "/bin/sh", &script])?;
+            Ok(format!("opened tmux window \"{label}\" with {who}"))
+        }
+        Handoff::Tmux => {
+            run("tmux", &["new-session", "-d", "-s", &label, "-c", wt, "--", "/bin/sh", &script])?;
+            Ok(format!("started tmux session with {who}; attach with: tmux attach -t {label}"))
+        }
+        Handoff::Zellij if std::env::var_os("ZELLIJ").is_some() => {
+            run("zellij", &["action", "new-pane", "--name", &label, "--cwd", wt, "--", "/bin/sh", &script])?;
+            Ok(format!("opened Zellij pane \"{label}\" with {who}"))
+        }
+        Handoff::Zellij => {
+            run("zellij", &["attach", "--create-background", &label])?;
+            run("zellij", &["--session", &label, "action", "new-pane", "--cwd", wt, "--", "/bin/sh", &script])?;
+            Ok(format!("started Zellij session with {who}; attach with: zellij attach {label}"))
+        }
+        _ => {
+            let (bin, args) = terminal().context("no terminal found; set $TERMINAL or use handoff = \"print\"")?;
+            let mut cmd = Command::new(&bin);
+            // iTerm types the command into a new window's login shell (so your PATH applies);
+            // the path goes in as an AppleScript argument, never spliced into the script.
+            let arg = if bin == Path::new("osascript") { sh_quote(&script) } else { script };
+            cmd.args(&args).arg(arg).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            if cfg!(target_os = "macos") {
+                run_cmd(&mut cmd)?;
+            } else {
+                cmd.spawn().with_context(|| format!("run {}", bin.display()))?; // stays open; don't wait
+            }
+            Ok(format!("opened a new terminal window with {who}"))
+        }
+    }
+}
+
+fn run(bin: &str, args: &[&str]) -> Result<()> {
+    run_cmd(Command::new(bin).args(args))
+}
+
+fn run_cmd(cmd: &mut Command) -> Result<()> {
+    let bin = cmd.get_program().to_string_lossy().into_owned();
+    let out = cmd.output().with_context(|| format!("run {bin}"))?;
+    if !out.status.success() {
+        bail!("{bin}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// A program (plus leading args) that opens a new window running the script given after them.
+/// macOS: iTerm2 if installed, else Terminal (which runs `.command` files in a login shell). Elsewhere: `$TERMINAL`, then common emulators.
+fn terminal() -> Option<(PathBuf, Vec<&'static str>)> {
+    if cfg!(target_os = "macos") {
+        let home = std::env::home_dir().unwrap_or_default();
+        let iterm = ["/Applications".into(), home.join("Applications")].iter().any(|d: &PathBuf| d.join("iTerm.app").is_dir());
+        return Some(if iterm {
+            let script = [
+                "on run argv",
+                "tell application \"iTerm\"",
+                "tell current session of (create window with default profile) to write text (item 1 of argv)",
+                "end tell",
+                "end run",
+            ];
+            ("osascript".into(), script.iter().flat_map(|l| ["-e", l]).collect())
+        } else {
+            ("open".into(), vec!["-a", "Terminal"])
+        });
+    }
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return None;
+    }
+    if let Some(t) = std::env::var_os("TERMINAL").filter(|t| !t.is_empty()) {
+        return Some((t.into(), vec!["-e"]));
+    }
+    [
+        ("x-terminal-emulator", vec!["-e"]),
+        ("ghostty", vec!["-e"]),
+        ("kitty", vec![]),
+        ("wezterm", vec!["start", "--"]),
+        ("gnome-terminal", vec!["--"]),
+        ("konsole", vec!["-e"]),
+    ]
+    .into_iter()
+    .find_map(|(name, args)| on_path(name).map(|p| (p, args)))
+}
+
 /// A new Rex session at the worktree, running the agent with the briefing as its first prompt.
 fn rex(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
     let bin = rex_bin().context("Rex not found: install it from https://www.superlogical.com/rex or set REX_BIN")?;
-    let slug: String = j.repo.path.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    // Labels must be unique; a suffix lets you take over the same job twice.
-    let label = format!("np-{slug}-{}-{}", j.number, crate::state::now() % 100_000);
+    let label = label(j);
     // Through your login shell, so the agent is on PATH as it is in your terminal.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let brief = crate::herdr::briefing(db, j);
     let mut cmd = Command::new(&bin);
-    cmd.args(["new", &label, "-c", &j.worktree, "--keep-open", "--shell", &shell, "--json", "--", agent.bin()]);
-    match agent {
-        AgentKind::Claude | AgentKind::Codex => cmd.arg(&brief),
-        AgentKind::OpenCode => cmd.args(["--prompt", &brief]),
-    };
+    cmd.args(["new", &label, "-c", &j.worktree, "--keep-open", "--shell", &shell, "--json", "--"]).args(agent_cmd(agent, &brief));
     let out = cmd.output().context("run rex")?;
     if !out.status.success() {
         bail!("rex new: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -112,7 +268,64 @@ mod tests {
         let dash = args.iter().position(|a| *a == "--").unwrap();
         assert_eq!(args[dash + 1], "claude");
         assert!(calls.contains("renamed foo"), "the agent gets the briefing: {calls}");
-        assert_eq!(pick(Handoff::Rex).unwrap(), Handoff::Rex);
         unsafe { std::env::remove_var("REX_BIN") };
+    }
+
+    #[test]
+    fn auto_prefers_the_multiplexer_you_are_in_then_installed_then_terminal_then_print() {
+        let none = |_: Handoff| false;
+        assert_eq!(pick(Handoff::Auto, |k| k == "TMUX", |_| true), Handoff::Tmux);
+        assert_eq!(pick(Handoff::Auto, |k| k == "ZELLIJ", none), Handoff::Zellij);
+        assert_eq!(pick(Handoff::Auto, |k| k == "REX_SESSION" || k == "TMUX", none), Handoff::Rex, "Rex inside tmux");
+        assert_eq!(pick(Handoff::Auto, |k| k == "HERDR_BIN_PATH" || k == "TMUX", none), Handoff::Herdr);
+        assert_eq!(pick(Handoff::Auto, |_| false, |_| true), Handoff::Herdr);
+        assert_eq!(pick(Handoff::Auto, |_| false, |t| t != Handoff::Herdr), Handoff::Rex);
+        assert_eq!(pick(Handoff::Auto, |_| false, |t| t == Handoff::Terminal), Handoff::Terminal);
+        assert_eq!(pick(Handoff::Auto, |_| false, none), Handoff::Print);
+        assert_eq!(pick(Handoff::Zellij, |k| k == "TMUX", |_| true), Handoff::Zellij, "an explicit choice wins");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_line_passes_hostile_paths_and_briefings_through_intact() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("it's $(touch pwned) `x` \"q\"\nline");
+        std::fs::create_dir(&wt).unwrap();
+        let brief = d.path().join("b'r $HOME.md");
+        let text = "Fix \"it\"; $(touch pwned) `rm -rf ~` 'quoted' \\ end\nsecond line";
+        std::fs::write(&brief, text).unwrap();
+        let bin = d.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let out = d.path().join("out");
+        // A stub agent that records its working directory and each argument.
+        let stub = bin.join("opencode");
+        std::fs::write(&stub, format!("#!/bin/sh\nprintf '%s\\0' \"$(pwd -P)\" \"$@\" > '{}'\n", out.display())).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let line = shell_line(wt.to_str().unwrap(), AgentKind::OpenCode, &brief);
+        assert!(!line.contains("rm -rf"), "the briefing is never in the command: {line}");
+        let st = Command::new("/bin/sh").arg("-c").arg(&line).env("PATH", format!("{}:/usr/bin:/bin", bin.display())).status().unwrap();
+        assert!(st.success(), "{line}");
+        let got = std::fs::read_to_string(&out).unwrap();
+        let wt = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(got.split('\0').collect::<Vec<_>>(), [wt.to_str().unwrap(), "--prompt", text, ""]);
+        assert!(!d.path().join("pwned").exists() && !wt.join("pwned").exists());
+    }
+
+    #[test]
+    fn print_writes_the_briefing_to_the_job_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("cfg"), &d.path().join("data"));
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 3, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.worktree = d.path().to_string_lossy().into();
+        j.summary = "renamed foo".into();
+        let msg = launch(&paths, &db, &j, AgentKind::Claude, Handoff::Print).unwrap();
+        let brief = paths.job_dir(id).join("handoff-brief.md");
+        assert!(std::fs::read_to_string(&brief).unwrap().contains("renamed foo"));
+        assert!(msg.contains(&format!("&& 'claude' \"$(cat '{}')\"", brief.display())), "{msg}");
     }
 }

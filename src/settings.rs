@@ -55,7 +55,7 @@ pub static SETTINGS: &[Setting] = &[
     s("min_free_gb", Int, "Jobs wait while free disk space is below this many GB."),
     s("retention_days", Int, "Days of job history kept."),
     s("worktree_idle_days", Int, "Idle worktrees are removed after this many days."),
-    s("handoff", Choice(&["auto", "herdr", "rex"]), "Where h (take over) opens a job."),
+    s("handoff", Choice(&["auto", "herdr", "rex", "tmux", "zellij", "terminal", "print"]), "Where h (take over) opens a job."),
     s(
         "check_updates",
         Bool,

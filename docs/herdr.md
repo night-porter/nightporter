@@ -1,8 +1,8 @@
 ---
-description: "Take over a Night Porter job interactively in herdr or Rex, open the queue as a herdr popup, and script Night Porter with events and wait."
+description: "Take over a Night Porter job interactively in herdr, Rex, tmux, Zellij or a new terminal, open the queue as a herdr popup, and script Night Porter with events and wait."
 ---
 
-# Working with herdr and Rex
+# Working with herdr, Rex, tmux and Zellij
 
 Night Porter works with [herdr](https://herdr.dev) and
 [Rex](https://www.superlogical.com/rex). They’re where you run and watch agents; Night Porter is
@@ -16,18 +16,31 @@ On a finished or waiting job, press `h` in the TUI, or run:
 nightporter handoff <id>
 ```
 
-Night Porter opens the job’s worktree in herdr (a new workspace) or Rex (a new session), starts
-your agent and briefs it: what was asked, what it changed, which checks need you, and what is
-drafted but not posted. You carry on from there.
+Night Porter opens the job’s worktree, starts your agent and briefs it: what was asked, what it
+changed, which checks need you, and what is drafted but not posted. You carry on from there.
 
-Which one it uses:
+Where it opens:
 
 ```toml
 # ~/.config/nightporter/config.toml
-handoff = "auto"   # or "herdr" or "rex"
+handoff = "auto"   # or "herdr", "rex", "tmux", "zellij", "terminal" or "print"
 ```
 
-`auto` uses the one you’re running Night Porter in, else whichever is installed (herdr first).
+| Value | Opens |
+|---|---|
+| `herdr` | a new herdr workspace |
+| `rex` | a new Rex session |
+| `tmux` | a new window when you’re inside tmux, else a detached session (`tmux attach -t …`) |
+| `zellij` | a new pane when you’re inside Zellij, else a background session (`zellij attach …`) |
+| `terminal` | a new window: iTerm2 or Terminal on macOS; `$TERMINAL`, then `x-terminal-emulator`, Ghostty, kitty, WezTerm, GNOME Terminal or Konsole on Linux |
+| `print` | nothing: it prints the `cd … && <agent> …` command for you to run |
+
+`auto` uses the multiplexer you’re running Night Porter in (herdr, Rex, tmux or Zellij), else
+herdr or Rex if installed, else a new terminal window (not over SSH), else prints the command.
+If opening fails, `auto` prints the command too.
+
+For tmux, Zellij, terminal and print, the briefing is written to `handoff-brief.md` in the job’s
+directory and read from there when the agent starts; it is never pasted into a command line.
 Rex’s `rex` command lives inside the app on macOS; Night Porter finds it there, or set `REX_BIN`.
 
 ## The queue inside herdr
