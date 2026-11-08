@@ -11,7 +11,7 @@
 
 Night Porter is like an IRC bouncer for your pull requests. It watches GitHub, GitLab and Forgejo/Gitea
 (Codeberg) for review comments, failing CI and merge conflicts on your PRs and MRs, then runs a coding agent
-(Claude Code, OpenCode or Codex) on your local clone to deal with them, within the rules you set.
+(Claude Code, OpenCode, Codex or Gemini CLI) on your local clone to deal with them, within the rules you set.
 
 Most agent tools are cockpits: you start the agent and watch it. Night Porter is the night
 shift. It starts work **by itself** when something happens on your PRs, and it's built to be safe
@@ -47,7 +47,7 @@ Night Porter **never** merges, force-pushes, closes or approves.
 
 - GitHub (github.com), GitLab (gitlab.com and self-hosted, for example `git.drupalcode.org`) and
   Forgejo/Gitea (codeberg.org, gitea.com and self-hosted)
-- Claude Code, OpenCode and Codex
+- Claude Code, OpenCode, Codex and Gemini CLI
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
 - Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
 - Several active windows per day; events outside them are queued. Each window can set its own
@@ -115,7 +115,7 @@ nightporter stop       # turn the background daemon off (nightporter start turns
 ```
 
 Requirements: `git`, plus `gh` (GitHub) and/or `glab` (GitLab) and/or a Forgejo/Gitea access token
-(or a `tea` login), plus `claude`, `opencode` and/or `codex`.
+(or a `tea` login), plus `claude`, `opencode`, `codex` and/or `gemini`.
 `gitleaks` is optional but recommended. herdr, Rex, tmux or Zellij is optional, for taking over jobs interactively.
 
 ## Configuration

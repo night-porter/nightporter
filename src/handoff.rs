@@ -89,6 +89,8 @@ fn agent_cmd(agent: AgentKind, brief: &str) -> Vec<String> {
     match agent {
         AgentKind::Claude | AgentKind::Codex => v.push(brief.into()),
         AgentKind::OpenCode => v.extend(["--prompt".into(), brief.into()]),
+        // A bare prompt makes `gemini` answer once and exit; `-i` keeps the session open.
+        AgentKind::Gemini => v.extend(["-i".into(), brief.into()]),
     }
     v
 }

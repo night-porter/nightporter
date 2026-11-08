@@ -46,6 +46,7 @@ pub const BUILTIN_PROTECTED: &[&str] = &[
     "opencode.json",
     "opencode.jsonc",
     ".codex/**",
+    ".gemini/**",
     ".mcp.json",
     ".cursor/**",
     ".cursorrules",
