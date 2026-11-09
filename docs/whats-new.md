@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.4: backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
+description: "What's new in Night Porter 0.4: reviews prepared when someone requests yours, backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
 ---
 
 # What's new
@@ -7,6 +7,14 @@ description: "What's new in Night Porter 0.4: backlog sweeps, a Worktrees tab wi
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
 ## 0.4
+
+### Reviews when someone asks for yours (0.4.1)
+
+When someone requests your review on a GitHub PR, Night Porter can prepare one: a summary,
+issues with file and line, security, tests and a verdict, waiting for you in the TUI. Turn it on
+per repo with `review_requests = true` under `[maintainer]`. With Claude Code or Gemini CLI a
+review only reads the code (no tests, no environment), so it starts without waiting for you to
+approve running someone else's code. See [Review requests](/advanced#review-requests).
 
 ### Sweep the backlog
 
