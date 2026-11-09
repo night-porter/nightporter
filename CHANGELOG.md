@@ -6,6 +6,23 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Review requests** (GitHub): with `review_requests = true` under `[maintainer]`, a request for
+  your review on a PR queues a `review` job. It runs once per PR head while your review is still
+  requested, and waits for you like any maintainer job (`level = "suggest"` keeps it private).
+
+### Changed
+
+- `review` jobs on someone else's PR no longer wait for run approval with Claude Code or Gemini
+  CLI: they only read the code (no `allow_commands`, no environment). `review_runs_code = true`
+  brings back tests, after you approve the run. Codex and OpenCode reviews still wait.
+
+### Security
+
+- Environment `cleanup` no longer runs on the worktree of someone else's code you never approved
+  running (for example a job dismissed while it waited for that approval).
+
 ## [0.4.0] - 2026-11-09
 
 ### Added

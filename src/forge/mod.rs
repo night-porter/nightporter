@@ -212,6 +212,17 @@ impl Event {
         Event { author: me.into(), role: Role::Owner, body, ..Self::new(id, repo, Target::Pr, number, trigger) }
     }
 
+    /// Someone asked for your review of PR `number`: a maintainer `review` request from you. One
+    /// per head, so a re-request after new pushes gets a fresh review.
+    pub fn review_request(repo: &RepoId, number: u64, head_sha: &str, me: &str, me_id: u64) -> Self {
+        let id = format!("{REVIEW_REQUEST}{}-{number}-{head_sha}", repo.key());
+        let body = "(your review was requested)".into();
+        Event { author_id: me_id, verb: Some(Verb::Review), ..Self::state(id, repo, number, Trigger::Comment, me, body) }
+    }
+    pub fn is_review_request(&self) -> bool {
+        self.id.starts_with(REVIEW_REQUEST)
+    }
+
     /// Written by the token's own user: same login and, when both ids are known, the same id
     /// (an account renamed away from your old login isn't you).
     pub fn own(&self, me: &str, me_id: u64) -> bool {
@@ -222,6 +233,8 @@ impl Event {
         if self.verb.is_some() { Mode::Maintainer } else { Mode::MyPrs }
     }
 }
+
+const REVIEW_REQUEST: &str = "review-request-";
 
 /// Current time as `YYYY-MM-DDTHH:MM:SSZ` (what both forge APIs accept in queries).
 pub fn now_iso() -> String {

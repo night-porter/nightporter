@@ -502,7 +502,7 @@ async fn forgejo_poll_sweep_reply_and_resolve() {
 #[tokio::test]
 async fn untrusted_head_needs_run_approval_bound_to_sha() {
     use crate::forge::{Event, Role, Target, Trigger, Verb};
-    let w = world_with("[maintainer]\nenabled = true", vec![]).await;
+    let w = world_with("[maintainer]\nenabled = true\nreview_runs_code = true", vec![]).await;
     let ctx = &w.ctx;
     // Make PR #1 someone else's.
     let head = sh(&w.bare, "git rev-parse feature");
@@ -560,6 +560,69 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
     assert_ne!(j.status, JobStatus::AwaitingRunApproval, "{}", j.error);
     let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
     assert!(prompt.contains("written by someone untrusted"));
+}
+
+/// Someone asks for your review: a review job runs on their PR without waiting for run approval,
+/// and nothing from the branch runs (no allowed commands, no env setup).
+async fn review_request_world(maintainer: &str) -> World {
+    let toml =
+        format!("allow_commands = [\"make test\"]\n[env]\nsetup = [\"touch setup-ran\"]\n[maintainer]\nenabled = true\n{maintainer}");
+    let w = world_with(&toml, vec![]).await;
+    let head = sh(&w.bare, "git rev-parse feature");
+    let pull = format!(
+        r#"{{"number":1,"title":"Add miner","body":"","user":{{"login":"stranger","type":"User"}},"state":"open","merged":false,"draft":false,
+        "requested_reviewers":[{{"login":"me"}}],
+        "head":{{"ref":"feature","sha":"{head}","repo":{{"ssh_url":"{b}","clone_url":"{b}"}}}},"base":{{"ref":"main","sha":"x","repo":null}}}}"#,
+        b = w.bare.display()
+    );
+    let note = r#"[{"reason":"review_requested","updated_at":"2026-11-05T10:00:00Z","subject":{"type":"PullRequest","url":"https://api.github.com/repos/o/r/pulls/1"},"repository":{"full_name":"o/r"}}]"#;
+    let (url, _log) = mock(vec![
+        ("GET", "/user", r#"{"login":"me","type":"User"}"#.into()),
+        ("GET", "/notifications", note.into()),
+        ("GET", "/repos/o/r/pulls/1", pull),
+        ("GET", "/repos/o/r/issues/1/comments", "[]".into()),
+        ("GET", "/repos/o/r/pulls/1/comments", "[]".into()),
+        ("GET", "/repos/o/r/pulls/1/reviews", "[]".into()),
+        ("GET", "/search/issues", r#"{"items":[]}"#.into()),
+    ])
+    .await;
+    let mut gh = Forge::GitHub(GitHub::new("github.com", Api::new(&url, "t".to_string().into(), false).unwrap()));
+    gh.login().await.unwrap();
+    *w.ctx.forges[&(ForgeKind::GitHub, "github.com".to_string())].lock().await = gh;
+    w
+}
+
+#[tokio::test]
+async fn review_request_reviews_without_running_code() {
+    let w = review_request_world("review_requests = true").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    let pending = ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap();
+    assert!(pending.iter().any(|(e, _)| e.is_review_request()), "{pending:?}");
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    job::run(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert!(j.meta.untrusted_code);
+    assert_ne!(j.status, JobStatus::AwaitingRunApproval, "{}", j.error);
+    assert!(ctx.paths.job_dir(id).join("prompt.md").exists(), "the agent ran");
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ctx.paths.job_dir(id).join("claude-settings.json")).unwrap()).unwrap();
+    let allow = settings["permissions"]["allow"].to_string();
+    assert!(!allow.contains("make test") && !allow.contains("\"Edit\"") && !allow.contains("git commit"), "{allow}");
+    assert!(!Path::new(&j.worktree).join("setup-ran").exists(), "env setup must not run");
+    // Its worktree is never handed over, and env cleanup won't run on it either.
+    assert!(j.unapproved_code() && crate::handoff::can_take_over(&j).is_err());
+}
+
+#[tokio::test]
+async fn review_requests_are_off_by_default() {
+    let w = review_request_world("").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    let dropped = ctx.db(|d| d.events_with(crate::state::Disposition::Dropped)).unwrap();
+    assert!(dropped.iter().any(|(e, _)| e.is_review_request()), "{dropped:?}");
+    assert_eq!(ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap().len(), 0, "nothing queued");
 }
 
 /// Real Claude Code, end to end (spends a few cents of the user's tokens). Run with:

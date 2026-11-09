@@ -330,6 +330,9 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
             if !s.maintainer.enabled {
                 return drop("maintainer mode off");
             }
+            if e.is_review_request() && !s.maintainer.review_requests {
+                return drop("review requests off");
+            }
         }
     }
     // Team membership needs the network; resolve only the teams this repo's rules mention.

@@ -183,6 +183,17 @@ approve. Environment commands only ever come from your own config, never from th
 Taking over such a job (`h`, `nightporter handoff`) is refused until you've approved the run at
 its current head: an interactive agent in that worktree loads the branch's own agent config.
 
+The exception is a `review` with Claude Code or Gemini CLI (unless `review_runs_code = true`):
+it doesn't wait for that approval because nothing from the branch runs. There are no allowed
+commands and no environment setup or teardown, the agent can't edit files, and its only shell
+commands are read-only git (`status`, `rev-parse`, `ls-files`, with hooks and fsmonitor off).
+Claude Code loads only Night Porter's settings (no project settings, hooks or MCP servers), and
+Gemini CLI refuses a branch that carries its own settings. The branch's `CLAUDE.md` or `GEMINI.md`
+can still steer what the review says, so read it before you approve the reply. Codex can't be
+limited this way (its read-only sandbox still runs any command), and a branch can change
+OpenCode's rules, so their reviews wait for approval as before. Environment `cleanup` never runs
+on a worktree whose code you didn't approve.
+
 Environment commands run outside the agent's sandbox, and what they do depends on files in the
 worktree. So Night Porter copies the files they typically read (`.ddev/`, `.devcontainer/`,
 compose files, `Makefile`, `justfile`, `.env`) before the agent runs and puts them back before

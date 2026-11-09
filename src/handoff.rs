@@ -19,7 +19,7 @@ pub fn can_take_over(j: &Job) -> Result<()> {
     if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
         bail!("job {} has no worktree (it may have been cleaned up)", j.id);
     }
-    if j.meta.untrusted_code && !(j.meta.run_approved && j.meta.run_approved_head == j.head_before) {
+    if j.unapproved_code() {
         bail!(
             "job {} is on someone else's code you haven't approved running: approve the run first (a), or review {} by hand",
             j.id,
