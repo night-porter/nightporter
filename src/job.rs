@@ -177,7 +177,10 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     };
 
     log(ctx, j.id, &format!("preparing worktree {}", wt.display()));
-    let (head, gitfile) = git::prepare_worktree(&clone, &wt, &fetch_url, &fetch_ref, &branch).await?;
+    let (head, gitfile, kept) = git::prepare_worktree(&clone, &wt, &fetch_url, &fetch_ref, &branch).await?;
+    if kept.is_some() {
+        log(ctx, j.id, "kept the worktree's earlier changes for 7 days: `nightporter worktrees` lists them, Worktrees tab (6) restores");
+    }
     j.head_before = head;
     if let Some(pr) = &pr
         && pr.head_sha != j.head_before

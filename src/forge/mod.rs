@@ -167,6 +167,9 @@ pub struct Event {
     pub number: u64,
     pub trigger: Trigger,
     pub author: String,
+    /// The author's numeric user id, 0 when unknown. Logins can change hands; ids don't.
+    #[serde(default)]
+    pub author_id: u64,
     pub role: Role,
     pub is_bot: bool,
     pub body: String,
@@ -190,6 +193,7 @@ impl Event {
             number,
             trigger,
             author: String::new(),
+            author_id: 0,
             role: Role::None,
             is_bot: false,
             body: String::new(),
@@ -206,6 +210,12 @@ impl Event {
     /// each state fires once per push.
     pub fn state(id: String, repo: &RepoId, number: u64, trigger: Trigger, me: &str, body: String) -> Self {
         Event { author: me.into(), role: Role::Owner, body, ..Self::new(id, repo, Target::Pr, number, trigger) }
+    }
+
+    /// Written by the token's own user: same login and, when both ids are known, the same id
+    /// (an account renamed away from your old login isn't you).
+    pub fn own(&self, me: &str, me_id: u64) -> bool {
+        self.author.eq_ignore_ascii_case(me) && (self.author_id == 0 || me_id == 0 || self.author_id == me_id)
     }
 
     pub fn mode(&self) -> Mode {
@@ -465,6 +475,10 @@ impl Forge {
         each!(self, g => &g.me)
     }
 
+    pub fn me_id(&self) -> u64 {
+        each!(self, g => g.me_id)
+    }
+
     pub async fn login(&mut self) -> Result<()> {
         each!(self, g => g.login().await)
     }
@@ -617,6 +631,21 @@ mod tests {
         // A failed read keeps the last status.
         c.record("k".into(), Err(anyhow::anyhow!("boom")), &mut out);
         assert_eq!(c.seen_status["k"], "red");
+    }
+
+    #[test]
+    fn own_events_match_by_id_when_known() {
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let mut e = Event::new("x".into(), &repo, Target::Pr, 1, Trigger::Comment);
+        e.author = "Me".into();
+        assert!(e.own("me", 7), "no id on the event: login decides");
+        e.author_id = 7;
+        assert!(e.own("me", 7) && e.own("me", 0));
+        e.author_id = 8;
+        assert!(!e.own("me", 7), "someone else now holding your old login");
+        e.author = "you".into();
+        e.author_id = 7;
+        assert!(!e.own("me", 7));
     }
 
     #[test]

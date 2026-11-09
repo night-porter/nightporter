@@ -239,6 +239,7 @@ impl GitHub {
                     if rv.body.trim().is_empty() { format!("(review: {})", rv.state.to_lowercase().replace('_', " ")) } else { rv.body };
                 out.push(Event {
                     is_bot: user.is_bot(),
+                    author_id: user.id,
                     author: user.login,
                     role: Role::from_github(&rv.author_association),
                     body,
@@ -260,6 +261,7 @@ impl GitHub {
                 let role = self.role_of(r, &actor.login).await.unwrap_or(Role::None);
                 out.push(Event {
                     author: actor.login.clone(),
+                    author_id: actor.id,
                     role,
                     is_bot: actor.is_bot(),
                     body: format!("(label `{label}` added)"),
@@ -277,6 +279,7 @@ impl GitHub {
     fn event(repo: &RepoId, target: Target, number: u64, trigger: Trigger, id: String, c: Comment, verb: Option<Verb>) -> Event {
         Event {
             is_bot: c.user.is_bot(),
+            author_id: c.user.id,
             author: c.user.login,
             role: Role::from_github(&c.author_association),
             body: c.body,

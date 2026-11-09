@@ -29,11 +29,11 @@ pub const STYLES: &[(&str, &str)] = &[
 ];
 
 /// Resolve a reply style: built-in name, pack style, or a path to the user's own file.
-pub fn style(paths: &Paths, name: &str) -> Result<String> {
+pub fn style(paths: &Paths, name: &str, packs: &[String]) -> Result<String> {
     if let Some((_, s)) = STYLES.iter().find(|(n, _)| *n == name) {
         return Ok((*s).into());
     }
-    if let Some(s) = crate::packs::style(paths, name) {
+    if let Some(s) = crate::packs::style(paths, name, packs) {
         return Ok(s);
     }
     let p = expand_tilde(name);
@@ -143,7 +143,7 @@ pub fn build(i: &Input) -> Result<String> {
         }
     }
 
-    let style = style(i.paths, &s.reply.style)?;
+    let style = style(i.paths, &s.reply.style, &s.packs)?;
     let _ = writeln!(p, "\n## Reply style\n{style}\nWrite replies in language: {}.\n", s.reply.language);
     p.push_str(OUTPUT);
     Ok(p)
@@ -193,6 +193,7 @@ mod tests {
             number: 1,
             trigger,
             author: "alice".into(),
+            author_id: 0,
             role: Role::Member,
             is_bot: false,
             body: body.into(),
@@ -254,7 +255,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("pirate.md"), "Arr, haiku only.").unwrap();
         let paths = Paths::at(d.path(), d.path());
-        assert_eq!(style(&paths, "pirate.md").unwrap(), "Arr, haiku only.");
-        assert!(style(&paths, "nope").is_err());
+        assert_eq!(style(&paths, "pirate.md", &[]).unwrap(), "Arr, haiku only.");
+        assert!(style(&paths, "nope", &[]).is_err());
     }
 }

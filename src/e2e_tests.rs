@@ -523,6 +523,7 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
         number: 1,
         trigger: Trigger::Comment,
         author: "alice".into(),
+        author_id: 0,
         role: Role::Maintainer,
         is_bot: false,
         body: "/nightporter review".into(),

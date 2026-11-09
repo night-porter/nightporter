@@ -79,7 +79,8 @@ Gates must end their answer with:
 ### Reply styles
 
 A style is a short markdown file describing tone and length. Users select it with
-`reply.style = "haiku-pirate"` (or `"my-pack/haiku-pirate"` if two packs use the same name).
+`reply.style = "haiku-pirate"` (or `"my-pack/haiku-pirate"` if two packs use the same name),
+in a repo where the pack is enabled (`packs = ["my-pack"]`).
 
 ### Env presets
 

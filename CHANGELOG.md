@@ -27,7 +27,9 @@ All notable changes to Night Porter. The format follows
 - **Worktrees tab** (`6`) and `nightporter worktrees [rm|restore <job>]`: every worktree Night
   Porter made, removable one by one. Removing (also by `gc` and the automatic cleanup) keeps the
   worktree's commits and uncommitted changes in its clone for 7 days, so `u` / `restore` brings
-  it back. Ignored files aren't kept.
+  it back. Ignored files aren't kept. A new job on the PR also keeps what it would reset (your
+  edits after a handoff, or an earlier job's unpushed commits); restoring swaps it back in, and
+  what was there is kept too.
 - **Host aliases** on `[[accounts]]`: `aliases = ["github-work"]` for SSH `Host` aliases or mirror
   names in clone remotes.
 
@@ -51,6 +53,11 @@ All notable changes to Night Porter. The format follows
 - Two marketplace URLs could share a local folder. Marketplaces are cloned again on the next
   `nightporter market update`.
 - Discord notifications escape Markdown, so a PR title can't render as a link.
+- Handoff briefings (sent to herdr and Rex as typed text) have terminal control characters
+  removed, so comment or CI text can't break out of the paste.
+- Your own comments are matched by user id as well as login, so someone who takes over a login
+  you renamed away from isn't treated as you.
+- A reply style from a pack only applies in repos where that pack is enabled.
 
 ### Fixed
 

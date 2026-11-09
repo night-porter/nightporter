@@ -261,11 +261,11 @@ pub fn steps(paths: &Paths, enabled: &[String], hook: Hook) -> Vec<(String, Stri
     out
 }
 
-/// A reply style from any installed pack: `pack/style` or just `style`.
-pub fn style(paths: &Paths, name: &str) -> Option<String> {
+/// A reply style from one of the repo's enabled packs: `pack/style` or just `style`.
+pub fn style(paths: &Paths, name: &str, enabled: &[String]) -> Option<String> {
     let (pack, style) = name.split_once('/').map_or((None, name), |(p, s)| (Some(p), s));
     for (pname, _) in lock(paths).packs {
-        if pack.is_some_and(|p| p != pname) {
+        if pack.is_some_and(|p| p != pname) || !enabled.contains(&pname) {
             continue;
         }
         let dir = pack_dir(paths, &pname);
@@ -395,9 +395,11 @@ file = "pirate.md"
         let s = steps(&paths, &["a11y".into()], Hook::PostFix);
         assert_eq!(s[0].1, "Check alt text.");
         assert_eq!(steps(&paths, &["a11y".into()], Hook::Filter), []);
-        assert_eq!(style(&paths, "haiku-pirate").as_deref(), Some("Arr."));
-        assert_eq!(style(&paths, "a11y/haiku-pirate").as_deref(), Some("Arr."));
+        let on = ["a11y".to_string()];
+        assert_eq!(style(&paths, "haiku-pirate", &on).as_deref(), Some("Arr."));
+        assert_eq!(style(&paths, "a11y/haiku-pirate", &on).as_deref(), Some("Arr."));
+        assert!(style(&paths, "haiku-pirate", &[]).is_none(), "only from packs enabled for the repo");
         remove(&paths, "a11y").unwrap();
-        assert!(style(&paths, "haiku-pirate").is_none());
+        assert!(style(&paths, "haiku-pirate", &on).is_none());
     }
 }

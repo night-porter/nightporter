@@ -89,6 +89,10 @@ nightporter gc --all    # every worktree not in use
 Or pick them one by one in the **Worktrees** tab (`6`): `x` removes one, `u` brings a removed
 one back. `nightporter worktrees` lists them from the CLI.
 
+A new job on the same PR resets its worktree to the PR's head. If you'd edited it after a
+handoff, or an earlier job left commits that weren't pushed, those are kept first and show up
+as a KEPT row; `u` on it swaps it back in (and keeps what was there).
+
 Removing never loses work for a week: the worktree's commits and uncommitted changes (also new
 files) are kept in its clone under `refs/nightporter/trash/`, and `u` or
 `nightporter worktrees restore <job>` puts them back where they were. Ignored files

@@ -29,7 +29,8 @@ cap. See [Work through the backlog](/advanced#work-through-the-backlog).
 
 A **Worktrees** tab (`6`) lists every worktree Night Porter made. `x` removes one, and `u`
 brings it back for 7 days, with its commits and uncommitted changes, so cleaning up after a
-handoff can't cost you an afternoon's work. From the CLI: `nightporter worktrees`, `rm <job>`,
+handoff can't cost you an afternoon's work. A new job on the PR keeps your edits before it
+resets the worktree, too. From the CLI: `nightporter worktrees`, `rm <job>`,
 `restore <job>`. `gc` and the automatic cleanup keep removed work the same way.
 
 ### Hand off to pi, Cursor, Copilot and more

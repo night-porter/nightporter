@@ -518,6 +518,7 @@ pub(crate) mod tests {
             number: n,
             trigger: Trigger::ReviewComment,
             author: "alice".into(),
+            author_id: 0,
             role: Role::Member,
             is_bot: false,
             body: "fix".into(),

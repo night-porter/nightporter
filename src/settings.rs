@@ -380,7 +380,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  style          {}{}", s.reply.style, if builtin { "  (built in)" } else { "" });
     let _ = writeln!(o, "  language       {}", s.reply.language);
     let _ = writeln!(o, "  footer         {}   resolve threads {}", on(s.reply.footer), on(s.reply.resolve_threads));
-    match crate::prompts::style(paths, &s.reply.style) {
+    match crate::prompts::style(paths, &s.reply.style, &s.packs) {
         Ok(text) => {
             let _ = writeln!(o, "  style text:\n{}", indent(&text, 12));
         }

@@ -288,7 +288,7 @@ show up in the TUI as copy-paste text and nothing is posted.
 
 ```toml
 [defaults.reply]
-style = "concise"          # detailed-tech-lead, non-technical, or one from a pack
+style = "concise"          # detailed-tech-lead, non-technical, or one from an enabled pack
 language = "German"
 footer = true              # "via Night Porter (Claude Code)"
 resolve_threads = false

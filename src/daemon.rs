@@ -227,6 +227,7 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
     let mut cursor: Cursor = ctx.db(|d| d.get_json(&ckey))?;
     let events = forge.poll(&mut cursor).await?;
     let me = forge.me().to_string();
+    let me_id = forge.me_id();
     // CI went green → reset CI-fix attempt counters.
     for (k, st) in &cursor.seen_status {
         if st.contains("green")
@@ -239,7 +240,9 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
     drop(forge);
     // Intake first, cursor second: a crash in between re-reads (de-duplicated) instead of losing.
     for e in events {
-        if let Err(err) = intake(ctx, &cfg, &me, e.clone()).await {
+        // Someone else now holding your old login is never you.
+        let who = if e.own(&me, me_id) { me.as_str() } else { "" };
+        if let Err(err) = intake(ctx, &cfg, who, e.clone()).await {
             // Keep it visible rather than dropping it (e.g. a broken repo file).
             tracing::warn!("intake {}: {err:#}", e.id);
             ctx.db(|d| d.add_event(&e, Disposition::Inbox, &format!("could not classify: {err:#}")).map(|_| ()))?;
@@ -567,6 +570,7 @@ mod tests {
             number: 7,
             trigger,
             author: author.into(),
+            author_id: 0,
             role,
             is_bot: false,
             body: "please fix".into(),

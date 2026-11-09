@@ -41,9 +41,17 @@ pub fn branch_name(target: crate::forge::Target, n: u64) -> String {
     }
 }
 
-/// Create or reset the worktree at `wt` to the fetched head. Returns (sha, `.git` file content);
-/// the caller re-checks that file before trusting any git call in the worktree again.
-pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &str, branch: &str) -> Result<(String, String)> {
+/// Create or reset the worktree at `wt` to the fetched head. Returns (sha, `.git` file content,
+/// trash ref): the caller re-checks that file before trusting any git call in the worktree again.
+/// Uncommitted changes or commits that aren't on the fetched head (yours after a handoff, or an
+/// earlier job's unpushed ones) are kept in the trash before the reset, under the returned ref.
+pub async fn prepare_worktree(
+    clone: &Path,
+    wt: &Path,
+    url: &str,
+    fetch_ref: &str,
+    branch: &str,
+) -> Result<(String, String, Option<String>)> {
     let tmp_ref = format!("refs/nightporter/{}", branch.replace('/', "-"));
     git(clone, &["fetch", "--no-tags", "--quiet", "--end-of-options", url, &format!("+{fetch_ref}:{tmp_ref}")]).await?;
     let sha = git(clone, &["rev-parse", &tmp_ref]).await?;
@@ -52,7 +60,12 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
     if wt.exists() && !gitfile_points_into(clone, wt).await {
         std::fs::remove_dir_all(wt).with_context(|| format!("remove tampered worktree {}", wt.display()))?;
     }
+    let mut kept = None;
     if wt.join(".git").exists() {
+        let dirty = !git(wt, &["status", "--porcelain"]).await?.is_empty();
+        if dirty || !is_ancestor(wt, "HEAD", &sha).await {
+            kept = trash(clone, wt, branch, crate::state::now()).await?;
+        }
         git(wt, &["checkout", "--quiet", "-B", branch, &sha]).await?;
         git(wt, &["reset", "--hard", "--quiet", &sha]).await?;
         // Keep ignored files (node_modules, .ddev state) so env setup stays fast.
@@ -66,7 +79,7 @@ pub async fn prepare_worktree(clone: &Path, wt: &Path, url: &str, fetch_ref: &st
         git(clone, &["worktree", "add", "--quiet", "-B", branch, &wt.to_string_lossy(), &sha]).await?;
     }
     let gitfile = std::fs::read_to_string(wt.join(".git")).context("worktree has no .git file")?;
-    Ok((sha, gitfile))
+    Ok((sha, gitfile, kept))
 }
 
 /// `wt/.git` is a regular file naming a git dir directly inside the clone's `worktrees/`.
@@ -172,7 +185,15 @@ pub async fn trash(clone: &Path, wt: &Path, branch: &str, now: i64) -> Result<Op
         let id = ["-c", "user.name=Night Porter", "-c", "user.email=nightporter@localhost"];
         git(wt, &[&id[..], &["commit-tree", &tree, "-p", &head, "-m", WIP]].concat()).await?
     };
-    let r = format!("{TRASH}{}/{now}", branch.replace('/', "-"));
+    // Never overwrite an entry made in the same second (a swap trashes twice in a row).
+    let mut at = now;
+    let r = loop {
+        let r = format!("{TRASH}{}/{at}", branch.replace('/', "-"));
+        if git(clone, &["rev-parse", "--verify", "--quiet", &r]).await.is_err() {
+            break r;
+        }
+        at += 1;
+    };
     git(clone, &["update-ref", &r, &sha]).await?;
     Ok(Some(r))
 }
@@ -298,7 +319,7 @@ pub(crate) mod tests {
         repo(&clone);
         let url = clone.to_string_lossy().to_string();
         let wt = d.path().join("wt");
-        let (_, gitfile) = prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-1").await.unwrap();
+        let (_, gitfile, _) = prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-1").await.unwrap();
         assert!(gitfile_points_into(&clone, &wt).await);
 
         // An agent repoints .git at a git dir it built inside the worktree.

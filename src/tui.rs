@@ -477,6 +477,7 @@ impl App {
     fn worktree_key(&mut self, k: KeyEvent) {
         let Some(w) = self.sel.selected().and_then(|i| self.worktrees.get(i)) else { return };
         let (id, removed, path) = (w.job.id, w.trashed.is_some(), w.path.display().to_string());
+        let which = w.trashed.as_ref().map(|t| t.1.clone());
         match k.code {
             KeyCode::Char('x' | 'd') if !removed => {
                 self.confirm = Some((
@@ -490,10 +491,11 @@ impl App {
                 ));
             }
             KeyCode::Char('u') if removed => {
-                self.msg = crate::worktrees::block(crate::worktrees::restore(&self.db, id)).unwrap_or_else(|e| format!("error: {e:#}"));
+                let r = crate::worktrees::restore(&self.db, id, which.as_deref());
+                self.msg = crate::worktrees::block(r).unwrap_or_else(|e| format!("error: {e:#}"));
                 self.load_worktrees();
             }
-            KeyCode::Char('u') => self.msg = "select a REMOVED row to bring it back".into(),
+            KeyCode::Char('u') => self.msg = "select a KEPT row to bring it back".into(),
             KeyCode::Char('h') if !removed => self.job_key(k),
             _ => {}
         }
@@ -1146,7 +1148,7 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies
        h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
-Worktrees: x remove (asks first)   u bring back a REMOVED one (its commits and uncommitted
+Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
        changes; ignored files like node_modules aren't kept)   h take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
 
@@ -1350,12 +1352,12 @@ mod tests {
         app.key(key('6'));
         assert_eq!(app.worktrees.len(), 1);
         app.key(key('u'));
-        assert!(app.msg.contains("REMOVED"), "{}", app.msg);
+        assert!(app.msg.contains("KEPT"), "{}", app.msg);
         app.key(key('x'));
         assert!(app.confirm.is_some());
         app.key(key('y'));
         assert!(!wt.exists(), "{}", app.msg);
-        assert!(app.worktrees[0].trashed.is_some() && app.worktrees[0].line().contains("REMOVED"));
+        assert!(app.worktrees[0].trashed.is_some() && app.worktrees[0].line().contains("KEPT"));
         app.key(key('u'));
         assert_eq!(std::fs::read_to_string(wt.join("mine.txt")).unwrap(), "handoff edit", "{}", app.msg);
         assert!(app.worktrees.len() == 1 && app.worktrees[0].trashed.is_none());

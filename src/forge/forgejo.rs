@@ -232,6 +232,7 @@ impl Forgejo {
         };
         let ev = |trigger, id: String, u: User, body: String, url: String, at: String, verb| Event {
             is_bot: u.is_bot(),
+            author_id: u.id,
             author: u.login,
             body,
             url,

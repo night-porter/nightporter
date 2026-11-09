@@ -51,6 +51,7 @@ pub fn queue(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, me: &str, ite
             number: i.number,
             trigger: Trigger::Comment,
             author: me.to_string(),
+            author_id: 0,
             role: Role::Owner,
             is_bot: false,
             body: format!("(queued by `nightporter sweep`: {verb_s})"),

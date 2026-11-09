@@ -232,6 +232,7 @@ impl GitLab {
                 let trigger = if path.is_some() { Trigger::ReviewComment } else { Trigger::Comment };
                 out.push(Event {
                     is_bot: n.author.is_bot(),
+                    author_id: n.author.id,
                     author: n.author.username,
                     role,
                     body: n.body,
@@ -289,6 +290,7 @@ impl GitLab {
     fn request(repo: &RepoId, target: Target, n: u64, id: String, u: &User, role: Role, body: String, at: String, verb: Verb) -> Event {
         Event {
             author: u.username.clone(),
+            author_id: u.id,
             role,
             is_bot: u.is_bot(),
             body,

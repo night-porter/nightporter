@@ -73,7 +73,9 @@ pub fn briefing(db: &Db, j: &Job) -> String {
         );
     }
     s += "\nStart by summarising the current state in a few lines, then ask what they want to do.";
-    s
+    // Comment and CI text can carry terminal control sequences; herdr and Rex type the briefing
+    // into a terminal, where those could end a paste early and run a command.
+    crate::printable(&s)
 }
 
 /// Open a herdr workspace at the job's worktree, start the agent and brief it.
@@ -124,6 +126,8 @@ mod tests {
         j.worktree = d.path().to_string_lossy().into();
         assert!(handoff(&db, &j, crate::config::HandoffAgent::Claude).is_err(), "running jobs can't be taken over");
         j.status = JobStatus::AwaitingApproval;
+        j.summary = "renamed foo\x1b[201~\r!rm -rf ~\r".into();
+        assert!(!briefing(&db, &j).contains('\x1b') && !briefing(&db, &j).contains('\r'), "no control characters reach the terminal");
         j.summary = "renamed foo".into();
         let msg = handoff(&db, &j, crate::config::HandoffAgent::Claude).unwrap();
         assert!(msg.contains("np o/r#3"));

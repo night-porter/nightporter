@@ -250,7 +250,7 @@ enum InboxCmd {
 enum WtCmd {
     /// Remove a job's worktree (its work is kept for 7 days).
     Rm { job: i64 },
-    /// Bring back the last removed worktree of a job's PR or issue.
+    /// Bring back the newest kept version of a job's worktree (swapping out what's there now).
     Restore { job: i64 },
 }
 
@@ -422,7 +422,7 @@ async fn cmd_worktrees(paths: &Paths, cmd: Option<WtCmd>, out: &mut dyn Write) -
             if all.is_empty() { "no worktrees".into() } else { all.iter().map(worktrees::Wt::line).collect::<Vec<_>>().join("\n") }
         }
         Some(WtCmd::Rm { job }) => worktrees::remove(paths, &config::Config::load(paths)?, &d, job).await?,
-        Some(WtCmd::Restore { job }) => worktrees::restore(&d, job).await?,
+        Some(WtCmd::Restore { job }) => worktrees::restore(&d, job, None).await?,
     };
     writeln!(out, "{msg}")?;
     Ok(())
