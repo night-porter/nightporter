@@ -89,6 +89,8 @@ struct Note {
     system: bool,
     created_at: String,
     #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
     position: Option<Position>,
 }
 #[derive(Deserialize)]
@@ -456,7 +458,7 @@ impl GitLab {
             .rev()
             .filter(|n| !n.system)
             .filter_map(|n| {
-                let control = super::control_of(self.me_id, n.author.id, false, &n.body, &n.created_at, since)?;
+                let control = super::control_of(self.me_id, n.author.id, false, &n.body, &n.created_at, &n.updated_at, since)?;
                 Some(super::ControlComment { id: n.id.to_string(), control })
             })
             .collect())
@@ -471,7 +473,7 @@ impl GitLab {
 
     pub async fn in_team(&self, group: &str, user: &str) -> Result<bool> {
         let fetch = async {
-            let members: Vec<User> = self.api.get_all(&format!("/groups/{}/members/all?per_page=100", enc(group)), 100).await?;
+            let members: Vec<User> = self.api.get_every(&format!("/groups/{}/members/all?per_page=100", enc(group)), 100).await?;
             Ok(members.into_iter().map(|u| u.username).collect())
         };
         self.groups.member(group, user, fetch).await

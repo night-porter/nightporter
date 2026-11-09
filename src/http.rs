@@ -39,7 +39,7 @@ impl Api {
         Ok(Self { http, base: base.trim_end_matches('/').into(), token, gitlab })
     }
 
-    fn is_ours(&self, url: &str) -> bool {
+    pub fn is_ours(&self, url: &str) -> bool {
         match (reqwest::Url::parse(&self.base), reqwest::Url::parse(url)) {
             (Ok(b), Ok(u)) => same_origin(&b, &u),
             _ => false,
@@ -68,6 +68,16 @@ impl Api {
     /// GET every page (follows `Link: <…>; rel="next"`, which GitHub and GitLab both send), up to
     /// `max_pages`. Errors on any page fail the whole call so callers don't advance cursors.
     pub async fn get_all<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>> {
+        self.pages(path, max_pages, false).await
+    }
+
+    /// Like [`Api::get_all`], but an error unless every page was read: for lists where a missing
+    /// entry fails open (team members for `deny_teams`).
+    pub async fn get_every<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>> {
+        self.pages(path, max_pages, true).await
+    }
+
+    async fn pages<T: DeserializeOwned>(&self, path: &str, max_pages: usize, complete: bool) -> Result<Vec<T>> {
         let mut out = Vec::new();
         let mut next = Some(path.to_string());
         for _ in 0..max_pages {
@@ -76,11 +86,16 @@ impl Api {
                 Got::Fresh(v, h) => {
                     out.extend(v);
                     // Only follow `next` links back to our own API: they carry the token.
-                    next = next_link(&h).filter(|u| self.is_ours(u));
+                    next = next_link(&h);
+                    if let Some(u) = next.as_ref().filter(|u| !self.is_ours(u)) {
+                        anyhow::ensure!(!complete, "{path}: next page is on another server ({u}); not following it");
+                        next = None;
+                    }
                 }
                 Got::NotModified => break,
             }
         }
+        anyhow::ensure!(!complete || next.is_none(), "{path}: more than {max_pages} pages");
         Ok(out)
     }
 

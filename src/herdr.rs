@@ -2,7 +2,7 @@
 //! interactive agent that already knows what Night Porter did. Night Porter works the night
 //! shift; you pick it up in herdr.
 
-use crate::state::{Db, Job, JobStatus};
+use crate::state::{Db, Job};
 use anyhow::{Context, Result, bail};
 use std::fmt::Write as _;
 use std::process::Command;
@@ -78,12 +78,7 @@ pub fn briefing(db: &Db, j: &Job) -> String {
 
 /// Open a herdr workspace at the job's worktree, start the agent and brief it.
 pub fn handoff(db: &Db, j: &Job, agent: crate::config::HandoffAgent) -> Result<String> {
-    if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
-        bail!("job {} is {}; wait for it to finish before taking over", j.id, j.status.label());
-    }
-    if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
-        bail!("job {} has no worktree (it may have been cleaned up)", j.id);
-    }
+    crate::handoff::can_take_over(j)?;
     let label = format!("np {}#{}", j.repo, j.number);
     let ws = herdr(&["workspace", "create", "--cwd", &j.worktree, "--label", &label, "--focus"])?;
     let pane = ws.pointer("/result/root_pane/pane_id").and_then(|v| v.as_str()).context("herdr returned no pane id")?.to_string();
@@ -98,6 +93,7 @@ pub fn handoff(db: &Db, j: &Job, agent: crate::config::HandoffAgent) -> Result<S
 mod tests {
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
+    use crate::state::JobStatus;
 
     #[test]
     fn handoff_drives_herdr_cli() {

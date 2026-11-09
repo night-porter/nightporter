@@ -831,7 +831,11 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
                 (e.url, e.rev)
             };
             let (staging, m, sha) = packs::fetch(paths, &url, &rev).await?;
-            println!("{}", packs::describe(&m));
+            if let Some(l) = packs::lock(paths).packs.get(&m.name).filter(|l| l.url != url) {
+                let _ = std::fs::remove_dir_all(&staging);
+                bail!("a pack named {} is already installed from {}; remove it first", m.name, l.url);
+            }
+            println!("{}", printable(&packs::describe(&m)));
             println!(
                 "Packs are prompts that steer an agent with access to your code. Review them before installing:\n  {}",
                 staging.display()
@@ -847,13 +851,17 @@ async fn pack(paths: &Paths, cmd: PackCmd) -> Result<()> {
             let l = packs::lock(paths).packs.get(&name).cloned().with_context(|| format!("{name} is not installed"))?;
             let rev = packs::find(paths, &cfg.marketplaces, &name).map_or_else(|| "HEAD".into(), |e| e.rev);
             let (staging, m, sha) = packs::fetch(paths, &l.url, &rev).await?;
+            if m.name != name {
+                let _ = std::fs::remove_dir_all(&staging);
+                bail!("{} now calls itself {:?}, not {name}; not updating (remove and add it again if that's right)", l.url, m.name);
+            }
             if sha == l.rev {
                 let _ = std::fs::remove_dir_all(&staging);
                 println!("{name} is up to date");
                 return Ok(());
             }
-            println!("{}", packs::diff_dirs(&packs::pack_dir(paths, &name), &staging));
-            println!("{}", packs::describe(&m));
+            println!("{}", printable(&packs::diff_dirs(&packs::pack_dir(paths, &name), &staging)));
+            println!("{}", printable(&packs::describe(&m)));
             if !yes && !confirm(&format!("Update {name} {} → {}?", &l.rev[..l.rev.len().min(10)], &sha[..10]))? {
                 let _ = std::fs::remove_dir_all(&staging);
                 return Ok(());

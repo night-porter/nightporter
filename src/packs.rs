@@ -289,7 +289,9 @@ pub fn env_preset(paths: &Paths, name: &str) -> Result<String> {
 // ---- marketplaces ----
 
 pub fn market_dir(paths: &Paths, url: &str) -> PathBuf {
-    let slug: String = url.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    // One folder per URL: every other character is escaped, so two URLs never share a folder.
+    let slug: String =
+        url.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("_{:x}", u32::from(c)) }).collect();
     paths.data_dir.join("markets").join(slug)
 }
 
@@ -322,6 +324,15 @@ pub fn find(paths: &Paths, markets: &[String], name: &str) -> Option<MarketEntry
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn market_dirs_never_collide() {
+        let p = crate::paths::Paths::at(std::path::Path::new("/c"), std::path::Path::new("/d"));
+        let a = super::market_dir(&p, "https://github.com/night-porter/marketplace");
+        let b = super::market_dir(&p, "https://github.com/night/porter-marketplace");
+        assert_ne!(a, b);
+        assert_eq!(a.parent().unwrap(), std::path::Path::new("/d/markets"));
+    }
+
     use super::*;
 
     fn mk_pack(dir: &Path) {

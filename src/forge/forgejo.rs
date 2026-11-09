@@ -78,6 +78,8 @@ struct Comment {
     #[serde(default)]
     html_url: String,
     created_at: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
 #[derive(Deserialize)]
@@ -174,7 +176,7 @@ impl Forgejo {
         Ok(cs
             .into_iter()
             .filter_map(|c| {
-                let control = super::control_of(self.me_id, c.user.id, false, &c.body, &c.created_at, since)?;
+                let control = super::control_of(self.me_id, c.user.id, false, &c.body, &c.created_at, &c.updated_at, since)?;
                 Some(super::ControlComment { id: c.id.to_string(), control })
             })
             .collect())
@@ -321,7 +323,8 @@ impl Forgejo {
 
     /// The user's role on the repo, cached for an hour. Only repo admins may read someone else's
     /// permission (403 otherwise); then fall back to what any reader can see: the repo owner's
-    /// name, and whether the user is a collaborator. That fallback can't see org teams, so org
+    /// name, and whether the user is a collaborator (any access, so `contributor`: use
+    /// `allow_users` or `allow_teams` for them). That fallback can't see org teams, so org
     /// members who aren't collaborators come out as `none` (fails closed).
     async fn role_of(&self, repo: &str, user: &str) -> Role {
         #[derive(Deserialize)]
@@ -338,8 +341,10 @@ impl Forgejo {
                 if repo.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(user)) {
                     Role::Owner
                 } else {
+                    // Any access mode counts as a collaborator here, read-only included, so this
+                    // can't tell write access: treat it as a contributor (not trusted by default).
                     match self.api.send(Method::GET, &format!("/repos/{repo}/collaborators/{user}"), &Value::Null).await {
-                        Ok(_) => Role::Collaborator,
+                        Ok(_) => Role::Contributor,
                         Err(e) if crate::http::status(&e) == Some(404) => Role::None,
                         // A hiccup: don't cache, or maintainers land in the inbox for an hour.
                         Err(_) => return Role::None,
@@ -497,7 +502,7 @@ impl Forgejo {
         let fetch = async {
             let found: Found = self.api.get(&format!("/orgs/{org}/teams/search?q={}", crate::http::enc(name))).await?;
             let t = found.data.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)).with_context(|| format!("no team {team}"))?;
-            let members: Vec<User> = self.api.get_all(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
+            let members: Vec<User> = self.api.get_every(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
             Ok(members.into_iter().map(|u| u.login).collect())
         };
         self.team_cache.member(team, user, fetch).await

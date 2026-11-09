@@ -72,6 +72,8 @@ struct Comment {
     html_url: String,
     created_at: String,
     #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
     line: Option<u64>,
@@ -153,12 +155,12 @@ impl GitHub {
             Got::NotModified => {}
             Got::Fresh(mut threads, headers) => {
                 cur.poll_interval_secs = headers.get("x-poll-interval").and_then(|v| v.to_str().ok()?.parse().ok());
-                let mut next = crate::http::next_link(&headers);
+                let mut next = crate::http::next_link(&headers).filter(|u| self.api.is_ours(u));
                 for _ in 0..10 {
                     let Some(p) = next.take() else { break };
                     if let Got::Fresh(more, h) = self.api.get_cond::<Vec<Thread>>(&p, None).await? {
                         threads.extend(more);
-                        next = crate::http::next_link(&h);
+                        next = crate::http::next_link(&h).filter(|u| self.api.is_ours(u));
                     }
                 }
                 let mut failed = false;
@@ -486,7 +488,7 @@ impl GitHub {
             .into_iter()
             .filter_map(|c| {
                 let via_app = c.performed_via_github_app.as_ref().is_some_and(|v| !v.is_null());
-                let control = super::control_of(self.me_id, c.user.id, via_app, &c.body, &c.created_at, since)?;
+                let control = super::control_of(self.me_id, c.user.id, via_app, &c.body, &c.created_at, &c.updated_at, since)?;
                 Some(super::ControlComment { id: c.id.to_string(), control })
             })
             .collect())
@@ -500,7 +502,7 @@ impl GitHub {
     pub async fn in_team(&self, team: &str, user: &str) -> Result<bool> {
         let (org, slug) = team.split_once('/').context("team must be org/team")?;
         let fetch = async {
-            let members: Vec<User> = self.api.get_all(&format!("/orgs/{org}/teams/{slug}/members?per_page=100"), 100).await?;
+            let members: Vec<User> = self.api.get_every(&format!("/orgs/{org}/teams/{slug}/members?per_page=100"), 100).await?;
             Ok(members.into_iter().map(|u| u.login).collect())
         };
         self.team_cache.member(team, user, fetch).await

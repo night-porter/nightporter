@@ -283,12 +283,38 @@ pub struct ControlComment {
 }
 
 /// The command in a comment, if the token's own user posted it after `since`.
-/// `me_id == 0` (unknown) never matches. Night Porter's own posts never count.
-pub fn control_of(me_id: u64, author_id: u64, via_app: bool, body: &str, created_at: &str, since: &str) -> Option<Control> {
-    if me_id == 0 || author_id != me_id || via_app || body.contains(crate::prompts::FOOTER_MARK) || !newer(created_at, Some(since)) {
+/// `me_id == 0` (unknown) never matches. Night Porter's own posts never count, nor do edited
+/// comments: people with write access can edit yours, so the text may not be your own.
+pub fn control_of(
+    me_id: u64,
+    author_id: u64,
+    via_app: bool,
+    body: &str,
+    created_at: &str,
+    updated_at: &str,
+    since: &str,
+) -> Option<Control> {
+    if me_id == 0
+        || author_id != me_id
+        || via_app
+        || body.contains(crate::prompts::FOOTER_MARK)
+        || !newer(created_at, Some(since))
+        || edited(created_at, updated_at)
+    {
         return None;
     }
     parse_control(body)
+}
+
+/// Changed more than a second after it was posted (an unknown time counts as edited).
+fn edited(created_at: &str, updated_at: &str) -> bool {
+    if updated_at.is_empty() || updated_at == created_at {
+        return false;
+    }
+    match (created_at.parse::<jiff::Timestamp>(), updated_at.parse::<jiff::Timestamp>()) {
+        (Ok(c), Ok(u)) => u.duration_since(c) > jiff::SignedDuration::from_secs(1),
+        _ => true,
+    }
 }
 
 /// What we need to check out and push a PR/MR.
@@ -630,13 +656,17 @@ mod tests {
         assert_eq!(parse_control("/nightporterapprove"), None);
         let at = "2026-11-05T10:00:01Z";
         let since = "2026-11-05T10:00:00Z";
-        assert_eq!(control_of(7, 7, false, "/nightporter approve", at, since), Some(Control::Approve));
-        assert_eq!(control_of(7, 8, false, "/nightporter approve", at, since), None, "someone else");
-        assert_eq!(control_of(0, 0, false, "/nightporter approve", at, since), None, "unknown id");
-        assert_eq!(control_of(7, 7, true, "/nightporter approve", at, since), None, "an app acting as me");
-        assert_eq!(control_of(7, 7, false, "/nightporter approve", since, since), None, "older than the job");
+        let ok = |me, author, app, body: &str, updated| control_of(me, author, app, body, at, updated, since);
+        assert_eq!(ok(7, 7, false, "/nightporter approve", at), Some(Control::Approve));
+        assert_eq!(ok(7, 7, false, "/nightporter approve", ""), Some(Control::Approve), "no updated_at");
+        assert_eq!(ok(7, 7, false, "/nightporter approve", "2026-11-05T10:00:01.500Z"), Some(Control::Approve), "same second");
+        assert_eq!(ok(7, 7, false, "/nightporter approve", "2026-11-05T10:05:00Z"), None, "edited later, maybe by someone else");
+        assert_eq!(ok(7, 8, false, "/nightporter approve", at), None, "someone else");
+        assert_eq!(ok(0, 0, false, "/nightporter approve", at), None, "unknown id");
+        assert_eq!(ok(7, 7, true, "/nightporter approve", at), None, "an app acting as me");
+        assert_eq!(control_of(7, 7, false, "/nightporter approve", since, since, since), None, "older than the job");
         let ours = format!("/nightporter approve\n{}", crate::prompts::FOOTER_MARK);
-        assert_eq!(control_of(7, 7, false, &ours, at, since), None, "our own post");
+        assert_eq!(ok(7, 7, false, &ours, at), None, "our own post");
     }
 
     #[test]

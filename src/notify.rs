@@ -219,10 +219,24 @@ pub fn payload(format: WebhookFormat, ev: &Event) -> (Vec<(&'static str, String)
             (vec![], json!({ "text": text }).to_string(), JSON)
         }
         WebhookFormat::Discord => {
-            let mut text = format!("**{head}**\n{}", ev.summary);
-            for line in [pr, ev.url.as_deref()].into_iter().flatten() {
+            // Escape Markdown, so a PR title can't render as a masked link or fake formatting.
+            let esc = |s: &str| {
+                s.chars().fold(String::new(), |mut o, c| {
+                    if "\\*_~`|[]()<>#-".contains(c) {
+                        o.push('\\');
+                    }
+                    o.push(c);
+                    o
+                })
+            };
+            let mut text = format!("**{}**\n{}", esc(&head), esc(&ev.summary));
+            if let Some(t) = pr {
                 text.push('\n');
-                text.push_str(line);
+                text.push_str(&esc(t));
+            }
+            if let Some(u) = &ev.url {
+                text.push('\n');
+                text.push_str(u);
             }
             // Discord's limit is 2000 characters.
             let text: String = text.chars().take(1900).collect();
@@ -376,7 +390,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["allowed_mentions"]["parse"], json!([]));
         let c = v["content"].as_str().unwrap();
-        assert!(c.starts_with("**Night Porter: grp/proj#7**") && c.ends_with("/-/merge_requests/7"));
+        assert!(c.starts_with("**Night Porter: grp/proj\\#7**") && c.ends_with("/-/merge_requests/7"), "{c}");
+        let mut e = ev();
+        e.pr_title = Some("[Approve job](https://evil.example)".into());
+        let (_, body, _) = payload(WebhookFormat::Discord, &e);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["content"].as_str().unwrap().contains("\\[Approve job\\]\\(https://evil.example\\)"));
     }
 
     #[test]

@@ -9,13 +9,28 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
+/// A job can be taken over once it's finished or waiting, has a worktree, and (for someone else's
+/// code) you approved running it: an interactive agent there loads the branch's own agent config
+/// with none of a job's isolation.
+pub fn can_take_over(j: &Job) -> Result<()> {
     if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
         bail!("job {} is {}; wait for it to finish before taking over", j.id, j.status.label());
     }
     if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
         bail!("job {} has no worktree (it may have been cleaned up)", j.id);
     }
+    if j.meta.untrusted_code && !(j.meta.run_approved && j.meta.run_approved_head == j.head_before) {
+        bail!(
+            "job {} is on someone else's code you haven't approved running: approve the run first (a), or review {} by hand",
+            j.id,
+            j.worktree
+        );
+    }
+    Ok(())
+}
+
+pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
+    can_take_over(j)?;
     let cfg = crate::config::Config::load(paths).ok();
     let choice = cfg.as_ref().map(|c| c.handoff).unwrap_or_default();
     let agent = cfg.map(|c| c.handoff_agent).unwrap_or_default().or_job(crate::agent_for(paths, &j.repo));
@@ -229,6 +244,28 @@ fn rex(db: &Db, j: &Job, agent: HandoffAgent) -> Result<String> {
 mod tests {
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
+
+    #[test]
+    fn someone_elses_code_needs_run_approval_before_a_take_over() {
+        let d = tempfile::tempdir().unwrap();
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 7, "maintainer", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::AwaitingRunApproval;
+        j.worktree = d.path().to_string_lossy().into();
+        j.head_before = "abc".into();
+        j.meta.untrusted_code = true;
+        assert!(can_take_over(&j).unwrap_err().to_string().contains("approve the run first"));
+        // Approved, but for an older head: still no.
+        (j.meta.run_approved, j.meta.run_approved_head) = (true, "old".into());
+        assert!(can_take_over(&j).is_err());
+        j.meta.run_approved_head = "abc".into();
+        j.status = JobStatus::AwaitingApproval;
+        can_take_over(&j).unwrap();
+        j.status = JobStatus::Running;
+        assert!(can_take_over(&j).is_err());
+    }
 
     #[test]
     fn rex_handoff_opens_a_session_at_the_worktree() {

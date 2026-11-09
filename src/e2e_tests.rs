@@ -762,6 +762,16 @@ async fn gitlab_group_members_are_read_past_the_first_page() {
     assert_eq!(log.lock().unwrap().len(), 2, "cached after the first lookup");
 }
 
+/// Lists that fail open when cut short (team members for `deny_teams`) must be read to the end.
+#[tokio::test]
+async fn get_every_refuses_a_partial_list() {
+    let (url, _) = mock(vec![("GET", "/m", "NEXT /m/p2\n[1]".into()), ("GET", "/m/p2", "[2]".into())]).await;
+    let api = Api::new(&url, "t".to_string().into(), false).unwrap();
+    assert_eq!(api.get_all::<u32>("/m", 1).await.unwrap(), vec![1], "get_all stops at the cap");
+    assert!(api.get_every::<u32>("/m", 1).await.is_err(), "get_every won't");
+    assert_eq!(api.get_every::<u32>("/m", 5).await.unwrap(), vec![1, 2]);
+}
+
 /// Error handling keys off the real status, not text a server could put in a body.
 #[tokio::test]
 async fn http_errors_carry_their_status() {

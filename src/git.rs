@@ -92,6 +92,44 @@ pub fn verify_gitfile(wt: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// The git config files our own git calls in a worktree read, as they were before the agent ran:
+/// the clone's `config`, and the worktree's own `config.worktree`, `commondir` and `gitdir`.
+pub struct ConfigGuard(Vec<(PathBuf, Option<Vec<u8>>)>);
+
+impl ConfigGuard {
+    pub fn take(wt: &Path) -> Self {
+        let admin = std::fs::read_to_string(wt.join(".git")).ok().and_then(|t| t.trim_end().strip_prefix("gitdir: ").map(PathBuf::from));
+        let mut files = vec![];
+        if let Some(admin) = admin {
+            if let Some(common) = admin.parent().and_then(Path::parent) {
+                files.extend([common.join("config"), common.join("config.worktree")]);
+            }
+            files.extend([admin.join("config.worktree"), admin.join("commondir"), admin.join("gitdir")]);
+        }
+        Self(files.into_iter().map(|f| (f.clone(), std::fs::read(&f).ok())).collect())
+    }
+
+    /// Put back anything that changed (so your own git in the clone is safe too), then fail.
+    pub fn verify(&self) -> Result<()> {
+        let mut changed = vec![];
+        for (f, before) in &self.0 {
+            if std::fs::read(f).ok() != *before {
+                changed.push(f.display().to_string());
+                match before {
+                    Some(b) => std::fs::write(f, b)?,
+                    None => {
+                        let _ = std::fs::remove_file(f);
+                    }
+                }
+            }
+        }
+        if !changed.is_empty() {
+            bail!("the agent changed git config ({}); restored it and stopped the job", changed.join(", "));
+        }
+        Ok(())
+    }
+}
+
 /// Where a PR's base branch is fetched for merges and comparisons. One per PR, so concurrent jobs
 /// in the same clone never see each other's base.
 pub fn base_ref(branch: &str) -> String {
@@ -291,5 +329,26 @@ pub(crate) mod tests {
     #[test]
     fn df_works() {
         assert!(free_gb(Path::new("/nonexistent/deep/path")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn config_guard_undoes_git_config_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        repo(&clone);
+        let wt = d.path().join("wt");
+        prepare_worktree(&clone, &wt, &clone.to_string_lossy(), "refs/heads/main", "nightporter/pr-1").await.unwrap();
+        let g = ConfigGuard::take(&wt);
+        g.verify().unwrap();
+        let cfg = clone.join(".git/config");
+        let before = std::fs::read_to_string(&cfg).unwrap();
+        // What `git stash show --output=` could do: a config that runs a command on fetch.
+        std::fs::write(&cfg, format!("{before}[core]\n\tsshCommand = touch PWNED\n")).unwrap();
+        std::fs::write(clone.join(".git/config.worktree"), "[core]\n").unwrap();
+        let e = g.verify().unwrap_err().to_string();
+        assert!(e.contains("changed git config"), "{e}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
+        assert!(!clone.join(".git/config.worktree").exists());
     }
 }

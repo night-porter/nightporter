@@ -31,6 +31,27 @@ All notable changes to Night Porter. The format follows
 - **Host aliases** on `[[accounts]]`: `aliases = ["github-work"]` for SSH `Host` aliases or mirror
   names in clone remotes.
 
+### Security
+
+- The agent could run `git stash show --output=<file>` to write a git config into the clone, whose
+  commands Night Porter's own git calls would then run outside the sandbox. Only `git stash push`
+  and `pop` are allowed now, and the clone's git config is checked after every agent run: a
+  change is undone and fails the job. Found in our own audit; we know of no use in the wild.
+- Forgejo/Gitea: when you're not a repo admin, a collaborator with read-only access counted as
+  `collaborator` (trusted by default). They're `contributor` now.
+- Team and group member lists for `allow_teams` / `deny_teams` fail closed when they can't be
+  read to the end (too many pages, or a next-page link to another server).
+- GitHub notification paging only follows next-page links back to the API it's configured for.
+- `/nightporter approve|dismiss|retry|status` ignores edited comments: people with write access
+  can edit yours.
+- Taking over a job on someone else's code is refused until you've approved running it.
+- `pack update` refuses a pack that renamed itself (it would have replaced another installed
+  pack), `pack add` refuses a name already installed from another URL, and pack descriptions
+  and diffs are printed without terminal control characters.
+- Two marketplace URLs could share a local folder. Marketplaces are cloned again on the next
+  `nightporter market update`.
+- Discord notifications escape Markdown, so a PR title can't render as a link.
+
 ### Fixed
 
 - Clones whose remote uses `git.drupal.org` (the old name of git.drupalcode.org) weren't found,
