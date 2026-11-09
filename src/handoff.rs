@@ -379,4 +379,36 @@ mod tests {
         assert!(std::fs::read_to_string(&brief).unwrap().contains("renamed foo"));
         assert!(msg.contains(&format!("&& 'claude' \"$(cat '{}')\"", brief.display())), "{msg}");
     }
+
+    #[test]
+    fn take_over_needs_a_finished_job_with_a_worktree() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.config_file(), "handoff = \"print\"\n[defaults]\nagent = \"codex\"\n").unwrap();
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 7, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        for s in [JobStatus::Running, JobStatus::Queued, JobStatus::Approved] {
+            j.status = s;
+            assert!(take_over(&paths, &db, &j).unwrap_err().to_string().contains("wait for it to finish"));
+        }
+        j.status = JobStatus::Ready;
+        assert!(take_over(&paths, &db, &j).unwrap_err().to_string().contains("has no worktree"));
+        j.worktree = d.path().join("gone").to_string_lossy().into();
+        assert!(take_over(&paths, &db, &j).is_err(), "a cleaned-up worktree is refused too");
+        j.worktree = d.path().to_string_lossy().into();
+        let msg = take_over(&paths, &db, &j).unwrap();
+        assert!(msg.starts_with("run this in a terminal to take over: cd ") && msg.contains("&& 'codex'"), "{msg}");
+    }
+
+    #[test]
+    fn run_reports_stderr_on_failure() {
+        run("true", &[]).unwrap();
+        let e = run("sh", &["-c", "echo broken >&2; exit 3"]).unwrap_err().to_string();
+        assert_eq!(e, "sh: broken");
+        assert!(run("nightporter-no-such-tool", &[]).unwrap_err().to_string().contains("run nightporter-no-such-tool"));
+        assert!(on_path("nightporter-no-such-tool").is_none() && on_path("sh").is_some());
+    }
 }

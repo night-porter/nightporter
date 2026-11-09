@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Log = Arc<Mutex<Vec<(String, String, String)>>>;
 
 /// Minimal HTTP/1.1 server: routes by method + path prefix, records every request.
-async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log) {
+pub(crate) async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let log: Log = Arc::default();

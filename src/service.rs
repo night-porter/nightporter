@@ -189,5 +189,40 @@ mod tests {
     fn plist_escapes() {
         let p = super::plist("/a&b/nightporter", "/bin", "/tmp/log");
         assert!(p.contains("/a&amp;b/nightporter") && p.contains("<string>daemon</string>"));
+        let p = super::plist("/x", "/bin:<a>", "/tmp/\"log\"");
+        assert!(p.contains("<string>/bin:&lt;a&gt;</string>") && p.contains("<string>/tmp/&quot;log&quot;</string>"), "{p}");
+    }
+
+    #[test]
+    fn systemd_unit_runs_the_daemon_with_path() {
+        let u = super::unit("/opt/my bin/nightporter", "/usr/bin:/bin");
+        assert!(u.contains("ExecStart=\"/opt/my bin/nightporter\" daemon\n") && u.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
+        assert!(u.contains("Restart=on-failure") && u.ends_with("WantedBy=default.target\n"));
+    }
+
+    #[test]
+    fn start_and_stop_check_the_daemon_lock_first() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        assert_eq!(super::stop(&paths).unwrap(), "Night Porter is not running");
+        assert!(super::wait_for(&paths, false));
+        // Hold the lock the way a running daemon does.
+        let f = std::fs::File::create(paths.lock()).unwrap();
+        f.lock().unwrap();
+        assert_eq!(super::start(&paths).unwrap(), "Night Porter is already running");
+        let e = super::stop(&paths).unwrap_err().to_string();
+        assert!(e.contains("can't find the daemon's process id"), "{e}");
+        std::fs::write(paths.pid_file(), "not a pid").unwrap();
+        assert!(super::stop(&paths).is_err());
+        assert!(super::wait_for(&paths, true));
+    }
+
+    #[test]
+    fn run_reports_failures_with_stderr() {
+        super::run(std::process::Command::new("true").arg("x")).unwrap();
+        let e = super::run(std::process::Command::new("sh").args(["-c", "echo nope >&2; exit 1"])).unwrap_err().to_string();
+        assert!(e.ends_with(": nope"), "{e}");
+        assert!(super::run(&mut std::process::Command::new("nightporter-no-such-tool")).is_err());
     }
 }

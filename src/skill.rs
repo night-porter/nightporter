@@ -27,16 +27,22 @@ fn skill_dir() -> Result<PathBuf> {
 }
 
 pub fn setup() -> Result<String> {
-    let dir = skill_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    setup_in(&skill_dir()?)
+}
+
+pub fn remove() -> Result<String> {
+    remove_in(&skill_dir()?)
+}
+
+fn setup_in(dir: &std::path::Path) -> Result<String> {
+    std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("SKILL.md"), STUB)?;
     Ok(format!("installed {}", dir.join("SKILL.md").display()))
 }
 
-pub fn remove() -> Result<String> {
-    let dir = skill_dir()?;
+fn remove_in(dir: &std::path::Path) -> Result<String> {
     if dir.join("SKILL.md").exists() {
-        std::fs::remove_dir_all(&dir)?;
+        std::fs::remove_dir_all(dir)?;
         Ok(format!("removed {}", dir.display()))
     } else {
         Ok("not installed".into())
@@ -51,5 +57,15 @@ mod tests {
         for cmd in ["nightporter status", "nightporter show", "nightporter wait", "nightporter events", "nightporter handoff"] {
             assert!(super::GUIDE.contains(cmd), "guide should mention `{cmd}`");
         }
+    }
+
+    #[test]
+    fn setup_writes_the_stub_and_remove_takes_it_away() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("skills/nightporter");
+        assert_eq!(super::remove_in(&dir).unwrap(), "not installed");
+        assert!(super::setup_in(&dir).unwrap().ends_with("nightporter/SKILL.md"));
+        assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), super::STUB);
+        assert!(super::remove_in(&dir).unwrap().starts_with("removed ") && !dir.exists());
     }
 }

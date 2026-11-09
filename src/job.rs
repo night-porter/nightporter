@@ -903,4 +903,82 @@ mod tests {
         assert!(!pushes_code(Some(Verb::Review)) && pushes_code(Some(Verb::Fix)) && pushes_code(None));
         assert!(read_only_verb(Some(Verb::Triage)) && !read_only_verb(Some(Verb::Reproduce)));
     }
+
+    #[test]
+    fn truncate_keeps_char_boundaries() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("aé", 2), "a", "never splits a multi-byte char");
+    }
+
+    #[test]
+    fn gate_prompt_marks_requests_as_untrusted() {
+        let e = crate::state::tests::ev("e1", 1);
+        let p = gate_prompt("Check licences.", std::slice::from_ref(&e));
+        assert!(p.starts_with(prompts::SYSTEM) && p.contains("You are a read-only gate") && p.contains("Check licences."));
+        assert!(p.contains(&format!("- @alice (ReviewComment): {}", prompts::untrusted("fix"))), "{p}");
+        assert!(p.trim_end().ends_with("\"summary\": \"reason\"}"));
+    }
+
+    #[tokio::test]
+    async fn env_commands_log_output_and_report_failures() {
+        let d = tempfile::tempdir().unwrap();
+        let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
+        sh(d.path(), d.path(), "echo out; echo err >&2", &s).await.unwrap();
+        assert_eq!(std::fs::read_to_string(d.path().join("env.log")).unwrap(), "out\nerr\n");
+        let e = sh(d.path(), d.path(), "echo first >&2; echo last words >&2; exit 4", &s).await.unwrap_err().to_string();
+        assert!(e.starts_with("exit ") && e.ends_with(": last words"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn gc_removes_idle_or_all_worktrees_but_never_busy_ones() {
+        use crate::forge::{ForgeKind, RepoId};
+        use crate::paths::Paths;
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        git_in(&clone, &["init", "--quiet"]);
+        let marker = d.path().join("cleaned");
+        let cfg = crate::config::Config::parse(&format!(
+            "retention_days = 1\n[defaults.env]\ncleanup = [\"/usr/bin/touch '{}'\"]\n",
+            marker.display()
+        ))
+        .unwrap();
+        let ctx = crate::daemon::test_ctx(paths.clone(), cfg, crate::repos::CloneMap::new());
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let mk = |n: u64, status: JobStatus, wt: &str| {
+            ctx.db(|db| {
+                let id = db.create_job(&repo, Target::Pr, n, "my_prs", "draft", &[])?;
+                let mut j = db.job(id)?.unwrap();
+                j.status = status;
+                j.branch = format!("np/{n}");
+                j.meta.clone = clone.to_string_lossy().into();
+                if !wt.is_empty() {
+                    let p = d.path().join(wt);
+                    std::fs::create_dir_all(&p)?;
+                    j.worktree = p.to_string_lossy().into();
+                }
+                db.update_job(&j)?;
+                Ok(id)
+            })
+            .unwrap()
+        };
+        let done = mk(1, JobStatus::Done, "wt-done");
+        mk(2, JobStatus::AwaitingApproval, "wt-busy");
+        mk(3, JobStatus::Failed, "");
+
+        gc(&ctx, false).await.unwrap();
+        assert!(d.path().join("wt-done").exists(), "fresh worktrees stay");
+        gc(&ctx, true).await.unwrap();
+        assert!(!d.path().join("wt-done").exists() && marker.exists(), "--all removes it after the cleanup commands");
+        assert!(d.path().join("wt-busy").exists(), "a PR with a pending job keeps its worktree");
+
+        // Housekeeping also drops job folders whose job is gone.
+        std::fs::create_dir_all(paths.job_dir(999)).unwrap();
+        std::fs::create_dir_all(paths.job_dir(done)).unwrap();
+        housekeeping(&ctx).await.unwrap();
+        assert!(!paths.job_dir(999).exists() && paths.job_dir(done).exists());
+    }
 }
