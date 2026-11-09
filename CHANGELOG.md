@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-09
+
 ### Added
 
 - `nightporter rescan <repo> [--since 1d]`: re-read reviews and comments on your open PRs/MRs in a
@@ -180,7 +182,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/night-porter/nightporter/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/night-porter/nightporter/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/night-porter/nightporter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/night-porter/nightporter/compare/v0.2.0...v0.3.0
