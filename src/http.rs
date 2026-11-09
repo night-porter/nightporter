@@ -121,6 +121,27 @@ pub fn plain() -> reqwest::Client {
     .clone()
 }
 
+/// A forge API answered with an error status. Match on [`status`], never on the message: the
+/// body is the server's text and can say anything.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: u16,
+    msg: String,
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+/// The HTTP status of a failed API call, if that's what failed.
+pub fn status(e: &anyhow::Error) -> Option<u16> {
+    e.downcast_ref::<HttpError>().map(|h| h.status)
+}
+
 async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response> {
     let s = resp.status();
     if s.is_success() {
@@ -128,7 +149,7 @@ async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response>
     }
     let body = resp.text().await.unwrap_or_default();
     let body: String = body.chars().take(300).collect();
-    bail!("{path}: HTTP {s}: {body}")
+    Err(HttpError { status: s.as_u16(), msg: format!("{path}: HTTP {s}: {body}") }.into())
 }
 
 fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {

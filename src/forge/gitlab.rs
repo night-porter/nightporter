@@ -336,7 +336,7 @@ impl GitLab {
             }
             // Not a member: cache. Other errors (5xx, rate limit): don't, so a hiccup doesn't
             // send maintainers to the inbox for an hour.
-            Err(e) if e.to_string().contains("HTTP 404") => {
+            Err(e) if crate::http::status(&e) == Some(404) => {
                 self.roles.put(key, Role::None);
                 Role::None
             }
@@ -422,6 +422,25 @@ impl GitLab {
         })
     }
 
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
+        #[derive(Deserialize)]
+        struct Item {
+            iid: u64,
+            title: String,
+            author: User,
+            created_at: String,
+            #[serde(default)]
+            labels: Vec<String>,
+        }
+        let kind = if target == Target::Pr { "merge_requests" } else { "issues" };
+        let path = format!("/projects/{}/{kind}?state=opened&per_page=100", enc(&repo.path));
+        let items: Vec<Item> = self.api.get_all(&path, super::LIST_PAGES).await?;
+        Ok(items
+            .into_iter()
+            .map(|i| super::Listed { number: i.iid, title: i.title, author: i.author.username, created_at: i.created_at, labels: i.labels })
+            .collect())
+    }
+
     pub async fn issue(&self, repo: &RepoId, iid: u64) -> Result<super::IssueInfo> {
         #[derive(Deserialize)]
         struct I {
@@ -486,13 +505,10 @@ impl GitLab {
     }
 
     pub async fn in_group(&self, group: &str, user: &str) -> Result<bool> {
-        if let Some(m) = self.groups.get(&group.to_string()) {
-            return Ok(m.iter().any(|x| x.eq_ignore_ascii_case(user)));
-        }
-        let members: Vec<User> = self.api.get(&format!("/groups/{}/members/all?per_page=100", enc(group))).await?;
-        let names: Vec<String> = members.into_iter().map(|u| u.username).collect();
-        let hit = names.iter().any(|x| x.eq_ignore_ascii_case(user));
-        self.groups.put(group.into(), names);
-        Ok(hit)
+        let fetch = async {
+            let members: Vec<User> = self.api.get_all(&format!("/groups/{}/members/all?per_page=100", enc(group)), 100).await?;
+            Ok(members.into_iter().map(|u| u.username).collect())
+        };
+        self.groups.member(group, user, fetch).await
     }
 }

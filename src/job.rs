@@ -212,7 +212,7 @@ async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work) -> Result<bool> {
             j.meta.run_approved = false;
             j.meta.run_approved_head.clone_from(&j.head_before);
             j.status = JobStatus::AwaitingRunApproval;
-            j.summary = format!("untrusted code at {}: approve before the agent or any setup runs", short(&j.head_before));
+            j.summary = format!("untrusted code at {}: approve before the agent or any setup runs", crate::git::short(&j.head_before));
             ctx.db(|d| d.update_job(j))?;
             note(ctx, j, Kind::NeedsApproval, "Untrusted code wants to run: review build files and approve");
             return Ok(true);
@@ -424,7 +424,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             // A previous delivery attempt (before a restart) got this far.
             log(ctx, id, "already pushed; continuing with replies");
         } else {
-            log(ctx, id, &format!("pushing {} to {}", short(&j.head_after), j.meta.push_ref));
+            log(ctx, id, &format!("pushing {} to {}", crate::git::short(&j.head_after), j.meta.push_ref));
             // Other push failures (protected branch, auth) are real failures, not a retry loop.
             git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref).await?;
         }
@@ -464,7 +464,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     drop(f);
     j.status = JobStatus::Done;
     ctx.db(|d| d.update_job(&j))?;
-    let pushed = if has_code { format!("pushed {} and ", short(&j.head_after)) } else { String::new() };
+    let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
     note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
     Ok(())
 }
@@ -533,22 +533,43 @@ pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
                 Ok(f) => f.lock().await.pr(&j.repo, j.number).await.is_ok_and(|p| p.state != PrState::Open),
                 Err(_) => false,
             };
-        if all || old || closed {
-            let s = cfg.settings_for(&ctx.paths, &j.repo).ok();
-            let snap = ctx.paths.job_dir(j.id).join("env-snapshot");
-            let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
-            if let Some(s) = s.as_ref().filter(|_| restored) {
-                let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
-                for c in &s.env.cleanup {
-                    let _ = sh(&wt, &ctx.paths.job_dir(j.id), &vars.apply(c), s).await;
-                }
+        if (all || old || closed)
+            && let Err(e) = remove(&ctx.paths, &cfg, &j).await
+        {
+            tracing::warn!("couldn't remove worktree {}: {e:#}", wt.display());
+        }
+    }
+    // Trash older than a week goes for good.
+    let now = crate::state::now();
+    let clones: std::collections::BTreeSet<_> = ctx.db(|d| d.recent_jobs(10_000))?.into_iter().map(|j| j.meta.clone).collect();
+    for c in clones.iter().filter(|c| !c.is_empty()) {
+        for (r, _, at) in git::trash_refs(Path::new(c)).await.unwrap_or_default() {
+            if now - at > crate::worktrees::KEEP_SECS {
+                git(Path::new(c), &["update-ref", "-d", &r]).await.ok();
             }
-            let clone = PathBuf::from(&j.meta.clone);
-            tracing::info!("removing worktree {}", wt.display());
-            git::remove_worktree(&clone, &wt, &j.branch).await?;
         }
     }
     Ok(())
+}
+
+/// Remove a job's worktree: keep its work in the trash (undo for a week), run the repo's env
+/// cleanup, then remove it and its branch. The caller checks no job is using it.
+pub async fn remove(paths: &crate::paths::Paths, cfg: &crate::config::Config, j: &Job) -> Result<Option<String>> {
+    let wt = PathBuf::from(&j.worktree);
+    let clone = PathBuf::from(&j.meta.clone);
+    let kept = git::trash(&clone, &wt, &j.branch, crate::state::now()).await.context("keep its work in the trash")?;
+    let s = cfg.settings_for(paths, &j.repo).ok();
+    let snap = paths.job_dir(j.id).join("env-snapshot");
+    let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
+    if let Some(s) = s.as_ref().filter(|_| restored && wt.exists()) {
+        let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
+        for c in &s.env.cleanup {
+            let _ = sh(&wt, &paths.job_dir(j.id), &vars.apply(c), s).await;
+        }
+    }
+    tracing::info!("removing worktree {}", wt.display());
+    git::remove_worktree(&clone, &wt, &j.branch).await?;
+    Ok(kept)
 }
 
 struct Vars<'a> {
@@ -774,10 +795,6 @@ fn truncate(s: &str, n: usize) -> &str {
         i -= 1;
     }
     &s[..i]
-}
-
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(10)]
 }
 
 fn first_line(s: &str) -> String {

@@ -41,6 +41,39 @@ impl User {
     }
 }
 
+/// An issue or PR in a list (GitHub and Forgejo/Gitea agree on these fields).
+#[derive(Deserialize)]
+pub(super) struct ListItem {
+    number: u64,
+    title: String,
+    user: ListUser,
+    created_at: String,
+    #[serde(default)]
+    labels: Vec<ListLabel>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+struct ListUser {
+    login: String,
+}
+#[derive(Deserialize)]
+struct ListLabel {
+    name: String,
+}
+
+impl ListItem {
+    pub(super) fn listed(self) -> super::Listed {
+        super::Listed {
+            number: self.number,
+            title: self.title,
+            author: self.user.login,
+            created_at: self.created_at,
+            labels: self.labels.into_iter().map(|l| l.name).collect(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Thread {
     reason: String,
@@ -516,6 +549,16 @@ impl GitHub {
         })
     }
 
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
+        // `/issues` lists PRs too (with a `pull_request` key); `/pulls` only PRs.
+        let path = match target {
+            Target::Issue => format!("/repos/{}/issues?state=open&per_page=100", repo.path),
+            Target::Pr => format!("/repos/{}/pulls?state=open&per_page=100", repo.path),
+        };
+        let items: Vec<ListItem> = self.api.get_all(&path, super::LIST_PAGES).await?;
+        Ok(items.into_iter().filter(|i| target == Target::Pr || i.pull_request.is_none()).map(ListItem::listed).collect())
+    }
+
     pub async fn issue(&self, repo: &RepoId, n: u64) -> Result<super::IssueInfo> {
         #[derive(Deserialize)]
         struct I {
@@ -601,15 +644,11 @@ impl GitHub {
 
     /// `org/team` membership, cached for an hour.
     pub async fn in_team(&self, team: &str, user: &str) -> Result<bool> {
-        if let Some(members) = self.team_cache.get(&team.to_string()) {
-            return Ok(members.iter().any(|m| m.eq_ignore_ascii_case(user)));
-        }
         let (org, slug) = team.split_once('/').context("team must be org/team")?;
-        // Every page: a member past the first 100 must still match (deny_teams fails open otherwise).
-        let members: Vec<User> = self.api.get_all(&format!("/orgs/{org}/teams/{slug}/members?per_page=100"), 100).await?;
-        let members: Vec<String> = members.into_iter().map(|u| u.login).collect();
-        let hit = members.iter().any(|m| m.eq_ignore_ascii_case(user));
-        self.team_cache.put(team.into(), members);
-        Ok(hit)
+        let fetch = async {
+            let members: Vec<User> = self.api.get_all(&format!("/orgs/{org}/teams/{slug}/members?per_page=100"), 100).await?;
+            Ok(members.into_iter().map(|u| u.login).collect())
+        };
+        self.team_cache.member(team, user, fetch).await
     }
 }

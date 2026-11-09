@@ -86,6 +86,20 @@ nightporter gc          # idle ones
 nightporter gc --all    # every worktree not in use
 ```
 
+Or pick them one by one in the **Worktrees** tab (`6`): `x` removes one, `u` brings a removed
+one back. `nightporter worktrees` lists them from the CLI.
+
+Removing never loses work for a week: the worktree's commits and uncommitted changes (also new
+files) are kept in its clone under `refs/nightporter/trash/`, and `u` or
+`nightporter worktrees restore <job>` puts them back where they were. Ignored files
+(`node_modules`, `.ddev` state) aren't kept; the next job sets them up again. After 7 days the
+trash goes for good.
+
+Worktrees live in Night Porter's data folder (`~/.local/share/nightporter/worktrees`, on macOS
+too), not next to your clone. Inside
+the clone they'd show up as untracked files in your own `git status`, and next to it in your
+code folder your editor, file watchers and the clone scan would pick them up.
+
 ## Still stuck?
 
 [Open an issue](/reporting-issues).

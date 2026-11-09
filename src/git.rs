@@ -112,6 +112,63 @@ pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()
     Ok(())
 }
 
+/// Where removed worktrees are kept: `refs/nightporter/trash/<branch>/<unix time>`, in the clone.
+pub const TRASH: &str = "refs/nightporter/trash/";
+/// Subject of the commit holding a worktree's uncommitted changes; restore undoes it.
+const WIP: &str = "nightporter: uncommitted changes";
+
+/// Keep a worktree's work (its commits and any uncommitted changes) under a trash ref before it's
+/// removed. Returns the ref, or `None` when there's no worktree, or its `.git` doesn't point into
+/// the clone (never run git through that).
+pub async fn trash(clone: &Path, wt: &Path, branch: &str, now: i64) -> Result<Option<String>> {
+    if !wt.exists() || !gitfile_points_into(clone, wt).await {
+        return Ok(None);
+    }
+    let head = git(wt, &["rev-parse", "HEAD"]).await?;
+    // ponytail: untracked files that aren't ignored go in too; skip them if snapshots get big.
+    git(wt, &["add", "-A"]).await?;
+    let tree = git(wt, &["write-tree"]).await?;
+    let sha = if git(wt, &["rev-parse", "HEAD^{tree}"]).await? == tree {
+        head
+    } else {
+        let id = ["-c", "user.name=Night Porter", "-c", "user.email=nightporter@localhost"];
+        git(wt, &[&id[..], &["commit-tree", &tree, "-p", &head, "-m", WIP]].concat()).await?
+    };
+    let r = format!("{TRASH}{}/{now}", branch.replace('/', "-"));
+    git(clone, &["update-ref", &r, &sha]).await?;
+    Ok(Some(r))
+}
+
+/// Trash refs in a clone: (ref, branch slug, unix time it was removed).
+pub async fn trash_refs(clone: &Path) -> Result<Vec<(String, String, i64)>> {
+    let out = git(clone, &["for-each-ref", "--format=%(refname)", TRASH]).await?;
+    Ok(out
+        .lines()
+        .filter_map(|r| {
+            let (slug, ts) = r.strip_prefix(TRASH)?.rsplit_once('/')?;
+            Some((r.to_string(), slug.to_string(), ts.parse().ok()?))
+        })
+        .collect())
+}
+
+/// Bring a trashed worktree back at `wt`, uncommitted changes uncommitted again.
+pub async fn restore(clone: &Path, wt: &Path, branch: &str, trash_ref: &str) -> Result<()> {
+    if wt.exists() {
+        bail!("{} exists (a newer job made it again): remove that one first", wt.display());
+    }
+    let sha = git(clone, &["rev-parse", "--verify", &format!("{trash_ref}^{{commit}}")]).await?;
+    if let Some(p) = wt.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    git(clone, &["worktree", "prune"]).await?;
+    git(clone, &["worktree", "add", "--quiet", "-B", branch, &wt.to_string_lossy(), &sha]).await?;
+    if git(clone, &["log", "-1", "--format=%s", &sha]).await? == WIP {
+        git(wt, &["reset", "--quiet", "HEAD~1"]).await?;
+    }
+    git(clone, &["update-ref", "-d", trash_ref]).await?;
+    Ok(())
+}
+
 /// The remote branch's current SHA, or `None` if it doesn't exist.
 pub async fn remote_head(clone: &Path, url: &str, branch: &str) -> Result<Option<String>> {
     let out = git(clone, &["ls-remote", "--end-of-options", url, &format!("refs/heads/{branch}")]).await?;
@@ -161,6 +218,11 @@ pub fn free_gb(p: &Path) -> Result<u64> {
     let avail_kb: u64 =
         s.lines().nth(1).and_then(|l| l.split_whitespace().nth(3)).and_then(|v| v.parse().ok()).context("parse df output")?;
     Ok(avail_kb / 1024 / 1024)
+}
+
+/// A sha shortened for messages.
+pub fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(10)]
 }
 
 #[cfg(test)]

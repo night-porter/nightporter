@@ -366,7 +366,7 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
                 .args(gemini_args(&policy));
         }
     }
-    cmd.args(&s.agent_args);
+    cmd.args(s.agent_args.for_agent(kind));
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

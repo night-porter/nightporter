@@ -306,6 +306,46 @@ pub struct Reply {
     pub body: String,
 }
 
+/// One open issue or PR/MR, as listed for `nightporter sweep`. Text is untrusted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub created_at: String,
+    pub labels: Vec<String>,
+}
+
+/// Which listed items a sweep takes: all set conditions must hold.
+#[derive(Clone, Debug, Default)]
+pub struct Pick {
+    /// Every one of these labels (case-insensitive).
+    pub labels: Vec<String>,
+    pub created_before: Option<jiff::Timestamp>,
+    pub created_after: Option<jiff::Timestamp>,
+    /// Leave out this author's items (your own PRs are already watched).
+    pub skip_author: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// Oldest first, so a capped sweep works through the backlog in order. Done in one place (not
+/// with each forge's query parameters, which differ in label and date semantics).
+pub fn pick(mut items: Vec<Listed>, p: &Pick) -> Vec<Listed> {
+    let at = |i: &Listed| i.created_at.parse::<jiff::Timestamp>().ok();
+    items.retain(|i| {
+        p.labels.iter().all(|l| i.labels.iter().any(|x| x.eq_ignore_ascii_case(l)))
+            && p.skip_author.as_ref().is_none_or(|a| !i.author.eq_ignore_ascii_case(a))
+            && p.created_before.is_none_or(|t| at(i).is_some_and(|c| c < t))
+            && p.created_after.is_none_or(|t| at(i).is_some_and(|c| c > t))
+    });
+    items.sort_by(|a, b| at(a).cmp(&at(b)).then(a.number.cmp(&b.number)));
+    items.truncate(p.limit.unwrap_or(usize::MAX));
+    items
+}
+
+/// Pages fetched when listing open issues or PRs (100 per page; 50 on Forgejo/Gitea).
+pub const LIST_PAGES: usize = 50;
+
 /// A forge client. Enum dispatch (three forges, no trait objects needed).
 pub enum Forge {
     GitHub(github::GitHub),
@@ -314,6 +354,20 @@ pub enum Forge {
 }
 
 impl Forge {
+    pub fn new(kind: ForgeKind, host: &str, api: crate::http::Api) -> Self {
+        match kind {
+            ForgeKind::GitHub => Forge::GitHub(github::GitHub::new(host, api)),
+            ForgeKind::GitLab => Forge::GitLab(gitlab::GitLab::new(host, api)),
+            ForgeKind::Forgejo => Forge::Forgejo(forgejo::Forgejo::new(host, api)),
+        }
+    }
+    pub fn api_base(kind: ForgeKind, host: &str) -> String {
+        match kind {
+            ForgeKind::GitHub => github::GitHub::api_base(host),
+            ForgeKind::GitLab => gitlab::GitLab::api_base(host),
+            ForgeKind::Forgejo => forgejo::Forgejo::api_base(host),
+        }
+    }
     /// Comments on `number` posted after `since` by the token's own user that are job commands,
     /// oldest first.
     pub async fn controls(&self, repo: &RepoId, target: Target, number: u64, since: &str) -> Result<Vec<ControlComment>> {
@@ -364,6 +418,14 @@ impl Forge {
             Forge::GitHub(g) => g.pr(repo, number).await,
             Forge::GitLab(g) => g.mr(repo, number).await,
             Forge::Forgejo(g) => g.pr(repo, number).await,
+        }
+    }
+    /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
+        match self {
+            Forge::GitHub(g) => g.open_items(repo, target).await,
+            Forge::GitLab(g) => g.open_items(repo, target).await,
+            Forge::Forgejo(g) => g.open_items(repo, target).await,
         }
     }
     pub async fn issue(&self, repo: &RepoId, number: u64) -> Result<IssueInfo> {
@@ -421,6 +483,21 @@ impl<K: std::hash::Hash + Eq, V: Clone> Ttl<K, V> {
     }
     pub fn put(&self, k: K, v: V) {
         self.0.lock().unwrap().insert(k, (crate::state::now(), v));
+    }
+}
+
+impl Ttl<String, Vec<String>> {
+    /// Whether `user` is in `team`, fetching (and caching) the member list on a miss. `fetch`
+    /// must read every page: a member past the first must still match, or `deny_teams` fails open.
+    pub async fn member(&self, team: &str, user: &str, fetch: impl Future<Output = Result<Vec<String>>>) -> Result<bool> {
+        let members = if let Some(m) = self.get(&team.to_string()) {
+            m
+        } else {
+            let m = fetch.await?;
+            self.put(team.into(), m.clone());
+            m
+        };
+        Ok(members.iter().any(|m| m.eq_ignore_ascii_case(user)))
     }
 }
 
@@ -501,6 +578,31 @@ mod tests {
         assert_eq!(Role::from_gitlab(40), Role::Maintainer);
         assert_eq!(Role::from_gitlab(30), Role::Collaborator);
         assert!(Role::Owner > Role::Contributor);
+    }
+
+    #[test]
+    fn picks_by_label_age_and_author() {
+        let it = |n, at: &str, who: &str, labels: &[&str]| Listed {
+            number: n,
+            title: format!("#{n}"),
+            author: who.into(),
+            created_at: at.into(),
+            labels: labels.iter().map(ToString::to_string).collect(),
+        };
+        let items = vec![
+            it(3, "2026-10-01T00:00:00Z", "ann", &["Bug"]),
+            it(1, "2026-01-01T00:00:00Z", "bob", &["bug", "needs review"]),
+            it(2, "2026-06-01T00:00:00Z", "me", &[]),
+            it(4, "not a date", "ann", &["bug"]),
+        ];
+        let nums = |p: &Pick| pick(items.clone(), p).iter().map(|i| i.number).collect::<Vec<_>>();
+        assert_eq!(nums(&Pick::default()), [4, 1, 2, 3]); // undated first, then oldest
+        assert_eq!(nums(&Pick { labels: vec!["BUG".into()], ..Default::default() }), [4, 1, 3]);
+        assert_eq!(nums(&Pick { labels: vec!["bug".into(), "needs review".into()], ..Default::default() }), [1]);
+        let t = |s: &str| Some(s.parse().unwrap());
+        assert_eq!(nums(&Pick { created_before: t("2026-07-01T00:00:00Z"), ..Default::default() }), [1, 2]);
+        assert_eq!(nums(&Pick { created_after: t("2026-05-01T00:00:00Z"), ..Default::default() }), [2, 3]);
+        assert_eq!(nums(&Pick { skip_author: Some("ME".into()), limit: Some(2), ..Default::default() }), [4, 1]);
     }
 
     #[test]

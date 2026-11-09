@@ -138,6 +138,10 @@ pub fn run(paths: &Paths) -> bool {
             }
         }
         checks.extend(tools(&forges, &agents));
+        let h = cfg.handoff_agent;
+        if h != crate::config::HandoffAgent::Job && !agents.iter().any(|a| a.bin() == h.bin()) {
+            checks.push(tool(h.bin(), "--version", &format!("install {} or set handoff_agent = \"job\"", h.label()), false));
+        }
         let dir = cfg.code_dir();
         checks.push(Check {
             name: "code dir".into(),

@@ -4,6 +4,42 @@ All notable changes to Night Porter. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (0.x: expect breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **Backlog sweep**: `nightporter sweep <repo>` queues a maintainer job for each open issue (or,
+  with `--prs`, each open PR/MR by someone else), oldest first. Filter with `--label` (repeat for
+  several, all must match), `--older-than 90d`, `--newer-than 14d` and `--limit`; `--dry-run`
+  lists without queuing. `--verb` picks `triage` (default), `reproduce`, `fix` or `review`
+  (default with `--prs`). Jobs stop at maintainer mode's level (at most draft). Your own PRs go
+  first and sweeps never use the last quarter of `daily_job_cap`. Re-running a sweep doesn't
+  queue anything twice. GitHub, GitLab and Forgejo/Gitea.
+- **Triage checks whether an issue is already done**: if the code already does what it asks, the
+  reply says so with evidence and recommends closing it.
+- **More agents for handoffs**: `handoff_agent = "pi"`, `"cursor"`, `"copilot"`, `"goose"`,
+  `"qwen"`, `"droid"` or `"kiro"` (or `"job"`, the default: the agent that ran the job). These are
+  handoff-only; jobs still run with `agent`. `nightporter doctor` checks the one you pick.
+- **Per-agent `agent_args`**: a table (`claude = ["--model", "opus"]`, `codex = [...]`) so each
+  agent gets its own model and flags, merged key by key with repo files. A plain list still works.
+- **Worktrees tab** (`6`) and `nightporter worktrees [rm|restore <job>]`: every worktree Night
+  Porter made, removable one by one. Removing (also by `gc` and the automatic cleanup) keeps the
+  worktree's commits and uncommitted changes in its clone for 7 days, so `u` / `restore` brings
+  it back. Ignored files aren't kept.
+- **Host aliases** on `[[accounts]]`: `aliases = ["github-work"]` for SSH `Host` aliases or mirror
+  names in clone remotes.
+
+### Fixed
+
+- Clones whose remote uses `git.drupal.org` (the old name of git.drupalcode.org) weren't found,
+  so the repo couldn't be subscribed. The alias is now built in.
+- **Security**: GitLab group lookups for `allow_teams` / `deny_teams` only read the first 100
+  members, so a member of a larger group named in `deny_teams` wasn't denied. Every page is read
+  now, as on GitHub and Forgejo/Gitea.
+- `gc` no longer stops at the first worktree it can't remove.
+- API errors are matched by their HTTP status instead of by the error text, which includes the
+  server's response body.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added

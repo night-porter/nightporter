@@ -377,19 +377,19 @@ impl Forgejo {
         }
         let r = match self.api.get::<P>(&format!("/repos/{repo}/collaborators/{user}/permission")).await {
             Ok(p) => role_from(&p.permission),
-            Err(e) if e.to_string().contains("HTTP 403") => {
+            Err(e) if crate::http::status(&e) == Some(403) => {
                 if repo.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(user)) {
                     Role::Owner
                 } else {
                     match self.api.send(Method::GET, &format!("/repos/{repo}/collaborators/{user}"), &Value::Null).await {
                         Ok(_) => Role::Collaborator,
-                        Err(e) if e.to_string().contains("HTTP 404") => Role::None,
+                        Err(e) if crate::http::status(&e) == Some(404) => Role::None,
                         // A hiccup: don't cache, or maintainers land in the inbox for an hour.
                         Err(_) => return Role::None,
                     }
                 }
             }
-            Err(e) if e.to_string().contains("HTTP 404") => Role::None,
+            Err(e) if crate::http::status(&e) == Some(404) => Role::None,
             Err(_) => return Role::None,
         };
         self.perm_cache.put(key, r);
@@ -520,6 +520,13 @@ impl Forgejo {
         })
     }
 
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
+        let kind = if target == Target::Pr { "pulls" } else { "issues" };
+        let path = format!("/repos/{}/issues?state=open&type={kind}&limit=50", repo.path);
+        let items: Vec<super::github::ListItem> = self.api.get_all(&path, super::LIST_PAGES).await?;
+        Ok(items.into_iter().map(super::github::ListItem::listed).collect())
+    }
+
     pub async fn issue(&self, repo: &RepoId, n: u64) -> Result<super::IssueInfo> {
         #[derive(Deserialize)]
         struct I {
@@ -555,7 +562,7 @@ impl Forgejo {
     /// Resolve the conversation started by `comment_id`. Gitea 1.25+ only; Forgejo has no API.
     pub async fn resolve(&self, repo: &RepoId, comment_id: &str) -> Result<()> {
         match self.api.send(Method::POST, &format!("/repos/{}/pulls/comments/{comment_id}/resolve", repo.path), &json!({})).await {
-            Err(e) if e.to_string().contains("HTTP 404") || e.to_string().contains("HTTP 405") => {
+            Err(e) if matches!(crate::http::status(&e), Some(404 | 405)) => {
                 bail!("this server has no API to resolve review conversations (Forgejo); resolve it in the web UI")
             }
             r => r.map(|_| ()),
@@ -586,18 +593,14 @@ impl Forgejo {
             id: u64,
             name: String,
         }
-        if let Some(m) = self.team_cache.get(&team.to_string()) {
-            return Ok(m.iter().any(|x| x.eq_ignore_ascii_case(user)));
-        }
         let (org, name) = team.split_once('/').context("team must be org/team")?;
-        let found: Found = self.api.get(&format!("/orgs/{org}/teams/search?q={}", crate::http::enc(name))).await?;
-        let t = found.data.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)).with_context(|| format!("no team {team}"))?;
-        // Every page: a member past the first page must still match (deny_teams fails open otherwise).
-        let members: Vec<User> = self.api.get_all(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
-        let names: Vec<String> = members.into_iter().map(|u| u.login).collect();
-        let hit = names.iter().any(|x| x.eq_ignore_ascii_case(user));
-        self.team_cache.put(team.into(), names);
-        Ok(hit)
+        let fetch = async {
+            let found: Found = self.api.get(&format!("/orgs/{org}/teams/search?q={}", crate::http::enc(name))).await?;
+            let t = found.data.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)).with_context(|| format!("no team {team}"))?;
+            let members: Vec<User> = self.api.get_all(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
+            Ok(members.into_iter().map(|u| u.login).collect())
+        };
+        self.team_cache.member(team, user, fetch).await
     }
 }
 

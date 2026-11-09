@@ -57,6 +57,11 @@ pub static SETTINGS: &[Setting] = &[
     s("worktree_idle_days", Int, "Idle worktrees are removed after this many days."),
     s("handoff", Choice(&["auto", "herdr", "rex", "tmux", "zellij", "terminal", "print"]), "Where h (take over) opens a job."),
     s(
+        "handoff_agent",
+        Choice(crate::config::HandoffAgent::NAMES),
+        "Agent h (take over) starts: job (the one that ran it), or pi, cursor, copilot, goose, qwen, droid, kiro, ...",
+    ),
+    s(
         "check_updates",
         Bool,
         "Once a day, ask GitHub for the latest release number and tell you when there's a new one. Sends nothing about you or your repos.",
@@ -82,7 +87,11 @@ pub static SETTINGS: &[Setting] = &[
         Choice(&["claude", "opencode", "codex", "gemini"]),
         "Coding agent: Claude Code, OpenCode, Codex or Gemini CLI (experimental).",
     ),
-    s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),
+    s(
+        "defaults.agent_args",
+        List,
+        "Extra agent CLI arguments for every agent, e.g. --model, opus (per agent: [defaults.agent_args] in config.toml)",
+    ),
     risky(
         "defaults.level",
         Choice(LEVELS),
@@ -353,7 +362,8 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "\nWHAT IT DOES");
     let _ = writeln!(o, "  watching       {}", if s.subscribed { "yes" } else { "no (not subscribed)" });
     let _ = writeln!(o, "  level          {}", s.level.as_str());
-    let args = if s.agent_args.is_empty() { String::new() } else { format!("  args: {}", s.agent_args.join(" ")) };
+    let args = s.agent_args.for_agent(s.agent);
+    let args = if args.is_empty() { "  (its own default model)".to_string() } else { format!("  args: {}", args.join(" ")) };
     let _ = writeln!(o, "  agent          {}{args}", s.agent.label());
     let triggers: Vec<String> = s.triggers.iter().map(crate::state::enum_str).collect();
     let _ = writeln!(o, "  starts on      {}", triggers.join(", "));

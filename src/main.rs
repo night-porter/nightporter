@@ -23,10 +23,12 @@ mod settings;
 mod setup;
 mod skill;
 mod state;
+mod sweep;
 mod trust;
 mod tui;
 mod update;
 mod watch;
+mod worktrees;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -76,6 +78,33 @@ enum Cmd {
     Subscribe { repo: String },
     /// Stop watching a repo.
     Unsubscribe { repo: String },
+    /// Queue maintainer jobs for a repo's open issues (or PRs/MRs with --prs), oldest first.
+    /// Each job stops at maintainer mode's level (at most draft) for you to review.
+    Sweep {
+        repo: String,
+        /// Open PRs/MRs by others instead of issues.
+        #[arg(long)]
+        prs: bool,
+        /// triage (default for issues: restates, checks whether it's already done, suggests
+        /// next steps), reproduce, fix (opens a draft PR/MR) or review (default for PRs).
+        #[arg(long)]
+        verb: Option<String>,
+        /// Only items with this label (repeat for several; all must match).
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Only items opened more than this long ago (e.g. 90d).
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Only items opened within this long (e.g. 14d).
+        #[arg(long)]
+        newer_than: Option<String>,
+        /// At most this many items (oldest first).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// List what would be queued; queue nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Approve a job (push + post, or allow untrusted code to run).
     Approve {
         id: i64,
@@ -118,6 +147,11 @@ enum Cmd {
     Gc {
         #[arg(long)]
         all: bool,
+    },
+    /// List the worktrees Night Porter made; remove one or bring back a removed one (for 7 days).
+    Worktrees {
+        #[command(subcommand)]
+        cmd: Option<WtCmd>,
     },
     /// Store a personal access token in the OS keychain (read from stdin).
     Token {
@@ -209,6 +243,14 @@ enum InboxCmd {
     },
     /// Drop this one event.
     Ignore { event: String },
+}
+
+#[derive(Subcommand)]
+enum WtCmd {
+    /// Remove a job's worktree (its work is kept for 7 days).
+    Rm { job: i64 },
+    /// Bring back the last removed worktree of a job's PR or issue.
+    Restore { job: i64 },
 }
 
 #[derive(Subcommand)]
@@ -340,14 +382,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Inbox { cmd } => inbox(&paths, cmd),
-        Cmd::Pause => {
-            actions::set_paused(&db(&paths)?, true)?;
-            println!("paused: no new jobs will start (running jobs finish)");
-            Ok(())
-        }
-        Cmd::Resume => {
-            actions::set_paused(&db(&paths)?, false)?;
-            println!("resumed");
+        Cmd::Pause | Cmd::Resume => {
+            let pause = matches!(cmd, Cmd::Pause);
+            actions::set_paused(&db(&paths)?, pause)?;
+            println!("{}", if pause { "paused: no new jobs will start (running jobs finish)" } else { "resumed" });
             Ok(())
         }
         Cmd::Gc { all } => rt()?.block_on(async {
@@ -355,11 +393,71 @@ fn main() -> Result<()> {
             let ctx = daemon::offline_ctx(&paths, cfg).await?;
             job::gc(&ctx, all).await
         }),
+        Cmd::Worktrees { cmd } => rt()?.block_on(cmd_worktrees(&paths, cmd)),
         Cmd::Token { cmd: TokenCmd::Set { forge, host } } => cmd_token_set(&forge, host),
         Cmd::Service { cmd } => cmd_service(&paths, &cmd),
+        c @ Cmd::Sweep { .. } => rt()?.block_on(cmd_sweep(&paths, c)),
         Cmd::Market { cmd } => rt()?.block_on(market(&paths, cmd)),
         Cmd::Pack { cmd } => rt()?.block_on(pack(&paths, cmd)),
     }
+}
+
+/// `nightporter worktrees [rm|restore <job>]`.
+async fn cmd_worktrees(paths: &Paths, cmd: Option<WtCmd>) -> Result<()> {
+    let d = db(paths)?;
+    let msg = match cmd {
+        None => {
+            let all = worktrees::list(&d).await?;
+            if all.is_empty() { "no worktrees".into() } else { all.iter().map(worktrees::Wt::line).collect::<Vec<_>>().join("\n") }
+        }
+        Some(WtCmd::Rm { job }) => worktrees::remove(paths, &config::Config::load(paths)?, &d, job).await?,
+        Some(WtCmd::Restore { job }) => worktrees::restore(&d, job).await?,
+    };
+    println!("{msg}");
+    Ok(())
+}
+
+/// `nightporter sweep`: queue maintainer jobs for a repo's open issues or PRs.
+async fn cmd_sweep(paths: &Paths, cmd: Cmd) -> Result<()> {
+    let Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run } = cmd else { unreachable!() };
+
+    let r = resolve_repo(paths, &repo)?;
+    let target = if prs { forge::Target::Pr } else { forge::Target::Issue };
+    let verb = match verb.as_deref() {
+        Some(v) => forge::Verb::parse(v).with_context(|| format!("unknown verb {v:?} (triage, reproduce, fix or review)"))?,
+        None if prs => forge::Verb::Review,
+        None => forge::Verb::Triage,
+    };
+    let ago = |d: Option<String>| -> Result<Option<jiff::Timestamp>> {
+        d.map(|d| {
+            let secs = i64::try_from(config::parse_duration(&d)?.as_secs())?;
+            Ok(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(secs))
+        })
+        .transpose()
+    };
+    let pick = forge::Pick { labels, created_before: ago(older_than)?, created_after: ago(newer_than)?, skip_author: None, limit };
+
+    let ctx = daemon::offline_ctx(paths, config::Config::load(paths)?).await?;
+    let rep = sweep::run(&ctx, &r, target, verb, pick, dry_run).await?;
+    for i in &rep.picked {
+        println!("#{:<6} {}  {}", i.number, i.created_at.get(..10).unwrap_or(&i.created_at), printable(&i.title));
+    }
+    let what = if prs { "PR(s)/MR(s)" } else { "issue(s)" };
+    let verb_s = state::enum_str(&verb);
+    if dry_run {
+        println!("\n{} open {what} match; nothing queued (drop --dry-run to queue {verb_s} jobs)", rep.picked.len());
+    } else {
+        let again = rep.picked.len() - rep.queued;
+        println!(
+            "\nqueued {} {verb_s} job(s){}; they run under your schedule and caps, and wait for your approval",
+            rep.queued,
+            if again > 0 { format!(" ({again} already queued)") } else { String::new() }
+        );
+        if !paths.daemon_running() {
+            println!("the daemon isn't running: start it with `nightporter start`");
+        }
+    }
+    Ok(())
 }
 
 /// Dismiss, restore and purge: clearing out jobs you won't act on.
@@ -781,6 +879,36 @@ mod tests {
         assert!(ro(&["nightporter", "status"]) && ro(&["nightporter", "show", "3"]) && ro(&["nightporter", "inbox", "list"]));
         assert!(!ro(&["nightporter", "approve", "3"]) && !ro(&["nightporter", "inbox", "allow", "x", "--global"]));
         assert!(!ro(&["nightporter", "skill", "setup"]) && !ro(&["nightporter", "tui"]));
+    }
+
+    #[test]
+    fn cli_is_consistent_and_sweep_parses() {
+        use clap::{CommandFactory, Parser};
+        super::Cli::command().debug_assert();
+        let c = super::Cli::parse_from([
+            "nightporter",
+            "sweep",
+            "project/x",
+            "--label",
+            "Bug",
+            "--label",
+            "Needs work",
+            "--older-than",
+            "90d",
+            "--limit",
+            "5",
+            "--dry-run",
+        ]);
+        let Some(super::Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run }) = c.cmd else {
+            panic!("not sweep")
+        };
+        assert_eq!(
+            (repo.as_str(), prs, verb, older_than.as_deref(), newer_than, limit, dry_run),
+            ("project/x", false, None, Some("90d"), None, Some(5), true)
+        );
+        assert_eq!(labels, ["Bug", "Needs work"]);
+        // Queuing jobs isn't allowed from inside a job.
+        assert!(!super::read_only(&super::Cli::parse_from(["nightporter", "sweep", "o/r"]).cmd.unwrap()));
     }
 
     #[test]

@@ -144,6 +144,9 @@ nightporter inbox restore <event>
 nightporter pause                # no new jobs; running ones finish
 nightporter resume
 nightporter gc                   # remove idle worktrees (--all: every unused one)
+nightporter worktrees            # every worktree Night Porter made, and removed ones
+nightporter worktrees rm 42      # remove job 42's worktree (kept for 7 days)
+nightporter worktrees restore 42 # bring it back, uncommitted changes and all
 ```
 
 Setup and maintenance:

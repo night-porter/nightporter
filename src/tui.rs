@@ -19,14 +19,16 @@ enum Tab {
     History,
     Repos,
     Settings,
+    Worktrees,
     Help,
 }
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Queue, "1 Queue"),
     (Tab::Inbox, "2 Inbox"),
     (Tab::History, "3 History"),
     (Tab::Repos, "4 Repos"),
     (Tab::Settings, "5 Settings"),
+    (Tab::Worktrees, "6 Worktrees"),
     (Tab::Help, "? Help"),
 ];
 
@@ -88,6 +90,8 @@ struct App {
     undo_jobs: Vec<i64>,
     undo_events: Vec<String>,
     update: Option<String>,
+    /// Loaded on opening the tab and after a change (one git call per clone).
+    worktrees: Vec<crate::worktrees::Wt>,
 }
 
 /// No forge account configured yet: nothing can be watched, so the wizard is the useful first step.
@@ -155,6 +159,7 @@ impl App {
             undo_jobs: vec![],
             undo_events: vec![],
             update: None,
+            worktrees: vec![],
         }
     }
 
@@ -279,6 +284,7 @@ impl App {
             Tab::History => self.history.len(),
             Tab::Repos => self.repos.len(),
             Tab::Settings => self.settings.len(),
+            Tab::Worktrees => self.worktrees.len(),
             Tab::Help => 0,
         }
     }
@@ -288,6 +294,7 @@ impl App {
         match self.tab {
             Tab::Queue => self.queue.get(i),
             Tab::History => self.history.get(i),
+            Tab::Worktrees => self.worktrees.get(i).map(|w| &w.job),
             _ => None,
         }
     }
@@ -334,6 +341,7 @@ impl App {
             KeyCode::Char('3') => self.switch(Tab::History),
             KeyCode::Char('4') => self.switch(Tab::Repos),
             KeyCode::Char('5') => self.switch(Tab::Settings),
+            KeyCode::Char('6') => self.switch(Tab::Worktrees),
             KeyCode::Char('?') | KeyCode::F(1) => self.switch(Tab::Help),
             KeyCode::Tab | KeyCode::Right => {
                 let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
@@ -381,7 +389,7 @@ impl App {
                     self.refresh(false);
                 }
             }
-            KeyCode::Enter if matches!(self.tab, Tab::Queue | Tab::History) => {
+            KeyCode::Enter if matches!(self.tab, Tab::Queue | Tab::History | Tab::Worktrees) => {
                 if let Some(j) = self.selected_job() {
                     self.detail = Some(j.id);
                     self.refresh(false);
@@ -392,6 +400,7 @@ impl App {
                 Tab::Inbox => self.inbox_key(k),
                 Tab::Repos => self.repo_key(k),
                 Tab::Settings => self.settings_key(k),
+                Tab::Worktrees => self.worktree_key(k),
                 Tab::Help => {}
             },
         }
@@ -447,6 +456,46 @@ impl App {
         self.sel.select(Some(0));
         if t == Tab::Repos {
             self.refresh(true);
+        }
+        if t == Tab::Worktrees {
+            self.load_worktrees();
+        }
+    }
+
+    fn load_worktrees(&mut self) {
+        match crate::worktrees::block(crate::worktrees::list(&self.db)) {
+            Ok(w) => self.worktrees = w,
+            Err(e) => self.msg = format!("error: {e:#}"),
+        }
+        let n = self.len();
+        if self.sel.selected().is_some_and(|i| i >= n) {
+            self.sel.select(Some(n.saturating_sub(1)));
+        }
+    }
+
+    /// x remove (asks first; kept for a week), u bring a removed one back, h take over.
+    fn worktree_key(&mut self, k: KeyEvent) {
+        let Some(w) = self.sel.selected().and_then(|i| self.worktrees.get(i)) else { return };
+        let (id, removed, path) = (w.job.id, w.trashed.is_some(), w.path.display().to_string());
+        match k.code {
+            KeyCode::Char('x' | 'd') if !removed => {
+                self.confirm = Some((
+                    format!("Remove {path}? Its commits and changes are kept for 7 days (u brings it back). y/N"),
+                    Box::new(move |a: &mut App| {
+                        let cfg = Config::load(&a.paths)?;
+                        let r = crate::worktrees::block(crate::worktrees::remove(&a.paths, &cfg, &a.db, id));
+                        a.load_worktrees();
+                        r
+                    }),
+                ));
+            }
+            KeyCode::Char('u') if removed => {
+                self.msg = crate::worktrees::block(crate::worktrees::restore(&self.db, id)).unwrap_or_else(|e| format!("error: {e:#}"));
+                self.load_worktrees();
+            }
+            KeyCode::Char('u') => self.msg = "select a REMOVED row to bring it back".into(),
+            KeyCode::Char('h') if !removed => self.job_key(k),
+            _ => {}
         }
     }
 
@@ -757,6 +806,7 @@ impl App {
                     })
                     .collect(),
                 Tab::Repos => self.repo_items(),
+                Tab::Worktrees => self.worktree_items(),
                 Tab::Settings | Tab::Help => vec![],
             };
             let empty = items.is_empty();
@@ -774,6 +824,7 @@ impl App {
                     let on = self.repos_all.iter().filter(|r| r.subscribed).count();
                     &format!(" Repos: {on} watched of {} (Enter details, space subscribe, / search) ", self.repos_all.len())
                 }
+                Tab::Worktrees => " Worktrees Night Porter made, then removed ones you can bring back ",
                 Tab::Settings | Tab::Help => "",
             };
             if empty {
@@ -781,6 +832,7 @@ impl App {
                     Tab::Queue => "Nothing needs you. Jobs show up here when your PRs get activity.",
                     Tab::Inbox => "No one is waiting.",
                     Tab::Repos | Tab::History if !self.filter.is_empty() => "Nothing matches the search. Esc clears it.",
+                    Tab::Worktrees => "No worktrees. Each job gets one; they're removed when the PR closes or after worktree_idle_days.",
                     Tab::Repos => "No clones found. Press S to run the setup wizard (forges, clone folder, repos).",
                     _ => "Nothing yet.",
                 };
@@ -812,7 +864,8 @@ impl App {
             (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
             (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
-            (_, Tab::Help) => "1-5 tabs S setup wizard D start/stop daemon q quit",
+            (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
+            (_, Tab::Help) => "1-6 tabs S setup wizard D start/stop daemon q quit",
         };
         let line2 = match (&self.confirm, &self.input) {
             (Some((q, _)), _) => q.clone(),
@@ -824,6 +877,11 @@ impl App {
             _ => self.msg.clone(),
         };
         (keys, line2)
+    }
+
+    fn worktree_items(&self) -> Vec<ListItem<'static>> {
+        let dim = |w: &crate::worktrees::Wt| if w.trashed.is_some() { Style::new().add_modifier(Modifier::DIM) } else { Style::new() };
+        self.worktrees.iter().map(|w| ListItem::new(w.line()).style(self.style(dim(w)))).collect()
     }
 
     fn repo_items(&self) -> Vec<ListItem<'static>> {
@@ -1071,6 +1129,7 @@ Tabs
   3 History  every job, newest first, including done and dismissed ones (/ searches)
   4 Repos    watched repos first; Enter shows everything about one (prompt, reply style, trust, hours)
   5 Settings every config.toml setting, its value and whether it's [set] or [default]
+  6 Worktrees the job worktrees still on disk, and removed ones you can bring back for 7 days
 
 Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ switch tab, p pause, q quit
        /  search the Repos, Settings or History list (Esc clears)
@@ -1087,6 +1146,8 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies
        h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
+Worktrees: x remove (asks first)   u bring back a REMOVED one (its commits and uncommitted
+       changes; ignored files like node_modules aren't kept)   h take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
@@ -1258,6 +1319,46 @@ mod tests {
         assert!(s.contains("draft") && s.contains("(now auto, from window)"), "{s}");
         press(&mut app, KeyCode::Char('l'));
         assert!(screen(&mut app).contains("(auto)? y/N"));
+    }
+
+    #[test]
+    fn worktrees_tab_removes_and_brings_back() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        crate::git::tests::repo(&clone);
+        let wt = d.path().join("wt/pr-4");
+        let url = clone.to_string_lossy().to_string();
+        crate::worktrees::block(async {
+            crate::git::prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-4").await.map(|_| ())
+        })
+        .unwrap();
+        std::fs::write(wt.join("mine.txt"), "handoff edit").unwrap();
+        let mut db = Db::open(&paths.db()).unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 4, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::Done;
+        j.worktree = wt.to_string_lossy().into();
+        j.branch = "nightporter/pr-4".into();
+        j.meta.clone = clone.to_string_lossy().into();
+        db.update_job(&j).unwrap();
+        let mut app = App::new(&paths, db);
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        app.key(key('6'));
+        assert_eq!(app.worktrees.len(), 1);
+        app.key(key('u'));
+        assert!(app.msg.contains("REMOVED"), "{}", app.msg);
+        app.key(key('x'));
+        assert!(app.confirm.is_some());
+        app.key(key('y'));
+        assert!(!wt.exists(), "{}", app.msg);
+        assert!(app.worktrees[0].trashed.is_some() && app.worktrees[0].line().contains("REMOVED"));
+        app.key(key('u'));
+        assert_eq!(std::fs::read_to_string(wt.join("mine.txt")).unwrap(), "handoff edit", "{}", app.msg);
+        assert!(app.worktrees.len() == 1 && app.worktrees[0].trashed.is_none());
     }
 
     #[test]

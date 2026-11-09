@@ -1,7 +1,7 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
 use crate::config::{Config, Level};
-use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger, forgejo::Forgejo, github::GitHub, gitlab::GitLab};
+use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
 use crate::paths::Paths;
@@ -73,17 +73,8 @@ pub async fn connect(cfg: &Config) -> Result<HashMap<(ForgeKind, String), tokio:
         let host = a.host().to_string();
         let token = http::token(a.forge, &host, a.token).await?;
         let base = std::env::var("NIGHTPORTER_API_BASE").ok().filter(|_| cfg!(debug_assertions));
-        let mut f = match a.forge {
-            ForgeKind::GitHub => {
-                Forge::GitHub(GitHub::new(&host, Api::new(&base.unwrap_or_else(|| GitHub::api_base(&host)), token, false)?))
-            }
-            ForgeKind::GitLab => {
-                Forge::GitLab(GitLab::new(&host, Api::new(&base.unwrap_or_else(|| GitLab::api_base(&host)), token, true)?))
-            }
-            ForgeKind::Forgejo => {
-                Forge::Forgejo(Forgejo::new(&host, Api::new(&base.unwrap_or_else(|| Forgejo::api_base(&host)), token, false)?))
-            }
-        };
+        let api = Api::new(&base.unwrap_or_else(|| Forge::api_base(a.forge, &host)), token, a.forge == ForgeKind::GitLab)?;
+        let mut f = Forge::new(a.forge, &host, api);
         f.login().await.with_context(|| format!("log in to {host}"))?;
         tracing::info!("logged in to {host} as {}", f.me());
         out.insert((a.forge, host), tokio::sync::Mutex::new(f));
@@ -413,6 +404,11 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
     }
     let now = crate::state::now();
     let tz_now = jiff::Zoned::now();
+    // Your own PRs first; backlog sweeps take what's left, and never the last quarter of the
+    // daily cap, so a few hundred queued issues can't crowd out tonight's review comments.
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|(_, evs)| evs.iter().all(|(e, _)| crate::sweep::is_sweep(e)));
+    let sweep_cap = cfg.daily_job_cap - cfg.daily_job_cap / 4;
     for ((repo, n), evs) in groups {
         let s = match cfg.settings_for(&ctx.paths, &repo) {
             Ok(s) => s,
@@ -431,9 +427,14 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         if ctx.db(|d| d.pr_busy(&repo, n))? {
             continue;
         }
-        if ctx.db(|d| d.jobs_since(now - 86400))? >= cfg.daily_job_cap {
+        let today = ctx.db(|d| d.jobs_since(now - 86400))?;
+        if today >= cfg.daily_job_cap {
             ctx.warn_every("cap", 3600, &format!("daily job cap ({}) reached; waiting", cfg.daily_job_cap));
             return Ok(());
+        }
+        if today >= sweep_cap && evs.iter().all(|(e, _)| crate::sweep::is_sweep(e)) {
+            ctx.warn_every("sweep-cap", 3600, &format!("sweep jobs paused for today ({today} of {} jobs used)", cfg.daily_job_cap));
+            return Ok(()); // sorted: only sweep groups are left
         }
         let verb = evs.iter().find_map(|(e, _)| e.verb);
         let mode = if verb.is_some() { Mode::Maintainer } else { Mode::MyPrs };
@@ -655,6 +656,32 @@ mod tests {
             let jobs = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
             assert_eq!(jobs[0].level, want.as_str(), "{toml}");
         }
+    }
+
+    #[tokio::test]
+    async fn sweeps_go_last_and_leave_a_quarter_of_the_cap() {
+        let (d, ctx, repo) = setup("subscribed = true");
+        let cfg = Config::parse("daily_job_cap = 4\n[defaults]\ndebounce = \"0s\"").unwrap();
+        let ctx = test_ctx(ctx.paths.clone(), cfg, ctx.clones().as_ref().clone());
+        let items: Vec<_> = (1..=5)
+            .map(|n| crate::forge::Listed {
+                number: n,
+                title: String::new(),
+                author: "a".into(),
+                created_at: String::new(),
+                labels: vec![],
+            })
+            .collect();
+        crate::sweep::queue(&ctx, &repo, Target::Issue, crate::forge::Verb::Triage, "me", &items).unwrap();
+        intake(&ctx, &ctx.cfg(), "me", ev(&repo, "pr", "alice", Role::Member, Trigger::Comment)).await.unwrap();
+        dispatch(&ctx).unwrap();
+        let jobs = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+        let mut nums: Vec<u64> = jobs.iter().map(|j| j.number).collect();
+        nums.sort_unstable();
+        // Your PR (#7) is in; sweeps stop at 3 of the 4 daily jobs.
+        assert_eq!(nums, [1, 2, 7], "{nums:?}");
+        assert!(jobs.iter().filter(|j| j.number != 7).all(|j| j.mode == "maintainer"));
+        drop(d);
     }
 
     #[tokio::test]
