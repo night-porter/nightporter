@@ -219,23 +219,7 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
     let set: HashSet<String> = mine.iter().map(|(r, _)| r.path.clone()).collect();
     let labels: HashMap<String, String> =
         mine.iter().filter(|(_, s)| s.maintainer.enabled).map(|(r, s)| (r.path.clone(), s.maintainer.label.clone())).collect();
-    match &mut *forge {
-        Forge::GitHub(g) => {
-            g.subscribed = set;
-            g.labels = labels;
-            g.sweep_every = cfg.sweep_interval;
-        }
-        Forge::GitLab(g) => {
-            g.subscribed = set;
-            g.labels = labels;
-            g.sweep_every = cfg.sweep_interval;
-        }
-        Forge::Forgejo(g) => {
-            g.subscribed = set;
-            g.labels = labels;
-            g.sweep_every = cfg.sweep_interval;
-        }
-    }
+    forge.watch(set, labels, cfg.sweep_interval);
     if mine.is_empty() {
         return Ok(0);
     }

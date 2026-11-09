@@ -1,6 +1,7 @@
 //! Forge-neutral types plus enum dispatch over GitHub, GitLab and Forgejo/Gitea.
 
 pub mod forgejo;
+mod ghlike;
 pub mod github;
 pub mod gitlab;
 
@@ -180,6 +181,33 @@ pub struct Event {
 }
 
 impl Event {
+    /// An event with no author, text or place yet: set what applies.
+    pub fn new(id: String, repo: &RepoId, target: Target, number: u64, trigger: Trigger) -> Self {
+        Event {
+            id,
+            repo: repo.clone(),
+            target,
+            number,
+            trigger,
+            author: String::new(),
+            role: Role::None,
+            is_bot: false,
+            body: String::new(),
+            url: String::new(),
+            thread: None,
+            path: None,
+            line: None,
+            created_at: now_iso(),
+            verb: None,
+        }
+    }
+
+    /// A conflict or CI failure the sweep found on your own PR. `id` carries the head SHA, so
+    /// each state fires once per push.
+    pub fn state(id: String, repo: &RepoId, number: u64, trigger: Trigger, me: &str, body: String) -> Self {
+        Event { author: me.into(), role: Role::Owner, body, ..Self::new(id, repo, Target::Pr, number, trigger) }
+    }
+
     pub fn mode(&self) -> Mode {
         if self.verb.is_some() { Mode::Maintainer } else { Mode::MyPrs }
     }
@@ -353,6 +381,17 @@ pub enum Forge {
     Forgejo(forgejo::Forgejo),
 }
 
+/// The same expression on whichever forge this is; every forge has the same method names.
+macro_rules! each {
+    ($s:expr, $g:ident => $e:expr) => {
+        match $s {
+            Forge::GitHub($g) => $e,
+            Forge::GitLab($g) => $e,
+            Forge::Forgejo($g) => $e,
+        }
+    };
+}
+
 impl Forge {
     pub fn new(kind: ForgeKind, host: &str, api: crate::http::Api) -> Self {
         match kind {
@@ -361,6 +400,7 @@ impl Forge {
             ForgeKind::Forgejo => Forge::Forgejo(forgejo::Forgejo::new(host, api)),
         }
     }
+
     pub fn api_base(kind: ForgeKind, host: &str) -> String {
         match kind {
             ForgeKind::GitHub => github::GitHub::api_base(host),
@@ -368,37 +408,41 @@ impl Forge {
             ForgeKind::Forgejo => forgejo::Forgejo::api_base(host),
         }
     }
+
+    /// What to watch: subscribed repo paths, the maintainer label per repo with maintainer mode
+    /// on, and how often to sweep your open PRs.
+    pub fn watch(
+        &mut self,
+        subscribed: std::collections::HashSet<String>,
+        labels: std::collections::HashMap<String, String>,
+        sweep_every: std::time::Duration,
+    ) {
+        each!(self, g => {
+            g.subscribed = subscribed;
+            g.labels = labels;
+            g.sweep_every = sweep_every;
+        });
+    }
+
     /// Comments on `number` posted after `since` by the token's own user that are job commands,
     /// oldest first.
     pub async fn controls(&self, repo: &RepoId, target: Target, number: u64, since: &str) -> Result<Vec<ControlComment>> {
-        match self {
-            Forge::GitHub(g) => g.controls(repo, number, since).await,
-            Forge::GitLab(g) => g.controls(repo, target, number, since).await,
-            Forge::Forgejo(g) => g.controls(repo, number, since).await,
-        }
+        each!(self, g => g.controls(repo, target, number, since).await)
     }
+
     /// Acknowledge a command comment with a thumbs-up.
     pub async fn ack(&self, repo: &RepoId, target: Target, number: u64, comment: &str) -> Result<()> {
-        match self {
-            Forge::GitHub(g) => g.ack(repo, comment).await,
-            Forge::GitLab(g) => g.ack(repo, target, number, comment).await,
-            Forge::Forgejo(g) => g.ack(repo, comment).await,
-        }
+        each!(self, g => g.ack(repo, target, number, comment).await)
     }
+
     pub fn me(&self) -> &str {
-        match self {
-            Forge::GitHub(g) => &g.me,
-            Forge::GitLab(g) => &g.me,
-            Forge::Forgejo(g) => &g.me,
-        }
+        each!(self, g => &g.me)
     }
+
     pub async fn login(&mut self) -> Result<()> {
-        match self {
-            Forge::GitHub(g) => g.login().await,
-            Forge::GitLab(g) => g.login().await,
-            Forge::Forgejo(g) => g.login().await,
-        }
+        each!(self, g => g.login().await)
     }
+
     /// New events since the last poll. `cursor` is opaque, persisted by the caller.
     pub async fn poll(&mut self, cursor: &mut Cursor) -> Result<Vec<Event>> {
         if cursor.since.is_none() {
@@ -407,63 +451,39 @@ impl Forge {
             cursor.last_sweep = Some(crate::state::now());
             return Ok(vec![]);
         }
-        match self {
-            Forge::GitHub(g) => g.poll(cursor).await,
-            Forge::GitLab(g) => g.poll(cursor).await,
-            Forge::Forgejo(g) => g.poll(cursor).await,
-        }
+        each!(self, g => g.poll(cursor).await)
     }
+
     pub async fn pr(&self, repo: &RepoId, number: u64) -> Result<PrInfo> {
-        match self {
-            Forge::GitHub(g) => g.pr(repo, number).await,
-            Forge::GitLab(g) => g.mr(repo, number).await,
-            Forge::Forgejo(g) => g.pr(repo, number).await,
-        }
+        each!(self, g => g.pr(repo, number).await)
     }
+
     /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
-        match self {
-            Forge::GitHub(g) => g.open_items(repo, target).await,
-            Forge::GitLab(g) => g.open_items(repo, target).await,
-            Forge::Forgejo(g) => g.open_items(repo, target).await,
-        }
+        each!(self, g => g.open_items(repo, target).await)
     }
+
     pub async fn issue(&self, repo: &RepoId, number: u64) -> Result<IssueInfo> {
-        match self {
-            Forge::GitHub(g) => g.issue(repo, number).await,
-            Forge::GitLab(g) => g.issue(repo, number).await,
-            Forge::Forgejo(g) => g.issue(repo, number).await,
-        }
+        each!(self, g => g.issue(repo, number).await)
     }
+
     /// Reply in the event's thread when it has one, else a top-level comment on the PR/issue.
     pub async fn reply(&self, repo: &RepoId, target: Target, number: u64, to: Option<&Event>, body: &str) -> Result<()> {
-        match self {
-            Forge::GitHub(g) => g.reply(repo, target, number, to, body).await,
-            Forge::GitLab(g) => g.reply(repo, target, number, to, body).await,
-            Forge::Forgejo(g) => g.reply(repo, number, to, body).await,
-        }
+        each!(self, g => g.reply(repo, target, number, to, body).await)
     }
+
     pub async fn resolve(&self, repo: &RepoId, number: u64, thread: &str) -> Result<()> {
-        match self {
-            Forge::GitHub(g) => g.resolve(repo, thread).await,
-            Forge::GitLab(g) => g.resolve(repo, number, thread).await,
-            Forge::Forgejo(g) => g.resolve(repo, thread).await,
-        }
+        each!(self, g => g.resolve(repo, number, thread).await)
     }
+
     /// Open a draft PR/MR (maintainer `fix`). Returns its URL.
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
-        match self {
-            Forge::GitHub(g) => g.open_draft(repo, head, base, title, body).await,
-            Forge::GitLab(g) => g.open_draft(repo, head, base, title, body).await,
-            Forge::Forgejo(g) => g.open_draft(repo, head, base, title, body).await,
-        }
+        each!(self, g => g.open_draft(repo, head, base, title, body).await)
     }
+
+    /// Team (`org/team`) or GitLab group membership, cached for an hour.
     pub async fn in_team(&self, team: &str, user: &str) -> Result<bool> {
-        match self {
-            Forge::GitHub(g) => g.in_team(team, user).await,
-            Forge::GitLab(g) => g.in_group(team, user).await,
-            Forge::Forgejo(g) => g.in_team(team, user).await,
-        }
+        each!(self, g => g.in_team(team, user).await)
     }
 }
 
@@ -521,9 +541,57 @@ pub struct Cursor {
     pub swept: bool,
 }
 
+impl Cursor {
+    /// Time for the slow sweep of your open PRs; marks it as run.
+    pub fn sweep_due(&mut self, every: std::time::Duration) -> bool {
+        let now = crate::state::now();
+        let due = self.last_sweep.is_none_or(|t| now - t >= i64::try_from(every.as_secs()).unwrap_or(i64::MAX));
+        if due {
+            self.last_sweep = Some(now);
+        }
+        due
+    }
+
+    /// One PR's sweep result: its events go out, its status is remembered under `key`. The first
+    /// sweep after install only records, so PRs that were already red or conflicted don't all
+    /// start jobs at once (set `swept` once a sweep has read the PR list).
+    pub fn record(&mut self, key: String, r: Result<(Vec<Event>, String)>, out: &mut Vec<Event>) {
+        match r {
+            Ok((evs, status)) => {
+                if self.swept {
+                    out.extend(evs);
+                }
+                self.seen_status.insert(key, status);
+            }
+            Err(e) => tracing::warn!("sweep {key}: {e:#}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_bookkeeping_records_first_then_fires() {
+        let mut c = Cursor::default();
+        let every = std::time::Duration::from_secs(600);
+        assert!(c.sweep_due(every));
+        assert!(!c.sweep_due(every), "just ran");
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let red = || Ok((vec![Event::state("x".into(), &repo, 1, Trigger::CiFailure, "me", "CI failed".into())], "red".into()));
+        let mut out = vec![];
+        // First sweep: state only, no events (the PR may have been red for days).
+        c.record("k".into(), red(), &mut out);
+        assert_eq!((out.len(), c.seen_status["k"].as_str()), (0, "red"));
+        c.swept = true;
+        c.record("k".into(), red(), &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].role, out[0].author.as_str(), out[0].target), (Role::Owner, "me", Target::Pr));
+        // A failed read keeps the last status.
+        c.record("k".into(), Err(anyhow::anyhow!("boom")), &mut out);
+        assert_eq!(c.seen_status["k"], "red");
+    }
 
     #[test]
     fn repo_key_roundtrip() {

@@ -756,9 +756,9 @@ async fn gitlab_group_members_are_read_past_the_first_page() {
     ])
     .await;
     let gl = GitLab::new("git.example.org", Api::new(&url, "t".to_string().into(), true).unwrap());
-    assert!(gl.in_group("core", "mallory").await.unwrap());
-    assert!(gl.in_group("core", "ann").await.unwrap());
-    assert!(!gl.in_group("core", "bob").await.unwrap());
+    assert!(gl.in_team("core", "mallory").await.unwrap());
+    assert!(gl.in_team("core", "ann").await.unwrap());
+    assert!(!gl.in_team("core", "bob").await.unwrap());
     assert_eq!(log.lock().unwrap().len(), 2, "cached after the first lookup");
 }
 

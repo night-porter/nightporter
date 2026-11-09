@@ -1,6 +1,7 @@
 //! GitHub: notifications polling, PR details, replies, thread resolution, the open-PR sweep.
 
-use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
+use super::ghlike::{self, ListItem};
+use super::{Cursor, Event, PrInfo, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
 use crate::forge::ForgeKind;
 use crate::http::{Api, Got};
 use anyhow::{Context, Result};
@@ -38,39 +39,6 @@ struct User {
 impl User {
     fn is_bot(&self) -> bool {
         self.kind == "Bot" || self.login.ends_with("[bot]")
-    }
-}
-
-/// An issue or PR in a list (GitHub and Forgejo/Gitea agree on these fields).
-#[derive(Deserialize)]
-pub(super) struct ListItem {
-    number: u64,
-    title: String,
-    user: ListUser,
-    created_at: String,
-    #[serde(default)]
-    labels: Vec<ListLabel>,
-    #[serde(default)]
-    pull_request: Option<serde_json::Value>,
-}
-#[derive(Deserialize)]
-struct ListUser {
-    login: String,
-}
-#[derive(Deserialize)]
-struct ListLabel {
-    name: String,
-}
-
-impl ListItem {
-    pub(super) fn listed(self) -> super::Listed {
-        super::Listed {
-            number: self.number,
-            title: self.title,
-            author: self.user.login,
-            created_at: self.created_at,
-            labels: self.labels.into_iter().map(|l| l.name).collect(),
-        }
     }
 }
 
@@ -142,36 +110,6 @@ struct Label {
     name: String,
 }
 
-#[derive(Deserialize)]
-struct Pull {
-    number: u64,
-    title: String,
-    #[serde(default)]
-    body: Option<String>,
-    user: User,
-    state: String,
-    #[serde(default)]
-    merged: bool,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    mergeable_state: Option<String>,
-    head: Head,
-    base: Head,
-}
-#[derive(Deserialize)]
-struct Head {
-    #[serde(rename = "ref")]
-    name: String,
-    sha: String,
-    repo: Option<HeadRepo>,
-}
-#[derive(Deserialize)]
-struct HeadRepo {
-    ssh_url: String,
-    clone_url: String,
-}
-
 impl GitHub {
     pub fn new(host: &str, api: Api) -> Self {
         Self {
@@ -237,9 +175,7 @@ impl GitHub {
                 }
             }
         }
-        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= i64::try_from(self.sweep_every.as_secs()).unwrap_or(i64::MAX));
-        if due {
-            cur.last_sweep = Some(crate::state::now());
+        if cur.sweep_due(self.sweep_every) {
             match self.sweep(cur).await {
                 Ok(evs) => out.extend(evs),
                 Err(e) => tracing::warn!("sweep: {e:#}"),
@@ -261,7 +197,7 @@ impl GitHub {
         let after = |ts: &str| newer(ts, since);
         let (target, mine) = match t.subject.kind.as_str() {
             "PullRequest" => {
-                let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{number}")).await?;
+                let p = ghlike::pull(&self.api, r, number).await?;
                 (Target::Pr, p.user.login.eq_ignore_ascii_case(&self.me))
             }
             "Issue" => (Target::Issue, false),
@@ -300,21 +236,13 @@ impl GitHub {
                 let body =
                     if rv.body.trim().is_empty() { format!("(review: {})", rv.state.to_lowercase().replace('_', " ")) } else { rv.body };
                 out.push(Event {
-                    id: format!("gh-{}-rv-{}", self.host, rv.id),
-                    repo: repo.clone(),
-                    target,
-                    number,
-                    trigger: Trigger::Review,
                     is_bot: user.is_bot(),
                     author: user.login,
                     role: Role::from_github(&rv.author_association),
                     body,
                     url: rv.html_url,
-                    thread: None,
-                    path: None,
-                    line: None,
                     created_at: at,
-                    verb: None,
+                    ..Event::new(format!("gh-{}-rv-{}", self.host, rv.id), &repo, target, number, Trigger::Review)
                 });
             }
         }
@@ -329,21 +257,13 @@ impl GitHub {
                 }
                 let role = self.role_of(r, &actor.login).await.unwrap_or(Role::None);
                 out.push(Event {
-                    id: format!("gh-{}-label-{}", self.host, ev.id),
-                    repo: repo.clone(),
-                    target,
-                    number,
-                    trigger: Trigger::Comment,
                     author: actor.login.clone(),
                     role,
                     is_bot: actor.is_bot(),
                     body: format!("(label `{label}` added)"),
-                    url: String::new(),
-                    thread: None,
-                    path: None,
-                    line: None,
                     created_at: ev.created_at,
                     verb: Some(Verb::Fix),
+                    ..Event::new(format!("gh-{}-label-{}", self.host, ev.id), &repo, target, number, Trigger::Comment)
                 });
             }
         }
@@ -354,25 +274,19 @@ impl GitHub {
     #[allow(clippy::too_many_arguments)]
     fn event(repo: &RepoId, target: Target, number: u64, trigger: Trigger, id: String, c: Comment, verb: Option<Verb>) -> Event {
         Event {
-            id,
-            repo: repo.clone(),
-            target,
-            number,
-            trigger,
             is_bot: c.user.is_bot(),
             author: c.user.login,
             role: Role::from_github(&c.author_association),
             body: c.body,
             url: c.html_url,
-            thread: None,
             path: c.path,
             line: c.line,
             created_at: c.created_at,
             verb,
+            ..Event::new(id, repo, target, number, trigger)
         }
     }
 
-    /// Collaborator permission → role (labels don't carry `author_association`).
     /// Collaborator permission → role, cached for an hour. Used for labels (no association) and
     /// to check MEMBER/COLLABORATOR associations, which GitHub also gives read-only users.
     async fn role_of(&self, repo: &str, user: &str) -> Result<Role> {
@@ -412,15 +326,8 @@ impl GitHub {
             if !self.subscribed.contains(&repo.path) {
                 continue;
             }
-            match self.sweep_pr(&repo, n).await {
-                Ok((evs, status)) => {
-                    if cur.swept {
-                        out.extend(evs);
-                    }
-                    cur.seen_status.insert(format!("{}#{n}", repo.key()), status);
-                }
-                Err(e) => tracing::warn!("sweep {repo}#{n}: {e:#}"),
-            }
+            let r = self.sweep_pr(&repo, n).await;
+            cur.record(format!("{}#{n}", repo.key()), r, &mut out);
         }
         cur.swept = true;
         Ok(out)
@@ -448,7 +355,7 @@ impl GitHub {
         {
             let r = &repo.path;
             let repo = repo.clone();
-            let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{n}")).await?;
+            let p = ghlike::pull(&self.api, r, n).await?;
             let mut status = Vec::new();
             if p.mergeable_state.as_deref() == Some("dirty") {
                 status.push("conflict".to_string());
@@ -488,23 +395,8 @@ impl GitHub {
     }
 
     fn state_event(&self, repo: &RepoId, n: u64, trigger: Trigger, sha: &str, body: String) -> Event {
-        Event {
-            id: format!("gh-{}-{}-{}#{n}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path),
-            repo: repo.clone(),
-            target: Target::Pr,
-            number: n,
-            trigger,
-            author: self.me.clone(),
-            role: Role::Owner,
-            is_bot: false,
-            body,
-            url: String::new(),
-            thread: None,
-            path: None,
-            line: None,
-            created_at: now_iso(),
-            verb: None,
-        }
+        let id = format!("gh-{}-{}-{}#{n}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path);
+        Event::state(id, repo, n, trigger, &self.me, body)
     }
 
     pub async fn my_open(&self) -> Result<Vec<(RepoId, u64)>> {
@@ -528,25 +420,7 @@ impl GitHub {
     }
 
     pub async fn pr(&self, repo: &RepoId, n: u64) -> Result<PrInfo> {
-        let p: Pull = self.api.get(&format!("/repos/{}/pulls/{n}", repo.path)).await?;
-        let head_repo = p.head.repo.as_ref();
-        Ok(PrInfo {
-            number: p.number,
-            title: p.title,
-            author: p.user.login,
-            state: match (p.state.as_str(), p.merged) {
-                (_, true) => PrState::Merged,
-                ("closed", _) => PrState::Closed,
-                _ => PrState::Open,
-            },
-            head_ref: p.head.name,
-            head_sha: p.head.sha,
-            head_repo_ssh: head_repo.map(|r| r.ssh_url.clone()).unwrap_or_default(),
-            head_repo_https: head_repo.map(|r| r.clone_url.clone()).unwrap_or_default(),
-            base_ref: p.base.name,
-            draft: p.draft,
-            body: p.body.unwrap_or_default(),
-        })
+        ghlike::pr(&self.api, repo, n).await
     }
 
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
@@ -560,14 +434,7 @@ impl GitHub {
     }
 
     pub async fn issue(&self, repo: &RepoId, n: u64) -> Result<super::IssueInfo> {
-        #[derive(Deserialize)]
-        struct I {
-            title: String,
-            body: Option<String>,
-            user: User,
-        }
-        let i: I = self.api.get(&format!("/repos/{}/issues/{n}", repo.path)).await?;
-        Ok(super::IssueInfo { title: i.title, body: i.body.unwrap_or_default(), author: i.user.login })
+        ghlike::issue(&self.api, repo, n).await
     }
 
     pub async fn reply(&self, repo: &RepoId, _target: Target, n: u64, to: Option<&Event>, body: &str) -> Result<()> {
@@ -577,15 +444,13 @@ impl GitHub {
                 let id = e.thread.as_deref().unwrap_or_default();
                 self.api.send(Method::POST, &format!("/repos/{r}/pulls/{n}/comments/{id}/replies"), &json!({ "body": body })).await?;
             }
-            _ => {
-                self.api.send(Method::POST, &format!("/repos/{r}/issues/{n}/comments"), &json!({ "body": body })).await?;
-            }
+            _ => ghlike::comment(&self.api, repo, n, body).await?,
         }
         Ok(())
     }
 
     /// Resolve the review thread containing comment `comment_id` (GraphQL only).
-    pub async fn resolve(&self, repo: &RepoId, comment_id: &str) -> Result<()> {
+    pub async fn resolve(&self, repo: &RepoId, _n: u64, comment_id: &str) -> Result<()> {
         let gql = format!("{}/graphql", self.api.base.trim_end_matches("/v3"));
         let node: serde_json::Value = self.api.get(&format!("/repos/{}/pulls/comments/{comment_id}", repo.path)).await?;
         // Find the thread via the comment's node id.
@@ -611,18 +476,10 @@ impl GitHub {
     }
 
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
-        let v = self
-            .api
-            .send(
-                Method::POST,
-                &format!("/repos/{}/pulls", repo.path),
-                &json!({ "title": title, "head": head, "base": base, "body": body, "draft": true }),
-            )
-            .await?;
-        Ok(v["html_url"].as_str().unwrap_or_default().to_string())
+        ghlike::open_pr(&self.api, repo, &json!({ "title": title, "head": head, "base": base, "body": body, "draft": true })).await
     }
 
-    pub async fn controls(&self, repo: &RepoId, n: u64, since: &str) -> Result<Vec<super::ControlComment>> {
+    pub async fn controls(&self, repo: &RepoId, _target: Target, n: u64, since: &str) -> Result<Vec<super::ControlComment>> {
         let cs: Vec<Comment> =
             self.api.get_all(&format!("/repos/{}/issues/{n}/comments?per_page=100&since={since}", repo.path), 10).await?;
         Ok(cs
@@ -635,11 +492,8 @@ impl GitHub {
             .collect())
     }
 
-    pub async fn ack(&self, repo: &RepoId, comment: &str) -> Result<()> {
-        self.api
-            .send(Method::POST, &format!("/repos/{}/issues/comments/{comment}/reactions", repo.path), &json!({ "content": "+1" }))
-            .await?;
-        Ok(())
+    pub async fn ack(&self, repo: &RepoId, _target: Target, _n: u64, comment: &str) -> Result<()> {
+        ghlike::ack(&self.api, repo, comment).await
     }
 
     /// `org/team` membership, cached for an hour.
