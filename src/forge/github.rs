@@ -177,8 +177,9 @@ impl GitHub {
                 }
             }
         }
+        let catch_up = super::catch_up_since(cur.last_sweep, cur.swept);
         if cur.sweep_due(self.sweep_every) {
-            match self.sweep(cur).await {
+            match self.sweep(cur, catch_up.as_deref()).await {
                 Ok(evs) => out.extend(evs),
                 Err(e) => tracing::warn!("sweep: {e:#}"),
             }
@@ -334,7 +335,9 @@ impl GitHub {
     /// Events are keyed by head SHA so each state fires once per push.
     /// The first sweep after install only records state, so PRs that were already red or
     /// conflicted don't all start jobs at once.
-    async fn sweep(&self, cur: &mut Cursor) -> Result<Vec<Event>> {
+    /// `catch_up`: also re-read reviews and comments since then, in case a notification never
+    /// came (GitHub sometimes delivers them late, after the poll window has moved on).
+    async fn sweep(&self, cur: &mut Cursor, catch_up: Option<&str>) -> Result<Vec<Event>> {
         let mut out = Vec::new();
         for (repo, n) in self.my_open().await? {
             if !self.subscribed.contains(&repo.path) {
@@ -342,8 +345,32 @@ impl GitHub {
             }
             let r = self.sweep_pr(&repo, n).await;
             cur.record(format!("{}#{n}", repo.key()), r, &mut out);
+            if let Some(since) = catch_up
+                && let Err(e) = self.pr_events(&repo, n, since, &mut out).await
+            {
+                tracing::warn!("catch up {repo}#{n}: {e:#}");
+            }
         }
         cur.swept = true;
+        Ok(out)
+    }
+
+    /// Your PR `n`'s reviews and comments since `since`, as if its notification had come in.
+    async fn pr_events(&self, repo: &RepoId, n: u64, since: &str, out: &mut Vec<Event>) -> Result<()> {
+        let t = Thread {
+            reason: "author".into(),
+            updated_at: String::new(),
+            subject: Subject { kind: "PullRequest".into(), url: Some(format!("/repos/{}/pulls/{n}", repo.path)) },
+            repository: Repo { full_name: repo.path.clone() },
+        };
+        self.thread_events(&t, Some(since), out).await
+    }
+
+    pub async fn rescan(&self, repo: &RepoId, since: &str) -> Result<Vec<Event>> {
+        let mut out = Vec::new();
+        for (r, n) in self.my_open().await?.into_iter().filter(|(r, _)| r.path.eq_ignore_ascii_case(&repo.path)) {
+            self.pr_events(&r, n, since, &mut out).await?;
+        }
         Ok(out)
     }
 

@@ -36,7 +36,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `code_dir` | `~/coding` | where your clones live |
 | `scan_depth` | `3` | how many folders deep to look for clones (`~/coding/drupal/token` is 2). A clone is matched to an account by its remote's host; see `aliases` below if one is missing from `nightporter repos --all` |
 | `poll_interval` | `2m` | never faster than the forge's `X-Poll-Interval` |
-| `sweep_interval` | `10m` | open-PR sweep for merge conflicts and CI |
+| `sweep_interval` | `10m` | open-PR sweep for merge conflicts and CI; it also catches up reviews and comments whose notification was missed |
 | `min_free_gb` | `5` | jobs wait when free disk is below this |
 | `max_concurrent_jobs` | `2` | across all repos |
 | `daily_job_cap` | `50` | jobs per 24h |

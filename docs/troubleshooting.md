@@ -40,6 +40,10 @@ Work through these in order:
 - **Did it hit a limit?** The log says `daily job cap reached` or `only N GB free`. Raise
   `daily_job_cap`, free some disk, or lower `min_free_gb`.
 - **Is it still in the quiet period?** New activity resets the `debounce` timer.
+- **Did the notification never arrive?** GitHub and Forgejo sometimes deliver one late. Each open-PR
+  sweep (`sweep_interval`) re-reads reviews and comments on your open PRs since the last sweep, so
+  it shows up then. To pick it up now: `nightporter rescan <owner/name>` (`--since 3d` to look
+  further back). It only takes in what's new.
 
 ## A job failed
 

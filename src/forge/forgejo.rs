@@ -205,8 +205,9 @@ impl Forgejo {
         if !failed {
             cur.since = Some(started);
         }
+        let catch_up = super::catch_up_since(cur.last_sweep, cur.swept);
         if cur.sweep_due(self.sweep_every) {
-            match self.sweep(cur).await {
+            match self.sweep(cur, catch_up.as_deref()).await {
                 Ok(evs) => out.extend(evs),
                 Err(e) => tracing::warn!("sweep: {e:#}"),
             }
@@ -360,22 +361,48 @@ impl Forgejo {
     }
 
     /// Slow sweep of my open PRs: conflicts and failing CI, keyed by head SHA (see GitHub).
-    async fn sweep(&self, cur: &mut Cursor) -> Result<Vec<Event>> {
+    /// `catch_up`: also re-read comments and reviews since then (see GitHub's sweep).
+    async fn sweep(&self, cur: &mut Cursor, catch_up: Option<&str>) -> Result<Vec<Event>> {
+        let mut out = Vec::new();
+        for (repo, n) in self.my_open().await?.into_iter().filter(|(r, _)| self.subscribed.contains(&r.path)) {
+            let key = format!("{}#{n}", repo.key());
+            let prev = cur.seen_status.get(&key).cloned().unwrap_or_default();
+            let r = self.sweep_pr(&repo, n, &prev).await;
+            cur.record(key, r, &mut out);
+            if let Some(since) = catch_up
+                && let Err(e) = self.pr_events(&repo, n, since, &mut out).await
+            {
+                tracing::warn!("catch up {repo}#{n}: {e:#}");
+            }
+        }
+        cur.swept = true;
+        Ok(out)
+    }
+
+    async fn my_open(&self) -> Result<Vec<(RepoId, u64)>> {
         #[derive(Deserialize)]
         struct I {
             number: u64,
             repository: Repo,
         }
         let mine: Vec<I> = self.api.get_all("/repos/issues/search?type=pulls&state=open&created=true&limit=50", 10).await?;
+        Ok(mine.into_iter().map(|i| (self.repo(&i.repository.full_name), i.number)).collect())
+    }
+
+    /// Your PR `n`'s comments and reviews since `since`, as if its notification had come in.
+    async fn pr_events(&self, repo: &RepoId, n: u64, since: &str, out: &mut Vec<Event>) -> Result<()> {
+        let t = Thread {
+            subject: Subject { kind: "Pull".into(), url: format!("/repos/{}/pulls/{n}", repo.path) },
+            repository: Repo { full_name: repo.path.clone() },
+        };
+        self.thread_events(&t, Some(since), out).await
+    }
+
+    pub async fn rescan(&self, repo: &RepoId, since: &str) -> Result<Vec<Event>> {
         let mut out = Vec::new();
-        for i in mine.iter().filter(|i| self.subscribed.contains(&i.repository.full_name)) {
-            let repo = self.repo(&i.repository.full_name);
-            let key = format!("{}#{}", repo.key(), i.number);
-            let prev = cur.seen_status.get(&key).cloned().unwrap_or_default();
-            let r = self.sweep_pr(&repo, i.number, &prev).await;
-            cur.record(key, r, &mut out);
+        for (r, n) in self.my_open().await?.into_iter().filter(|(r, _)| r.path.eq_ignore_ascii_case(&repo.path)) {
+            self.pr_events(&r, n, since, &mut out).await?;
         }
-        cur.swept = true;
         Ok(out)
     }
 

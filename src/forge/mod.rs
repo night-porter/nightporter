@@ -244,6 +244,13 @@ pub fn now_iso() -> String {
 /// How far back each poll re-reads, to cover late indexing and clock drift.
 pub const OVERLAP_SECS: i64 = 300;
 
+/// Where a sweep's catch-up starts: the previous sweep (minus the overlap), or nothing on the
+/// first sweep, which only records state.
+pub fn catch_up_since(prev_sweep: Option<i64>, swept: bool) -> Option<String> {
+    let t = jiff::Timestamp::from_second(prev_sweep.filter(|_| swept)?).ok()?;
+    Some(overlap(&t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()))
+}
+
 /// `since` moved back by [`OVERLAP_SECS`].
 pub fn overlap(since: &str) -> String {
     match since.parse::<jiff::Timestamp>() {
@@ -511,6 +518,12 @@ impl Forge {
         each!(self, g => g.pr(repo, number).await)
     }
 
+    /// Reviews and comments since `since` (ISO) on your open PRs/MRs in `repo`, read directly
+    /// rather than through notifications (`nightporter rescan`). Repeats are de-duplicated.
+    pub async fn rescan(&self, repo: &RepoId, since: &str) -> Result<Vec<Event>> {
+        each!(self, g => g.rescan(repo, since).await)
+    }
+
     /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
         each!(self, g => g.open_items(repo, target).await)
@@ -644,6 +657,14 @@ mod tests {
         // A failed read keeps the last status.
         c.record("k".into(), Err(anyhow::anyhow!("boom")), &mut out);
         assert_eq!(c.seen_status["k"], "red");
+    }
+
+    #[test]
+    fn catch_up_starts_at_the_previous_sweep() {
+        let t = "2026-11-09T16:30:00Z".parse::<jiff::Timestamp>().unwrap().as_second();
+        assert_eq!(catch_up_since(Some(t), true).as_deref(), Some("2026-11-09T16:25:00Z"), "minus the overlap");
+        assert_eq!(catch_up_since(Some(t), false), None, "the first sweep only records");
+        assert_eq!(catch_up_since(None, true), None);
     }
 
     #[test]
