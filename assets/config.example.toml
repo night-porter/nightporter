@@ -12,7 +12,10 @@ min_free_gb = 5          # don't create worktrees below this
 max_concurrent_jobs = 2
 daily_job_cap = 50
 retention_days = 30
-worktree_idle_days = 14
+worktree_idle_days = 14     # removed worktrees can be brought back for 7 days (TUI tab 6)
+# Agent for `h` / `nightporter handoff`: "job" (the one that ran it), or claude, opencode, codex,
+# gemini, pi, cursor, copilot, goose, qwen, droid, kiro.
+# handoff_agent = "job"
 # Once a day, ask GitHub for the latest release number so the TUI can say when there's a new
 # version. Anonymous; sends nothing about you or your repos. Night Porter never updates itself.
 check_updates = true
@@ -26,6 +29,7 @@ forge = "github"
 # forge = "gitlab"
 # host = "git.drupalcode.org"
 # token = "keyring"
+# aliases = ["gitlab-work"]  # SSH Host aliases or mirror names in clone remotes (git.drupal.org is built in)
 
 # [[accounts]]
 # forge = "forgejo"         # Forgejo or Gitea; host defaults to codeberg.org
@@ -59,6 +63,10 @@ timeout = "30m"
 sandbox = true              # OS sandbox for agent commands (Claude Code, Codex, Gemini CLI); fails closed
 # sandbox_domains = []      # domains sandboxed commands may reach
 # allow_commands = ["npm test", "cargo test"]
+# Extra CLI args, per agent (or a plain list for whichever runs). Empty: each agent's own defaults.
+# [defaults.agent_args]
+# claude = ["--model", "opus"]
+# codex = ["-m", "gpt-5"]
 
 [defaults.trust]
 roles = ["owner", "maintainer", "member", "collaborator"]

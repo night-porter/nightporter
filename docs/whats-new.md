@@ -1,12 +1,12 @@
 ---
-description: "What's new in Night Porter: backlog sweeps for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
+description: "What's new in Night Porter 0.4: backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
 ---
 
 # What's new
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
-## Next release
+## 0.4
 
 ### Sweep the backlog
 

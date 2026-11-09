@@ -14,7 +14,7 @@ const SIDEBAR = [
   {
     text: 'Guide',
     items: [
-      { text: "What's new in 0.3", link: '/whats-new' },
+      { text: "What's new in 0.4", link: '/whats-new' },
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Daily use', link: '/daily-use' },
       { text: 'herdr, Rex, tmux, Zellij', link: '/herdr' },

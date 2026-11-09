@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-09
+
 ### Added
 
 - **Backlog sweep**: `nightporter sweep <repo>` queues a maintainer job for each open issue (or,
@@ -117,6 +119,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/night-porter/nightporter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/night-porter/nightporter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/night-porter/nightporter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/night-porter/nightporter/compare/v0.1.0...v0.1.1
