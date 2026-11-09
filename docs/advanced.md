@@ -248,9 +248,30 @@ Maintainer mode is capped at `draft`, so you always approve before anything is p
 - When the work would run someone else’s code (their PR, or `reproduce` with an environment or
   allowed commands), the job first waits as **NEEDS RUN APPROVAL**. Check the build files it lists,
   then press `a` to let it run on that exact commit.
+- `review` doesn't run the PR's code, so with Claude Code or Gemini CLI it starts without that
+  approval: no tests, no environment, read-only. Set `review_runs_code = true` to have reviews run
+  your `allow_commands` (tests) too, after you approve the run. Codex and OpenCode reviews always
+  wait for approval.
 - `triage` first checks whether the code already does what the issue asks. If it does, the reply
   says so, with the files or commits that show it, and recommends closing the issue. Night Porter
   never closes it for you.
+
+### Review requests
+
+When someone asks for your review on a GitHub PR, Night Porter can prepare one: the agent reads
+the PR and writes a review (summary, issues with file and line, security, tests, a verdict)
+that waits for you in the TUI.
+
+```toml
+[maintainer]
+enabled = true
+review_requests = true
+level = "suggest"          # optional: copy-paste text, nothing is posted
+```
+
+It runs once per PR head while your review is still requested, so a re-request after new pushes
+gets a fresh review, and none is made once you've submitted yours. At `draft` (the default),
+approving the job posts the review as a PR comment. GitHub only for now.
 
 ### Work through the backlog
 

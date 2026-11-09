@@ -78,7 +78,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`) |
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
-| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`) |
+| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_runs_code` (`false`: reviews only read the code) |
 
 Arrays in a repo file replace the default, except the trust lists (`allow_users`,
 `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`) and `checks.protected`, which combine

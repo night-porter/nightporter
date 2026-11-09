@@ -559,6 +559,13 @@ pub struct Maintainer {
     pub level: Level,
     #[serde(default = "np_label")]
     pub label: String,
+    /// Queue a review when someone requests yours on a PR (GitHub).
+    #[serde(default)]
+    pub review_requests: bool,
+    /// Reviews of someone else's PR may run its tests and env setup, after you approve running
+    /// it. Off: they only read the code and don't wait for that approval (Claude Code, Gemini CLI).
+    #[serde(default)]
+    pub review_runs_code: bool,
 }
 
 impl Default for Maintainer {

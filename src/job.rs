@@ -93,7 +93,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let mut j = ctx.db(|d| d.job(id))?.context("no such job")?;
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
-    let s = cfg.settings_for(&ctx.paths, &j.repo)?;
+    let mut s = cfg.settings_for(&ctx.paths, &j.repo)?;
     // Only start if still queued (the TUI may have rejected it a moment ago).
     if !ctx.db(|d| d.transition(id, JobStatus::Queued, JobStatus::Running))? {
         return Ok(());
@@ -109,7 +109,13 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let Some(w) = prepare(ctx, &mut j, &cfg.accounts, &s, &events).await? else {
         return Ok(());
     };
-    if await_run_approval(ctx, &mut j, &w).await? {
+    if reads_only(&j, &s) {
+        // Nothing from the branch runs: no allowed commands (tests), no env setup.
+        s.allow_commands.clear();
+        s.env.setup.clear();
+        s.env.teardown.clear();
+        log(ctx, id, "reviewing someone else's code without running it: no tests, no env setup");
+    } else if await_run_approval(ctx, &mut j, &w).await? {
         return Ok(());
     }
 
@@ -203,6 +209,16 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
         .await?;
     }
     Ok(Some(Work { clone, repo_url, branch, wt, gitfile, me, pr, issue, step }))
+}
+
+/// A review of someone else's code that only reads it, so it needn't wait for run approval.
+/// Only for agents whose commands Night Porter limits one by one (Claude Code, Gemini CLI):
+/// Codex's read-only sandbox still runs any command, and a branch can change `OpenCode`'s rules.
+fn reads_only(j: &Job, s: &RepoSettings) -> bool {
+    j.meta.untrusted_code
+        && j.meta.verb == Some(Verb::Review)
+        && !s.maintainer.review_runs_code
+        && matches!(s.agent, crate::config::AgentKind::Claude | crate::config::AgentKind::Gemini)
 }
 
 /// Untrusted code: someone else's branch can carry agent config (CLAUDE.md, opencode.json,
@@ -564,7 +580,9 @@ pub async fn remove(paths: &crate::paths::Paths, cfg: &crate::config::Config, j:
     let s = cfg.settings_for(paths, &j.repo).ok();
     let snap = paths.job_dir(j.id).join("env-snapshot");
     let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
-    if let Some(s) = s.as_ref().filter(|_| restored && wt.exists()) {
+    // Cleanup runs outside the sandbox and reads the worktree's files: not on code you never
+    // approved running (no setup ran on it either).
+    if let Some(s) = s.as_ref().filter(|_| restored && wt.exists() && !j.unapproved_code()) {
         let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
         for c in &s.env.cleanup {
             let _ = sh(&wt, &paths.job_dir(j.id), &vars.apply(c), s).await;
@@ -869,6 +887,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("Docker-Compose.YML")).unwrap(), "services: {}\n", "odd case is still an env file");
         // Only env files are touched: the agent's real work stays.
         assert_eq!(std::fs::read_to_string(wt.join("src.rs")).unwrap(), "fn main() { changed() }\n");
+    }
+
+    #[test]
+    fn only_locked_down_agents_review_without_run_approval() {
+        use crate::config::AgentKind;
+        let d = tempfile::tempdir().unwrap();
+        let mut db = crate::state::Db::open(&d.path().join("db")).unwrap();
+        let repo = crate::forge::RepoId::new(crate::forge::ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 1, "maintainer", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        (j.meta.untrusted_code, j.meta.verb) = (true, Some(Verb::Review));
+        let mut s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
+        for (agent, ok) in [(AgentKind::Claude, true), (AgentKind::Gemini, true), (AgentKind::Codex, false), (AgentKind::OpenCode, false)] {
+            s.agent = agent;
+            assert_eq!(reads_only(&j, &s), ok, "{agent:?}");
+        }
+        s.agent = AgentKind::Claude;
+        s.maintainer.review_runs_code = true;
+        assert!(!reads_only(&j, &s), "opted into running tests: approval as before");
+        s.maintainer.review_runs_code = false;
+        j.meta.verb = Some(Verb::Fix);
+        assert!(!reads_only(&j, &s), "only reviews");
     }
 
     #[test]

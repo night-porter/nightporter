@@ -200,7 +200,16 @@ impl GitHub {
         let (target, mine) = match t.subject.kind.as_str() {
             "PullRequest" => {
                 let p = ghlike::pull(&self.api, r, number).await?;
-                (Target::Pr, p.user.login.eq_ignore_ascii_case(&self.me))
+                let mine = p.user.login.eq_ignore_ascii_case(&self.me);
+                // Still waiting for your review (you haven't submitted one since it was asked for).
+                if t.reason == "review_requested"
+                    && !mine
+                    && p.state == "open"
+                    && p.requested_reviewers.iter().any(|u| u.login.eq_ignore_ascii_case(&self.me))
+                {
+                    out.push(Event::review_request(&repo, number, &p.head.sha, &self.me, self.me_id));
+                }
+                (Target::Pr, mine)
             }
             "Issue" => (Target::Issue, false),
             _ => return Ok(()),

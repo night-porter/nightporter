@@ -97,3 +97,5 @@ max_diff_lines = 500
 enabled = false
 level = "draft"             # capped at draft
 label = "nightporter"
+review_requests = false     # review PRs when someone requests your review (GitHub)
+review_runs_code = false    # true: reviews run allow_commands too, after run approval

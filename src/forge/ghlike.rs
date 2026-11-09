@@ -33,6 +33,9 @@ pub(super) struct Pull {
     pub mergeable: Option<bool>,
     pub head: Head,
     pub base: Head,
+    /// People whose review is still requested (a submitted review removes you).
+    #[serde(default)]
+    pub requested_reviewers: Vec<Login>,
 }
 #[derive(Deserialize)]
 pub(super) struct Head {

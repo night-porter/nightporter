@@ -116,6 +116,14 @@ pub struct Job {
     pub meta: JobMeta,
 }
 
+impl Job {
+    /// Someone else's code you haven't approved running at this head: nothing of yours (agent
+    /// commands, env hooks, a take-over) may run on it.
+    pub fn unapproved_code(&self) -> bool {
+        self.meta.untrusted_code && !(self.meta.run_approved && self.meta.run_approved_head == self.head_before)
+    }
+}
+
 /// Extra per-job data needed to deliver after approval.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct JobMeta {
