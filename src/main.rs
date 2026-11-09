@@ -106,6 +106,14 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Re-read reviews and comments on your open PRs/MRs in a repo, in case a notification was
+    /// missed. New ones are handled as usual; ones already seen are skipped.
+    Rescan {
+        repo: String,
+        /// How far back to look (e.g. 1d, 12h).
+        #[arg(long, default_value = "1d")]
+        since: String,
+    },
     /// Approve a job (push + post, or allow untrusted code to run).
     Approve {
         id: i64,
@@ -408,6 +416,7 @@ fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
         Cmd::Token { cmd: TokenCmd::Set { forge, host } } => cmd_token_set(&forge, host),
         Cmd::Service { cmd } => cmd_service(paths, &cmd, out),
         c @ Cmd::Sweep { .. } => rt()?.block_on(cmd_sweep(paths, c)),
+        Cmd::Rescan { repo, since } => rt()?.block_on(cmd_rescan(paths, &repo, &since, out)),
         Cmd::Market { cmd } => rt()?.block_on(market(paths, cmd, out)),
         Cmd::Pack { cmd } => rt()?.block_on(pack(paths, cmd, out)),
     }
@@ -429,6 +438,37 @@ async fn cmd_worktrees(paths: &Paths, cmd: Option<WtCmd>, out: &mut dyn Write) -
 }
 
 /// `nightporter sweep`: queue maintainer jobs for a repo's open issues or PRs.
+/// `nightporter rescan`: read what notifications may have missed and take it in like a poll would.
+async fn cmd_rescan(paths: &Paths, repo: &str, since: &str, out: &mut dyn Write) -> Result<()> {
+    let r = resolve_repo(paths, repo)?;
+    let secs = i64::try_from(config::parse_duration(since)?.as_secs())?;
+    let from = (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(secs)).strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let ctx = daemon::offline_ctx(paths, config::Config::load(paths)?).await?;
+    let forge = ctx.forge(&r)?.lock().await;
+    let (me, me_id) = (forge.me().to_string(), forge.me_id());
+    let events = forge.rescan(&r, &from).await?;
+    drop(forge);
+    let cfg = ctx.cfg();
+    let mut new = 0;
+    for e in &events {
+        if ctx.db(|d| d.has_event(&e.id))? {
+            continue;
+        }
+        new += 1;
+        let who = if e.own(&me, me_id) { me.as_str() } else { "" };
+        daemon::intake(&ctx, &cfg, who, e.clone()).await?;
+    }
+    writeln!(
+        out,
+        "{} review(s) and comment(s) on your open PRs in {r} since {from}: {new} new, taken in as usual (trusted ones become jobs, others wait in the inbox)",
+        events.len()
+    )?;
+    if new > 0 && !paths.daemon_running() {
+        writeln!(out, "the daemon isn't running: start it with `nightporter start`")?;
+    }
+    Ok(())
+}
+
 async fn cmd_sweep(paths: &Paths, cmd: Cmd) -> Result<()> {
     let Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run } = cmd else { unreachable!() };
 

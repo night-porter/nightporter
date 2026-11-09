@@ -144,6 +144,16 @@ impl GitLab {
         Ok(())
     }
 
+    pub async fn rescan(&self, repo: &RepoId, since: &str) -> Result<Vec<Event>> {
+        let after = |ts: &str| newer(ts, Some(since));
+        let mut out = Vec::new();
+        let mrs: Vec<Mr> = self.api.get_all("/merge_requests?scope=created_by_me&state=opened&per_page=100", 10).await?;
+        for mr in mrs.iter().filter(|m| self.repo(&m.references.full).path.eq_ignore_ascii_case(&repo.path)) {
+            self.mr_notes(repo, mr.project_id, mr.iid, true, &after, &mut out).await?;
+        }
+        Ok(out)
+    }
+
     pub async fn poll(&mut self, cur: &mut Cursor) -> Result<Vec<Event>> {
         // Overlapping window (late indexing, clock drift); repeats are de-duplicated downstream.
         let since = cur.since.as_deref().map(super::overlap);

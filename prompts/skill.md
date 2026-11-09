@@ -36,6 +36,8 @@ nightporter purge <id>...   # delete finished or dismissed jobs and their logs f
 nightporter sweep <repo> --dry-run [--prs] [--label L] [--older-than 90d] [--newer-than 14d]
                             # list open issues (or PRs/MRs) a backlog sweep would queue; without
                             # --dry-run it queues maintainer jobs (ask the user first)
+nightporter rescan <repo> [--since 1d]  # re-read reviews and comments on the user's open PRs
+                            # there, in case a notification was missed
 nightporter handoff <id>    # open the job with a briefed agent in herdr, Rex, tmux, Zellij or a new
                             # terminal (config `handoff`; `auto` falls back to printing the command)
 nightporter worktrees       # Night Porter's worktrees; `rm <id>` removes one, `restore <id>` undoes

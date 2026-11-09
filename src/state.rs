@@ -235,6 +235,10 @@ impl Db {
         Ok(usize::try_from(n)?)
     }
 
+    pub fn has_event(&self, id: &str) -> Result<bool> {
+        Ok(self.0.query_row("SELECT 1 FROM events WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn add_event(&self, e: &Event, d: Disposition, reason: &str) -> Result<bool> {
         let n = self.0.execute(
             "INSERT OR IGNORE INTO events(id,repo,target,number,author,disposition,reason,seen_at,json)

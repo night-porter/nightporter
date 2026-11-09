@@ -6,6 +6,19 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `nightporter rescan <repo> [--since 1d]`: re-read reviews and comments on your open PRs/MRs in a
+  repo and take in any that were missed. Already-seen ones are skipped.
+
+### Fixed
+
+- GitHub and Forgejo/Gitea: a review or comment whose notification arrived late could be missed
+  for good. Each open-PR sweep now also re-reads reviews and comments on your open PRs since the
+  previous sweep.
+- The agent is told never to report a test, linter or build as passing unless it ran it in that
+  job. A read-only review had said "Ruff is clean" without being able to run Ruff.
+
 ## [0.4.1] - 2026-11-09
 
 ### Added

@@ -625,6 +625,34 @@ async fn review_requests_are_off_by_default() {
     assert_eq!(ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap().len(), 0, "nothing queued");
 }
 
+/// A review comment whose notification never came: the next sweep re-reads your open PRs and
+/// finds it, and so does `nightporter rescan`.
+#[tokio::test]
+async fn missed_notifications_are_caught_up_by_the_sweep_and_rescan() {
+    let w = world_with(
+        "",
+        vec![
+            ("GET", "/notifications", "[]".into()),
+            ("GET", "/search/issues", r#"{"items":[{"number":1,"repository_url":"https://api.github.com/repos/o/r"}]}"#.into()),
+        ],
+    )
+    .await;
+    let ctx = &w.ctx;
+    let key = (ForgeKind::GitHub, "github.com".to_string());
+    // Rescan (no sweep needed): alice's review comment from 2026-11-05.
+    let evs = ctx.forges[&key].lock().await.rescan(&w.repo, "2026-11-01T00:00:00Z").await.unwrap();
+    assert!(evs.iter().any(|e| e.id == "gh-github.com-rc-5"), "{:?}", evs.iter().map(|e| &e.id).collect::<Vec<_>>());
+    assert!(ctx.forges[&key].lock().await.rescan(&w.repo, "2026-11-06T00:00:00Z").await.unwrap().is_empty(), "nothing newer");
+
+    // The poll sees no notification; the sweep (last run before the comment) catches it up.
+    let last = "2026-11-05T09:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second();
+    let cur =
+        crate::forge::Cursor { since: Some("2026-11-06T00:00:00Z".into()), last_sweep: Some(last), swept: true, ..Default::default() };
+    ctx.db(|db| db.set_json("cursor:github:github.com", &cur)).unwrap();
+    daemon::poll(ctx, &key).await.unwrap();
+    assert!(ctx.db(|d| d.has_event("gh-github.com-rc-5")).unwrap(), "caught up by the sweep");
+}
+
 /// Real Claude Code, end to end (spends a few cents of the user's tokens). Run with:
 /// `cargo test real_agent_smoke -- --ignored --nocapture`
 /// Also checks the sandbox in headless mode: the agent is allowed `cat`, asked to read a probe
