@@ -312,6 +312,15 @@ fn save(
                 }
             }
         }
+        // A real `[defaults]` table: indexing a missing key makes an inline table, which can't
+        // hold `[[defaults.schedule]]` (the schedule would be silently dropped).
+        if !d.contains_table("defaults") {
+            let mut t = toml_edit::Table::new();
+            if let Some(old) = d.get("defaults").and_then(toml_edit::Item::as_inline_table) {
+                t = old.clone().into_table();
+            }
+            d["defaults"] = toml_edit::Item::Table(t);
+        }
         d["defaults"]["agent"] = toml_edit::value(agent.bin());
         d["defaults"]["level"] = toml_edit::value(level.as_str());
         if let Some(w) = sched {
@@ -380,6 +389,14 @@ mod tests {
         let s = cfg.resolve(None).unwrap();
         assert_eq!((s.agent, s.level), (AgentKind::Codex, Level::Auto));
         assert!(text.contains("days = \"mon-fri\"") && text.contains("\"17:00-22:00\""), "{text}");
+
+        // A config with no [defaults] table still gets the schedule.
+        std::fs::create_dir(d.path().join("bare")).unwrap();
+        let bare = d.path().join("bare/config.toml");
+        std::fs::write(&bare, "[[accounts]]\nforge = \"github\"\n").unwrap();
+        save(&bare, "~/src", &forges[..1], &[], AgentKind::Claude, Level::Draft, sched.as_ref()).unwrap();
+        let s = Config::parse(&std::fs::read_to_string(&bare).unwrap()).unwrap().resolve(None).unwrap();
+        assert_eq!(s.schedule.len(), 1);
 
         // Without a schedule the existing one stays.
         save(&file, "~/src", &forges[..1], &[], AgentKind::Claude, Level::Draft, None).unwrap();

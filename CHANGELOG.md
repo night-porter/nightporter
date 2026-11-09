@@ -60,6 +60,7 @@ All notable changes to Night Porter. The format follows
   members, so a member of a larger group named in `deny_teams` wasn't denied. Every page is read
   now, as on GitHub and Forgejo/Gitea.
 - `gc` no longer stops at the first worktree it can't remove.
+- The setup wizard dropped your working hours when `config.toml` had no `[defaults]` table.
 - GitLab: when listing your open MRs failed during the very first sweep, the next sweep could
   start jobs for MRs that were already red or conflicted.
 - API errors are matched by their HTTP status instead of by the error text, which includes the
