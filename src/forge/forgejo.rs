@@ -10,7 +10,8 @@
 //!   with a clear message in the job log.
 //! - CI is commit statuses (Forgejo/Gitea Actions, Woodpecker and others all report there).
 
-use super::{Cursor, Event, PrInfo, PrState, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
+use super::ghlike::{self, ListItem};
+use super::{Cursor, Event, PrInfo, RepoId, Role, Target, Trigger, Verb, newer, now_iso, parse_command};
 use crate::forge::ForgeKind;
 use crate::http::Api;
 use anyhow::{Context, Result, bail};
@@ -77,6 +78,8 @@ struct Comment {
     #[serde(default)]
     html_url: String,
     created_at: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
 #[derive(Deserialize)]
@@ -127,37 +130,6 @@ struct Label {
     name: String,
 }
 
-#[derive(Deserialize)]
-struct Pull {
-    number: u64,
-    title: String,
-    #[serde(default)]
-    body: Option<String>,
-    user: User,
-    state: String,
-    #[serde(default)]
-    merged: bool,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    mergeable: bool,
-    head: Head,
-    base: Head,
-}
-#[derive(Deserialize)]
-struct Head {
-    #[serde(rename = "ref")]
-    name: String,
-    #[serde(default)]
-    sha: String,
-    repo: Option<HeadRepo>,
-}
-#[derive(Deserialize)]
-struct HeadRepo {
-    ssh_url: String,
-    clone_url: String,
-}
-
 /// Collaborator permission → role. `admin` is a repo admin, `owner` the repo/org owner.
 fn role_from(permission: &str) -> Role {
     match permission {
@@ -199,22 +171,19 @@ impl Forgejo {
         Ok(())
     }
 
-    pub async fn controls(&self, repo: &RepoId, n: u64, since: &str) -> Result<Vec<super::ControlComment>> {
+    pub async fn controls(&self, repo: &RepoId, _target: Target, n: u64, since: &str) -> Result<Vec<super::ControlComment>> {
         let cs: Vec<Comment> = self.api.get_all(&format!("/repos/{}/issues/{n}/comments?limit=50&since={since}", repo.path), 10).await?;
         Ok(cs
             .into_iter()
             .filter_map(|c| {
-                let control = super::control_of(self.me_id, c.user.id, false, &c.body, &c.created_at, since)?;
+                let control = super::control_of(self.me_id, c.user.id, false, &c.body, &c.created_at, &c.updated_at, since)?;
                 Some(super::ControlComment { id: c.id.to_string(), control })
             })
             .collect())
     }
 
-    pub async fn ack(&self, repo: &RepoId, comment: &str) -> Result<()> {
-        self.api
-            .send(Method::POST, &format!("/repos/{}/issues/comments/{comment}/reactions", repo.path), &json!({ "content": "+1" }))
-            .await?;
-        Ok(())
+    pub async fn ack(&self, repo: &RepoId, _target: Target, _n: u64, comment: &str) -> Result<()> {
+        ghlike::ack(&self.api, repo, comment).await
     }
 
     pub async fn poll(&mut self, cur: &mut Cursor) -> Result<Vec<Event>> {
@@ -236,9 +205,7 @@ impl Forgejo {
         if !failed {
             cur.since = Some(started);
         }
-        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= i64::try_from(self.sweep_every.as_secs()).unwrap_or(i64::MAX));
-        if due {
-            cur.last_sweep = Some(crate::state::now());
+        if cur.sweep_due(self.sweep_every) {
             match self.sweep(cur).await {
                 Ok(evs) => out.extend(evs),
                 Err(e) => tracing::warn!("sweep: {e:#}"),
@@ -257,28 +224,21 @@ impl Forgejo {
         let after = |ts: &str| newer(ts, since);
         let (target, mine) = match t.subject.kind.as_str() {
             "Pull" => {
-                let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{number}")).await?;
+                let p = ghlike::pull(&self.api, r, number).await?;
                 (Target::Pr, p.user.login.eq_ignore_ascii_case(&self.me))
             }
             "Issue" => (Target::Issue, false),
             _ => return Ok(()),
         };
         let ev = |trigger, id: String, u: User, body: String, url: String, at: String, verb| Event {
-            id,
-            repo: repo.clone(),
-            target,
-            number,
-            trigger,
             is_bot: u.is_bot(),
+            author_id: u.id,
             author: u.login,
-            role: Role::None,
             body,
             url,
-            thread: None,
-            path: None,
-            line: None,
             created_at: at,
             verb,
+            ..Event::new(id, &repo, target, number, trigger)
         };
         let start = out.len();
 
@@ -364,7 +324,8 @@ impl Forgejo {
 
     /// The user's role on the repo, cached for an hour. Only repo admins may read someone else's
     /// permission (403 otherwise); then fall back to what any reader can see: the repo owner's
-    /// name, and whether the user is a collaborator. That fallback can't see org teams, so org
+    /// name, and whether the user is a collaborator (any access, so `contributor`: use
+    /// `allow_users` or `allow_teams` for them). That fallback can't see org teams, so org
     /// members who aren't collaborators come out as `none` (fails closed).
     async fn role_of(&self, repo: &str, user: &str) -> Role {
         #[derive(Deserialize)]
@@ -377,19 +338,21 @@ impl Forgejo {
         }
         let r = match self.api.get::<P>(&format!("/repos/{repo}/collaborators/{user}/permission")).await {
             Ok(p) => role_from(&p.permission),
-            Err(e) if e.to_string().contains("HTTP 403") => {
+            Err(e) if crate::http::status(&e) == Some(403) => {
                 if repo.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(user)) {
                     Role::Owner
                 } else {
+                    // Any access mode counts as a collaborator here, read-only included, so this
+                    // can't tell write access: treat it as a contributor (not trusted by default).
                     match self.api.send(Method::GET, &format!("/repos/{repo}/collaborators/{user}"), &Value::Null).await {
-                        Ok(_) => Role::Collaborator,
-                        Err(e) if e.to_string().contains("HTTP 404") => Role::None,
+                        Ok(_) => Role::Contributor,
+                        Err(e) if crate::http::status(&e) == Some(404) => Role::None,
                         // A hiccup: don't cache, or maintainers land in the inbox for an hour.
                         Err(_) => return Role::None,
                     }
                 }
             }
-            Err(e) if e.to_string().contains("HTTP 404") => Role::None,
+            Err(e) if crate::http::status(&e) == Some(404) => Role::None,
             Err(_) => return Role::None,
         };
         self.perm_cache.put(key, r);
@@ -409,15 +372,8 @@ impl Forgejo {
             let repo = self.repo(&i.repository.full_name);
             let key = format!("{}#{}", repo.key(), i.number);
             let prev = cur.seen_status.get(&key).cloned().unwrap_or_default();
-            match self.sweep_pr(&repo, i.number, &prev).await {
-                Ok((evs, status)) => {
-                    if cur.swept {
-                        out.extend(evs);
-                    }
-                    cur.seen_status.insert(key, status);
-                }
-                Err(e) => tracing::warn!("sweep {repo}#{}: {e:#}", i.number),
-            }
+            let r = self.sweep_pr(&repo, i.number, &prev).await;
+            cur.record(key, r, &mut out);
         }
         cur.swept = true;
         Ok(out)
@@ -444,11 +400,11 @@ impl Forgejo {
             description: String,
         }
         let r = &repo.path;
-        let p: Pull = self.api.get(&format!("/repos/{r}/pulls/{n}")).await?;
+        let p = ghlike::pull(&self.api, r, n).await?;
         let sha = &p.head.sha;
         let mut out = Vec::new();
         let mut status = Vec::new();
-        if !p.mergeable && !p.draft && p.state == "open" {
+        if !p.mergeable.unwrap_or(false) && !p.draft && p.state == "open" {
             let mark = format!("conflict@{sha}");
             if prev.split(',').any(|s| s == mark) {
                 out.push(self.state_event(
@@ -479,59 +435,26 @@ impl Forgejo {
     }
 
     fn state_event(&self, repo: &RepoId, n: u64, trigger: Trigger, sha: &str, body: String) -> Event {
-        Event {
-            id: format!("fj-{}-{}-{}#{n}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path),
-            repo: repo.clone(),
-            target: Target::Pr,
-            number: n,
-            trigger,
-            author: self.me.clone(),
-            role: Role::Owner,
-            is_bot: false,
-            body,
-            url: String::new(),
-            thread: None,
-            path: None,
-            line: None,
-            created_at: now_iso(),
-            verb: None,
-        }
+        let id = format!("fj-{}-{}-{}#{n}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path);
+        Event::state(id, repo, n, trigger, &self.me, body)
     }
 
     pub async fn pr(&self, repo: &RepoId, n: u64) -> Result<PrInfo> {
-        let p: Pull = self.api.get(&format!("/repos/{}/pulls/{n}", repo.path)).await?;
-        let head_repo = p.head.repo.as_ref();
-        Ok(PrInfo {
-            number: p.number,
-            title: p.title,
-            author: p.user.login,
-            state: match (p.state.as_str(), p.merged) {
-                (_, true) => PrState::Merged,
-                ("closed", _) => PrState::Closed,
-                _ => PrState::Open,
-            },
-            head_ref: p.head.name,
-            head_sha: p.head.sha,
-            head_repo_ssh: head_repo.map(|r| r.ssh_url.clone()).unwrap_or_default(),
-            head_repo_https: head_repo.map(|r| r.clone_url.clone()).unwrap_or_default(),
-            base_ref: p.base.name,
-            draft: p.draft,
-            body: p.body.unwrap_or_default(),
-        })
+        ghlike::pr(&self.api, repo, n).await
+    }
+
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
+        let kind = if target == Target::Pr { "pulls" } else { "issues" };
+        let path = format!("/repos/{}/issues?state=open&type={kind}&limit=50", repo.path);
+        let items: Vec<ListItem> = self.api.get_all(&path, super::LIST_PAGES).await?;
+        Ok(items.into_iter().map(ListItem::listed).collect())
     }
 
     pub async fn issue(&self, repo: &RepoId, n: u64) -> Result<super::IssueInfo> {
-        #[derive(Deserialize)]
-        struct I {
-            title: String,
-            body: Option<String>,
-            user: User,
-        }
-        let i: I = self.api.get(&format!("/repos/{}/issues/{n}", repo.path)).await?;
-        Ok(super::IssueInfo { title: i.title, body: i.body.unwrap_or_default(), author: i.user.login })
+        ghlike::issue(&self.api, repo, n).await
     }
 
-    pub async fn reply(&self, repo: &RepoId, n: u64, to: Option<&Event>, body: &str) -> Result<()> {
+    pub async fn reply(&self, repo: &RepoId, _target: Target, n: u64, to: Option<&Event>, body: &str) -> Result<()> {
         let r = &repo.path;
         match to {
             // No reply endpoint: a one-comment review on the same file and line joins the thread.
@@ -545,17 +468,15 @@ impl Forgejo {
                     )
                     .await?;
             }
-            _ => {
-                self.api.send(Method::POST, &format!("/repos/{r}/issues/{n}/comments"), &json!({ "body": body })).await?;
-            }
+            _ => ghlike::comment(&self.api, repo, n, body).await?,
         }
         Ok(())
     }
 
     /// Resolve the conversation started by `comment_id`. Gitea 1.25+ only; Forgejo has no API.
-    pub async fn resolve(&self, repo: &RepoId, comment_id: &str) -> Result<()> {
+    pub async fn resolve(&self, repo: &RepoId, _n: u64, comment_id: &str) -> Result<()> {
         match self.api.send(Method::POST, &format!("/repos/{}/pulls/comments/{comment_id}/resolve", repo.path), &json!({})).await {
-            Err(e) if e.to_string().contains("HTTP 404") || e.to_string().contains("HTTP 405") => {
+            Err(e) if matches!(crate::http::status(&e), Some(404 | 405)) => {
                 bail!("this server has no API to resolve review conversations (Forgejo); resolve it in the web UI")
             }
             r => r.map(|_| ()),
@@ -564,15 +485,7 @@ impl Forgejo {
 
     /// Draft = `WIP:` title prefix, which both Forgejo and Gitea treat as a draft PR.
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
-        let v = self
-            .api
-            .send(
-                Method::POST,
-                &format!("/repos/{}/pulls", repo.path),
-                &json!({ "title": format!("WIP: {title}"), "head": head, "base": base, "body": body }),
-            )
-            .await?;
-        Ok(v["html_url"].as_str().unwrap_or_default().to_string())
+        ghlike::open_pr(&self.api, repo, &json!({ "title": format!("WIP: {title}"), "head": head, "base": base, "body": body })).await
     }
 
     /// `org/team` membership, cached for an hour.
@@ -586,18 +499,14 @@ impl Forgejo {
             id: u64,
             name: String,
         }
-        if let Some(m) = self.team_cache.get(&team.to_string()) {
-            return Ok(m.iter().any(|x| x.eq_ignore_ascii_case(user)));
-        }
         let (org, name) = team.split_once('/').context("team must be org/team")?;
-        let found: Found = self.api.get(&format!("/orgs/{org}/teams/search?q={}", crate::http::enc(name))).await?;
-        let t = found.data.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)).with_context(|| format!("no team {team}"))?;
-        // Every page: a member past the first page must still match (deny_teams fails open otherwise).
-        let members: Vec<User> = self.api.get_all(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
-        let names: Vec<String> = members.into_iter().map(|u| u.login).collect();
-        let hit = names.iter().any(|x| x.eq_ignore_ascii_case(user));
-        self.team_cache.put(team.into(), names);
-        Ok(hit)
+        let fetch = async {
+            let found: Found = self.api.get(&format!("/orgs/{org}/teams/search?q={}", crate::http::enc(name))).await?;
+            let t = found.data.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)).with_context(|| format!("no team {team}"))?;
+            let members: Vec<User> = self.api.get_every(&format!("/teams/{}/members?limit=50", t.id), 100).await?;
+            Ok(members.into_iter().map(|u| u.login).collect())
+        };
+        self.team_cache.member(team, user, fetch).await
     }
 }
 

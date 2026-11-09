@@ -19,12 +19,23 @@ pub struct Outcome {
     pub cost_usd: Option<f64>,
 }
 
-/// Git commands the agent may run. `git log/diff/show/blame/grep` are deliberately absent: they
-/// accept `--output=<file>`, which would let the agent write anywhere. It can read files instead.
-const GIT_ALLOWED: &[&str] =
-    &["git status", "git add", "git commit", "git rev-parse", "git ls-files", "git merge", "git checkout --", "git restore", "git stash"];
+/// Git commands the agent may run. `git log/diff/show/blame/grep` and `git stash show` are
+/// deliberately absent: they accept `--output=<file>`, which would let the agent write anywhere
+/// (e.g. a git config into the clone). It can read files instead.
+const GIT_ALLOWED: &[&str] = &[
+    "git status",
+    "git add",
+    "git commit",
+    "git rev-parse",
+    "git ls-files",
+    "git merge",
+    "git checkout --",
+    "git restore",
+    "git stash push",
+    "git stash pop",
+];
 /// Git commands that change the worktree; dropped for read-only steps.
-const WRITE_GIT: &[&str] = &["git add", "git commit", "git merge", "git checkout --", "git restore", "git stash"];
+const WRITE_GIT: &[&str] = &["git add", "git commit", "git merge", "git checkout --", "git restore", "git stash push", "git stash pop"];
 const DENIED: &[&str] = &[
     "git push",
     "git remote",
@@ -298,6 +309,15 @@ pub fn opencode_config(s: &RepoSettings, read_only: bool) -> serde_json::Value {
 }
 
 pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, prompt: &str, read_only: bool) -> Result<Outcome> {
+    // The agent can write to the clone's git dir (it commits); its config is read by our own git
+    // calls outside the sandbox. Any change is undone and fails the job.
+    let guard = crate::git::ConfigGuard::take(wt);
+    let r = run_unguarded(kind, s, wt, job_dir, prompt, read_only).await;
+    guard.verify()?;
+    r
+}
+
+async fn run_unguarded(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, prompt: &str, read_only: bool) -> Result<Outcome> {
     std::fs::create_dir_all(job_dir)?;
     std::fs::write(job_dir.join("prompt.md"), prompt)?;
     write_agent_git_config(job_dir, wt);
@@ -366,7 +386,7 @@ pub async fn run(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &Path, p
                 .args(gemini_args(&policy));
         }
     }
-    cmd.args(&s.agent_args);
+    cmd.args(s.agent_args.for_agent(kind));
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -50,6 +50,10 @@ pub struct Config {
     /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print`.
     #[serde(default)]
     pub handoff: Handoff,
+    /// Which agent a handoff starts: `job` (the one that ran it) or any interactive agent,
+    /// including ones Night Porter doesn't run jobs with (pi, Cursor, Copilot, ...).
+    #[serde(default)]
+    pub handoff_agent: HandoffAgent,
     /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
     #[serde(default)]
     pub defaults: toml::Table,
@@ -64,11 +68,114 @@ pub struct Account {
     /// `cli` (gh/glab/tea) or `keyring`.
     #[serde(default)]
     pub token: TokenSource,
+    /// Other names for this host in clone remotes: SSH `Host` aliases from `~/.ssh/config`
+    /// (`github-work`) or mirror names. `git.drupal.org` is built in for `git.drupalcode.org`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
+
+/// Hosts that serve the same repos under another name.
+const BUILTIN_ALIASES: &[(&str, &str)] = &[("git.drupal.org", "git.drupalcode.org")];
 
 impl Account {
     pub fn host(&self) -> &str {
         self.host.as_deref().unwrap_or(self.forge.default_host())
+    }
+
+    /// Whether a clone remote's host (lowercase) belongs to this account.
+    pub fn matches_host(&self, host: &str) -> bool {
+        let me = self.host();
+        host == me
+            || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(host))
+            || BUILTIN_ALIASES.iter().any(|(alias, canon)| *alias == host && canon.eq_ignore_ascii_case(me))
+    }
+}
+
+/// An agent you can hand a job to. The first four also run jobs; the rest are for taking over
+/// only, because Night Porter can't fence them in for unattended runs the same way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HandoffAgent {
+    /// The agent the job ran with.
+    #[default]
+    Job,
+    Claude,
+    OpenCode,
+    Codex,
+    Gemini,
+    /// pi (<https://github.com/badlogic/pi-mono>).
+    Pi,
+    /// Cursor CLI (`cursor-agent`).
+    Cursor,
+    /// GitHub Copilot CLI.
+    Copilot,
+    Goose,
+    Qwen,
+    /// Factory Droid.
+    Droid,
+    /// Kiro CLI.
+    Kiro,
+}
+
+impl HandoffAgent {
+    pub const NAMES: &[&str] =
+        &["job", "claude", "opencode", "codex", "gemini", "pi", "cursor", "copilot", "goose", "qwen", "droid", "kiro"];
+
+    /// `job` → the job's own agent.
+    pub fn or_job(self, job: AgentKind) -> Self {
+        match (self, job) {
+            (Self::Job, AgentKind::Claude) => Self::Claude,
+            (Self::Job, AgentKind::OpenCode) => Self::OpenCode,
+            (Self::Job, AgentKind::Codex) => Self::Codex,
+            (Self::Job, AgentKind::Gemini) => Self::Gemini,
+            (a, _) => a,
+        }
+    }
+
+    pub fn bin(self) -> &'static str {
+        match self {
+            Self::Job | Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Pi => "pi",
+            Self::Cursor => "cursor-agent",
+            Self::Copilot => "copilot",
+            Self::Goose => "goose",
+            Self::Qwen => "qwen",
+            Self::Droid => "droid",
+            Self::Kiro => "kiro-cli",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Job | Self::Claude => "Claude Code",
+            Self::OpenCode => "OpenCode",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
+            Self::Pi => "pi",
+            Self::Cursor => "Cursor CLI",
+            Self::Copilot => "Copilot CLI",
+            Self::Goose => "Goose",
+            Self::Qwen => "Qwen Code",
+            Self::Droid => "Droid",
+            Self::Kiro => "Kiro CLI",
+        }
+    }
+
+    /// The interactive command line with `brief` as the first prompt (the session stays open).
+    pub fn argv(self, brief: &str) -> Vec<String> {
+        let pre: &[&str] = match self {
+            // A bare prompt makes `gemini` (and its fork `qwen`) answer once and exit; `-i` doesn't.
+            Self::Gemini | Self::Qwen | Self::Copilot => &["-i"],
+            Self::OpenCode => &["--prompt"],
+            // `-s`: stay in the session after the first message.
+            Self::Goose => &["run", "-s", "-t"],
+            Self::Kiro => &["chat"],
+            Self::Job | Self::Claude | Self::Codex | Self::Pi | Self::Cursor | Self::Droid => &[],
+        };
+        std::iter::once(self.bin()).chain(pre.iter().copied()).map(String::from).chain([brief.to_string()]).collect()
     }
 }
 
@@ -204,7 +311,31 @@ impl Level {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+/// `agent_args`: one list for whichever agent runs, or a list per agent (so a schedule window
+/// that switches Claude to Codex doesn't hand Codex Claude's flags).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AgentArgs {
+    All(Vec<String>),
+    Per(std::collections::BTreeMap<AgentKind, Vec<String>>),
+}
+
+impl Default for AgentArgs {
+    fn default() -> Self {
+        Self::All(Vec::new())
+    }
+}
+
+impl AgentArgs {
+    pub fn for_agent(&self, a: AgentKind) -> &[String] {
+        match self {
+            Self::All(v) => v,
+            Self::Per(m) => m.get(&a).map_or(&[], Vec::as_slice),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
@@ -254,9 +385,11 @@ pub struct RepoSettings {
     pub subscribed: bool,
     #[serde(default = "claude")]
     pub agent: AgentKind,
-    /// Extra args for the agent CLI, e.g. `["--model", "opus"]`.
+    /// Extra args for the agent CLI: a list for every agent (`["--model", "opus"]`) or one list
+    /// per agent (`{ claude = ["--model", "opus"], codex = ["-m", "gpt-5"] }`). Empty: the agent's
+    /// own default model and settings.
     #[serde(default)]
-    pub agent_args: Vec<String>,
+    pub agent_args: AgentArgs,
     /// Shell commands the agent may run (e.g. `"npm test"`, `"ddev phpunit"`). Prefix match.
     #[serde(default)]
     pub allow_commands: Vec<String>,
@@ -780,6 +913,26 @@ mod tests {
         assert_eq!(s.trust.allow_users, vec!["alice", "carol"]);
         assert_eq!(s.trust.deny_users, vec!["mallory"], "a repo can't drop a global deny");
         assert_eq!(s.trust.roles, vec![crate::forge::Role::Maintainer], "other arrays still replace");
+    }
+
+    #[test]
+    fn agent_args_per_agent() {
+        use AgentKind::*;
+        // A plain list goes to whichever agent runs (and an empty one means the agent's defaults).
+        let c = Config::parse("[defaults]\nagent_args = [\"--model\", \"opus\"]").unwrap();
+        assert_eq!(c.resolve(None).unwrap().agent_args.for_agent(Codex), ["--model", "opus"]);
+        assert_eq!(Config::parse("").unwrap().resolve(None).unwrap().agent_args.for_agent(Claude), [] as [String; 0]);
+        // Per agent: defaults and the repo file merge key by key.
+        let c = Config::parse("[defaults.agent_args]\nclaude = [\"--model\", \"opus\"]\ncodex = [\"-m\", \"o3\"]").unwrap();
+        let over: toml::Table = toml::from_str("[agent_args]\nclaude = [\"--model\", \"sonnet\"]").unwrap();
+        let s = c.resolve(Some(&over)).unwrap();
+        assert_eq!(s.agent_args.for_agent(Claude), ["--model", "sonnet"]);
+        assert_eq!(s.agent_args.for_agent(Codex), ["-m", "o3"]);
+        assert_eq!(s.agent_args.for_agent(Gemini), [] as [String; 0]);
+        // A repo list replaces a per-agent table.
+        let over: toml::Table = toml::from_str("agent_args = [\"--x\"]").unwrap();
+        assert_eq!(c.resolve(Some(&over)).unwrap().agent_args.for_agent(Gemini), ["--x"]);
+        assert!(Config::parse("[defaults.agent_args]\nnope = []").and_then(|c| c.resolve(None)).is_err());
     }
 
     #[test]

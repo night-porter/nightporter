@@ -12,21 +12,23 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
     Queue,
     Inbox,
     History,
     Repos,
     Settings,
+    Worktrees,
     Help,
 }
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Queue, "1 Queue"),
     (Tab::Inbox, "2 Inbox"),
     (Tab::History, "3 History"),
     (Tab::Repos, "4 Repos"),
     (Tab::Settings, "5 Settings"),
+    (Tab::Worktrees, "6 Worktrees"),
     (Tab::Help, "? Help"),
 ];
 
@@ -88,6 +90,8 @@ struct App {
     undo_jobs: Vec<i64>,
     undo_events: Vec<String>,
     update: Option<String>,
+    /// Loaded on opening the tab and after a change (one git call per clone).
+    worktrees: Vec<crate::worktrees::Wt>,
 }
 
 /// No forge account configured yet: nothing can be watched, so the wizard is the useful first step.
@@ -155,6 +159,7 @@ impl App {
             undo_jobs: vec![],
             undo_events: vec![],
             update: None,
+            worktrees: vec![],
         }
     }
 
@@ -279,6 +284,7 @@ impl App {
             Tab::History => self.history.len(),
             Tab::Repos => self.repos.len(),
             Tab::Settings => self.settings.len(),
+            Tab::Worktrees => self.worktrees.len(),
             Tab::Help => 0,
         }
     }
@@ -288,6 +294,7 @@ impl App {
         match self.tab {
             Tab::Queue => self.queue.get(i),
             Tab::History => self.history.get(i),
+            Tab::Worktrees => self.worktrees.get(i).map(|w| &w.job),
             _ => None,
         }
     }
@@ -334,6 +341,7 @@ impl App {
             KeyCode::Char('3') => self.switch(Tab::History),
             KeyCode::Char('4') => self.switch(Tab::Repos),
             KeyCode::Char('5') => self.switch(Tab::Settings),
+            KeyCode::Char('6') => self.switch(Tab::Worktrees),
             KeyCode::Char('?') | KeyCode::F(1) => self.switch(Tab::Help),
             KeyCode::Tab | KeyCode::Right => {
                 let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
@@ -381,7 +389,7 @@ impl App {
                     self.refresh(false);
                 }
             }
-            KeyCode::Enter if matches!(self.tab, Tab::Queue | Tab::History) => {
+            KeyCode::Enter if matches!(self.tab, Tab::Queue | Tab::History | Tab::Worktrees) => {
                 if let Some(j) = self.selected_job() {
                     self.detail = Some(j.id);
                     self.refresh(false);
@@ -392,6 +400,7 @@ impl App {
                 Tab::Inbox => self.inbox_key(k),
                 Tab::Repos => self.repo_key(k),
                 Tab::Settings => self.settings_key(k),
+                Tab::Worktrees => self.worktree_key(k),
                 Tab::Help => {}
             },
         }
@@ -447,6 +456,48 @@ impl App {
         self.sel.select(Some(0));
         if t == Tab::Repos {
             self.refresh(true);
+        }
+        if t == Tab::Worktrees {
+            self.load_worktrees();
+        }
+    }
+
+    fn load_worktrees(&mut self) {
+        match crate::worktrees::block(crate::worktrees::list(&self.db)) {
+            Ok(w) => self.worktrees = w,
+            Err(e) => self.msg = format!("error: {e:#}"),
+        }
+        let n = self.len();
+        if self.sel.selected().is_some_and(|i| i >= n) {
+            self.sel.select(Some(n.saturating_sub(1)));
+        }
+    }
+
+    /// x remove (asks first; kept for a week), u bring a removed one back, h take over.
+    fn worktree_key(&mut self, k: KeyEvent) {
+        let Some(w) = self.sel.selected().and_then(|i| self.worktrees.get(i)) else { return };
+        let (id, removed, path) = (w.job.id, w.trashed.is_some(), w.path.display().to_string());
+        let which = w.trashed.as_ref().map(|t| t.1.clone());
+        match k.code {
+            KeyCode::Char('x' | 'd') if !removed => {
+                self.confirm = Some((
+                    format!("Remove {path}? Its commits and changes are kept for 7 days (u brings it back). y/N"),
+                    Box::new(move |a: &mut App| {
+                        let cfg = Config::load(&a.paths)?;
+                        let r = crate::worktrees::block(crate::worktrees::remove(&a.paths, &cfg, &a.db, id));
+                        a.load_worktrees();
+                        r
+                    }),
+                ));
+            }
+            KeyCode::Char('u') if removed => {
+                let r = crate::worktrees::restore(&self.db, id, which.as_deref());
+                self.msg = crate::worktrees::block(r).unwrap_or_else(|e| format!("error: {e:#}"));
+                self.load_worktrees();
+            }
+            KeyCode::Char('u') => self.msg = "select a KEPT row to bring it back".into(),
+            KeyCode::Char('h') if !removed => self.job_key(k),
+            _ => {}
         }
     }
 
@@ -757,6 +808,7 @@ impl App {
                     })
                     .collect(),
                 Tab::Repos => self.repo_items(),
+                Tab::Worktrees => self.worktree_items(),
                 Tab::Settings | Tab::Help => vec![],
             };
             let empty = items.is_empty();
@@ -774,6 +826,7 @@ impl App {
                     let on = self.repos_all.iter().filter(|r| r.subscribed).count();
                     &format!(" Repos: {on} watched of {} (Enter details, space subscribe, / search) ", self.repos_all.len())
                 }
+                Tab::Worktrees => " Worktrees Night Porter made, then removed ones you can bring back ",
                 Tab::Settings | Tab::Help => "",
             };
             if empty {
@@ -781,6 +834,7 @@ impl App {
                     Tab::Queue => "Nothing needs you. Jobs show up here when your PRs get activity.",
                     Tab::Inbox => "No one is waiting.",
                     Tab::Repos | Tab::History if !self.filter.is_empty() => "Nothing matches the search. Esc clears it.",
+                    Tab::Worktrees => "No worktrees. Each job gets one; they're removed when the PR closes or after worktree_idle_days.",
                     Tab::Repos => "No clones found. Press S to run the setup wizard (forges, clone folder, repos).",
                     _ => "Nothing yet.",
                 };
@@ -812,7 +866,8 @@ impl App {
             (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
             (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
-            (_, Tab::Help) => "1-5 tabs S setup wizard D start/stop daemon q quit",
+            (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
+            (_, Tab::Help) => "1-6 tabs S setup wizard D start/stop daemon q quit",
         };
         let line2 = match (&self.confirm, &self.input) {
             (Some((q, _)), _) => q.clone(),
@@ -824,6 +879,11 @@ impl App {
             _ => self.msg.clone(),
         };
         (keys, line2)
+    }
+
+    fn worktree_items(&self) -> Vec<ListItem<'static>> {
+        let dim = |w: &crate::worktrees::Wt| if w.trashed.is_some() { Style::new().add_modifier(Modifier::DIM) } else { Style::new() };
+        self.worktrees.iter().map(|w| ListItem::new(w.line()).style(self.style(dim(w)))).collect()
     }
 
     fn repo_items(&self) -> Vec<ListItem<'static>> {
@@ -1071,6 +1131,7 @@ Tabs
   3 History  every job, newest first, including done and dismissed ones (/ searches)
   4 Repos    watched repos first; Enter shows everything about one (prompt, reply style, trust, hours)
   5 Settings every config.toml setting, its value and whether it's [set] or [default]
+  6 Worktrees the job worktrees still on disk, and removed ones you can bring back for 7 days
 
 Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ switch tab, p pause, q quit
        /  search the Repos, Settings or History list (Esc clears)
@@ -1087,6 +1148,8 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies
        h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
+Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
+       changes; ignored files like node_modules aren't kept)   h take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
@@ -1261,6 +1324,46 @@ mod tests {
     }
 
     #[test]
+    fn worktrees_tab_removes_and_brings_back() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        crate::git::tests::repo(&clone);
+        let wt = d.path().join("wt/pr-4");
+        let url = clone.to_string_lossy().to_string();
+        crate::worktrees::block(async {
+            crate::git::prepare_worktree(&clone, &wt, &url, "refs/heads/main", "nightporter/pr-4").await.map(|_| ())
+        })
+        .unwrap();
+        std::fs::write(wt.join("mine.txt"), "handoff edit").unwrap();
+        let mut db = Db::open(&paths.db()).unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 4, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::Done;
+        j.worktree = wt.to_string_lossy().into();
+        j.branch = "nightporter/pr-4".into();
+        j.meta.clone = clone.to_string_lossy().into();
+        db.update_job(&j).unwrap();
+        let mut app = App::new(&paths, db);
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        app.key(key('6'));
+        assert_eq!(app.worktrees.len(), 1);
+        app.key(key('u'));
+        assert!(app.msg.contains("KEPT"), "{}", app.msg);
+        app.key(key('x'));
+        assert!(app.confirm.is_some());
+        app.key(key('y'));
+        assert!(!wt.exists(), "{}", app.msg);
+        assert!(app.worktrees[0].trashed.is_some() && app.worktrees[0].line().contains("KEPT"));
+        app.key(key('u'));
+        assert_eq!(std::fs::read_to_string(wt.join("mine.txt")).unwrap(), "handoff edit", "{}", app.msg);
+        assert!(app.worktrees.len() == 1 && app.worktrees[0].trashed.is_none());
+    }
+
+    #[test]
     fn dismiss_undo_purge_repo_view_and_daemon_toggle() {
         let d = tempfile::tempdir().unwrap();
         let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
@@ -1303,5 +1406,297 @@ mod tests {
         press(&mut app, KeyCode::Char('D'));
         assert!(screen(&mut app).contains("Stop Night Porter?"));
         press(&mut app, KeyCode::Char('n'));
+    }
+
+    fn home() -> (tempfile::TempDir, Paths) {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        (d, paths)
+    }
+
+    fn repo() -> RepoId {
+        RepoId::new(ForgeKind::GitHub, "github.com", "o/r")
+    }
+
+    #[test]
+    fn needs_setup_only_without_accounts() {
+        let (_d, paths) = home();
+        assert!(needs_setup(&paths), "no config yet");
+        std::fs::write(paths.config_file(), "[[accounts]]\nforge = \"github\"\n").unwrap();
+        assert!(!needs_setup(&paths));
+        std::fs::write(paths.config_file(), "broken = [").unwrap();
+        assert!(!needs_setup(&paths), "a broken config is shown in the TUI, not sent to the wizard");
+    }
+
+    #[test]
+    fn job_text_shows_every_part_of_a_job() {
+        let (_d, paths) = home();
+        let mut db = Db::open(&paths.db()).unwrap();
+        db.add_event(&crate::state::tests::ev("e1", 4), Disposition::Pending, "").unwrap();
+        let id = db.create_job(&repo(), Target::Pr, 4, "my_prs", "draft", &["e1".into()]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::AwaitingRunApproval;
+        j.error = "agent crashed".into();
+        j.meta.cost_usd = Some(1.234);
+        j.meta.pr_url = "https://github.com/o/r/pull/9".into();
+        j.worktree = "/tmp/wt".into();
+        j.checks = vec![
+            crate::state::CheckResult { name: "tests".into(), ok: true, blocking: false, detail: "pass".into() },
+            crate::state::CheckResult { name: "size".into(), ok: false, blocking: false, detail: "big\nreally".into() },
+        ];
+        j.replies = vec![
+            crate::forge::Reply { event: Some("e1".into()), body: "done\nline two".into() },
+            crate::forge::Reply { event: None, body: "summary".into() },
+        ];
+        j.diff = "+added".into();
+        db.update_job(&j).unwrap();
+        db.log(id, "started").unwrap();
+        let t = job_text(&db, &j);
+        for want in [
+            "\nError: agent crashed",
+            "Cost: $1.23",
+            "Draft PR: https://github.com/o/r/pull/9",
+            "Build files changed vs base:\n  (none)\nWorktree to inspect: /tmp/wt",
+            "  [e1] @alice ReviewComment: fix",
+            "  [ok]   tests pass",
+            "  [ASK]  size big\n          really",
+            "  → e1\n    done\n    line two",
+            "  → (PR comment)\n    summary",
+            "\nDiff:\n+added",
+            "\nLog:\n  ",
+        ] {
+            assert!(t.contains(want), "missing {want:?} in:\n{t}");
+        }
+        assert!(t.trim_end().ends_with("started"));
+        j.meta.build_files = vec!["build.rs".into()];
+        assert!(job_text(&db, &j).contains("vs base:\n  build.rs\n"));
+
+        j.status = JobStatus::Ready;
+        j.head_before = "aaa".into();
+        j.head_after = "bbb".into();
+        j.meta.clone = "/src/o/r".into();
+        j.meta.push_url = "git@github.com:o/r.git".into();
+        j.meta.push_ref = "fix".into();
+        let t = job_text(&db, &j);
+        assert!(t.contains("To push yourself:\n  git -C ") && !t.contains("Worktree to inspect"), "{t}");
+    }
+
+    #[test]
+    fn navigation_keys_move_the_selection_and_tabs() {
+        let (_d, paths) = home();
+        let mut db = Db::open(&paths.db()).unwrap();
+        let ids: Vec<i64> = (1..=15)
+            .map(|n| {
+                let id = db.create_job(&repo(), Target::Pr, n, "my_prs", "draft", &[]).unwrap();
+                db.set_status(id, JobStatus::AwaitingApproval).unwrap();
+                id
+            })
+            .collect();
+        let mut app = App::new(&paths, db);
+        app.refresh(true);
+        let at = |app: &App| app.sel.selected().unwrap();
+        for (k, want) in [
+            (KeyCode::Char('j'), 1),
+            (KeyCode::Down, 2),
+            (KeyCode::Char('k'), 1),
+            (KeyCode::Up, 0),
+            (KeyCode::Up, 0),
+            (KeyCode::PageDown, 10),
+            (KeyCode::PageDown, 14),
+            (KeyCode::Down, 14),
+            (KeyCode::PageUp, 4),
+            (KeyCode::Char('G'), 14),
+            (KeyCode::Char('g'), 0),
+            (KeyCode::End, 14),
+            (KeyCode::Home, 0),
+        ] {
+            press(&mut app, k);
+            assert_eq!(at(&app), want, "after {k:?}");
+        }
+        assert_eq!(app.selected_job().map(|j| j.id), Some(ids[0]));
+        // Tabs wrap around both ways.
+        for (k, want) in
+            [(KeyCode::Tab, Tab::Inbox), (KeyCode::Right, Tab::History), (KeyCode::BackTab, Tab::Inbox), (KeyCode::Left, Tab::Queue)]
+        {
+            press(&mut app, k);
+            assert_eq!(app.tab, want, "after {k:?}");
+        }
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.tab, Tab::Help);
+        assert_eq!(app.len(), 0);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.scroll, 1, "j/k scroll the help text");
+        press(&mut app, KeyCode::Right);
+        assert_eq!((app.tab, app.scroll), (Tab::Queue, 0), "switching tabs resets the scroll");
+        // Detail view: scroll within the text, Backspace goes back.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.detail, Some(ids[0]));
+        press(&mut app, KeyCode::PageDown);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.scroll, app.max_scroll());
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.scroll, 0);
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.detail.is_none());
+        assert!(!app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), "Ctrl-C quits");
+    }
+
+    #[test]
+    fn inbox_keys_decide_and_undo() {
+        let (_d, paths) = home();
+        let db = Db::open(&paths.db()).unwrap();
+        for (id, author) in [("e1", "alice"), ("e2", "bob"), ("e3", "carol"), ("e4", "dave")] {
+            let mut e = crate::state::tests::ev(id, 5);
+            e.author = author.into();
+            db.add_event(&e, Disposition::Inbox, "").unwrap();
+        }
+        let mut app = App::new(&paths, db);
+        app.refresh(true);
+        press(&mut app, KeyCode::Char('2'));
+        assert!(screen(&mut app).contains("@alice"), "{}", screen(&mut app));
+        press(&mut app, KeyCode::Char('u'));
+        assert!(app.msg.starts_with("nothing to undo"));
+        let first = |app: &App| app.inbox[0].id.clone();
+        let e = first(&app);
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.msg, "ignored (u undoes)");
+        assert_eq!(app.inbox.len(), 3);
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!((app.msg.as_str(), app.inbox.len()), ("back in the inbox", 4));
+        assert!(app.inbox.iter().any(|x| x.id == e));
+
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!((app.msg.as_str(), app.inbox.len()), ("allowed once", 3));
+        let who = app.inbox[0].author.clone();
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.msg, format!("@{who} trusted on o/r (1 released)"));
+        let who = app.inbox[0].author.clone();
+        press(&mut app, KeyCode::Char('A'));
+        assert!(screen(&mut app).contains(&format!("Trust @{who} on ALL repos? y/N")));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.msg, format!("@{who} trusted everywhere (1 released)"));
+        let who = app.inbox[0].author.clone();
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.msg, format!("@{who} denied on o/r (1 dropped)"));
+        assert_eq!(app.inbox.len(), 0);
+        assert!(screen(&mut app).contains("No one is waiting"));
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.msg, format!("@{who} denied on o/r (1 dropped)"), "keys on an empty inbox do nothing");
+        let cfg = Config::load(&paths).unwrap();
+        let trust = cfg.settings_for(&paths, &repo()).unwrap().trust;
+        assert_eq!(trust.allow_users.len(), 2, "one on the repo, one global: {:?}", trust.allow_users);
+        assert_eq!(trust.deny_users.len(), 1);
+    }
+
+    #[test]
+    fn repos_tab_lists_scanned_clones_and_toggles_subscription() {
+        let (d, paths) = home();
+        let code = d.path().join("code");
+        let g = code.join("o/r/.git");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("config"), "[remote \"origin\"]\n\turl = git@github.com:o/r.git\n").unwrap();
+        std::fs::write(paths.config_file(), format!("code_dir = {:?}\n[[accounts]]\nforge = \"github\"\n", code.display().to_string()))
+            .unwrap();
+        let mut app = App::new(&paths, Db::open(&paths.db()).unwrap());
+        app.refresh(true);
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(app.repos.len(), 1);
+        assert!(!app.repos[0].subscribed);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.msg, "subscribed to o/r");
+        assert!(app.repos[0].subscribed, "the row reloads from the repo file");
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.msg, "unsubscribed from o/r");
+        press(&mut app, KeyCode::Char('R'));
+        assert_eq!(app.msg, "rescanned");
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(&app.suspend, Some(Suspend::Editor(p)) if *p == paths.repo_file(&repo())));
+        app.suspend = None;
+        // Search: Backspace edits it, Esc drops it.
+        press(&mut app, KeyCode::Char('/'));
+        for c in "zz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.repos.is_empty());
+        assert!(screen(&mut app).contains("Nothing matches the search"), "{}", screen(&mut app));
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.repos.len(), 1);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(screen(&mut app).contains("search: x_"));
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.filtering && app.filter.is_empty() && app.repos.len() == 1);
+        // Repo view: e edits the repo file too.
+        press(&mut app, KeyCode::Enter);
+        assert!(app.repo_view.is_some());
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(app.suspend, Some(Suspend::Editor(_))));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.repo_view.is_none());
+        // A repo file that doesn't parse shows as an error row.
+        std::fs::create_dir_all(paths.repo_file(&repo()).parent().unwrap()).unwrap();
+        std::fs::write(paths.repo_file(&repo()), "level = \"sometimes\"\n").unwrap();
+        app.refresh(true);
+        assert_eq!(app.repos[0].level, "ERROR");
+    }
+
+    #[test]
+    fn settings_keys_reset_and_save_typed_values() {
+        let (_d, paths) = home();
+        let mut app = App::new(&paths, Db::open(&paths.db()).unwrap());
+        app.refresh(true);
+        press(&mut app, KeyCode::Char('5'));
+        app.sel.select(app.settings.iter().position(|r| r.setting.key == "poll_interval"));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some());
+        let n = app.input.as_ref().unwrap().len();
+        for _ in 0..n {
+            press(&mut app, KeyCode::Backspace);
+        }
+        for c in "5m".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none(), "{}", app.msg);
+        assert!(std::fs::read_to_string(paths.config_file()).unwrap().contains("poll_interval = \"5m\""));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!std::fs::read_to_string(paths.config_file()).unwrap().contains("poll_interval"), "d resets to the default");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_none() && app.msg == "cancelled");
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.msg, "cancelled", "unbound keys do nothing");
+    }
+
+    #[test]
+    fn colours_and_the_update_banner_render() {
+        let (_d, paths) = home();
+        let mut db = Db::open(&paths.db()).unwrap();
+        for s in [JobStatus::Failed, JobStatus::Ready, JobStatus::Running, JobStatus::Queued, JobStatus::Done] {
+            let id = db.create_job(&repo(), Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+            db.set_status(id, s).unwrap();
+        }
+        let mut app = App::new(&paths, db);
+        app.color = true;
+        app.update = Some("Night Porter 9.9.9 is out".into());
+        app.refresh(true);
+        let s = screen(&mut app);
+        assert!(s.contains("update available") && s.contains("FAILED") && s.contains("ready to copy"), "{s}");
+        press(&mut app, KeyCode::Char('3'));
+        let s = screen(&mut app);
+        assert!(s.contains("  done ") && s.contains("  queued ") && s.contains("  running "), "{s}");
+        assert_eq!(status_style(JobStatus::Failed).fg, Some(Color::Red));
+        assert_eq!(status_style(JobStatus::Done).fg, Some(Color::Green));
+        // Retry on a failed job re-queues its events.
+        app.sel.select(app.history.iter().position(|j| j.status == JobStatus::Failed));
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.msg, "re-queued 0 event(s)");
     }
 }

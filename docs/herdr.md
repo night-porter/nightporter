@@ -39,6 +39,30 @@ handoff = "auto"   # or "herdr", "rex", "tmux", "zellij", "terminal" or "print"
 herdr or Rex if installed, else a new terminal window (not over SSH), else prints the command.
 If opening fails, `auto` prints the command too.
 
+### Choose the agent
+
+By default a handoff starts the agent that ran the job. `handoff_agent` picks another one,
+including agents Night Porter doesn't run jobs with:
+
+```toml
+handoff_agent = "pi"   # or job, claude, opencode, codex, gemini, cursor, copilot, goose, qwen, droid, kiro
+```
+
+| `handoff_agent` | starts |
+|---|---|
+| `pi` | [pi](https://github.com/badlogic/pi-mono): `pi <briefing>` |
+| `cursor` | Cursor CLI: `cursor-agent <briefing>` |
+| `copilot` | GitHub Copilot CLI: `copilot -i <briefing>` |
+| `goose` | Goose: `goose run -s -t <briefing>` |
+| `qwen` | Qwen Code: `qwen -i <briefing>` |
+| `droid` | Factory Droid: `droid <briefing>` |
+| `kiro` | Kiro CLI: `kiro-cli chat <briefing>` |
+
+These are for taking over only. Unattended jobs need an agent Night Porter can fence in (a
+per-command allow list, a sandbox, no repo-level config from an untrusted branch), so jobs still
+run with `agent`. `nightporter doctor` checks the handoff agent is installed. In herdr, the agent
+is started with `herdr agent start --kind <binary>`, so herdr has to know it.
+
 For tmux, Zellij, terminal and print, the briefing is written to `handoff-brief.md` in the job’s
 directory and read from there when the agent starts; it is never pasted into a command line.
 Rex’s `rex` command lives inside the app on macOS; Night Porter finds it there, or set `REX_BIN`.

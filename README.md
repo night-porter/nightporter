@@ -49,7 +49,8 @@ Night Porter **never** merges, force-pushes, closes or approves.
   Forgejo/Gitea (codeberg.org, gitea.com and self-hosted)
 - Claude Code, OpenCode, Codex and Gemini CLI (experimental: not yet tested against a real Gemini CLI)
 - Trust rules by role, user, team or bot, plus an inbox for anyone not yet trusted
-- Per-repo settings for triggers, autonomy, agent, schedule, reply style and environment
+- Per-repo settings for triggers, autonomy, agent (and a model per agent), schedule, reply style
+  and environment
 - Several active windows per day; events outside them are queued. Each window can set its own
   level, agent and notifications (draft by day, auto overnight)
 - Desktop notifications, plus webhooks (Slack, Discord, ntfy, JSON) and commands for your phone
@@ -57,7 +58,9 @@ Night Porter **never** merges, force-pushes, closes or approves.
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional
   AI-disclosure footer
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)
-- Maintainer mode: triage, reproduce, fix or review issues and MRs from others, on request
+- Maintainer mode: triage, reproduce, fix or review issues and MRs from others, on request, or
+  sweep a whole backlog (`nightporter sweep`) by label and age; triage flags issues that are
+  already done
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
 - Dismiss a job without replying or pushing, undo it, or delete it for good; search History for
   done and dismissed jobs
@@ -78,7 +81,8 @@ watch agents; Night Porter is what runs while you're not there. They fit togethe
   `nightporter handoff <id>`). Night Porter opens the job's worktree in herdr, Rex, tmux, Zellij
   or a new terminal window (`handoff` in the config picks; `auto` uses the one you're in),
   starts your agent, and briefs it: what was asked, what it changed, which checks need you,
-  and what is drafted but not posted. You continue from there, interactively. With none of
+  and what is drafted but not posted. You continue from there, interactively, in the same agent
+  or another one (`handoff_agent`: pi, Cursor, Copilot, Goose, Qwen Code, Droid, Kiro). With none of
   them around, it prints the command to run.
 - **The queue inside herdr.** Install the plugin and open Night Porter as a herdr popup:
 

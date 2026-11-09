@@ -4,6 +4,75 @@ All notable changes to Night Porter. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (0.x: expect breaking changes).
 
+## [Unreleased]
+
+## [0.4.0] - 2026-11-09
+
+### Added
+
+- **Backlog sweep**: `nightporter sweep <repo>` queues a maintainer job for each open issue (or,
+  with `--prs`, each open PR/MR by someone else), oldest first. Filter with `--label` (repeat for
+  several, all must match), `--older-than 90d`, `--newer-than 14d` and `--limit`; `--dry-run`
+  lists without queuing. `--verb` picks `triage` (default), `reproduce`, `fix` or `review`
+  (default with `--prs`). Jobs stop at maintainer mode's level (at most draft). Your own PRs go
+  first and sweeps never use the last quarter of `daily_job_cap`. Re-running a sweep doesn't
+  queue anything twice. GitHub, GitLab and Forgejo/Gitea.
+- **Triage checks whether an issue is already done**: if the code already does what it asks, the
+  reply says so with evidence and recommends closing it.
+- **More agents for handoffs**: `handoff_agent = "pi"`, `"cursor"`, `"copilot"`, `"goose"`,
+  `"qwen"`, `"droid"` or `"kiro"` (or `"job"`, the default: the agent that ran the job). These are
+  handoff-only; jobs still run with `agent`. `nightporter doctor` checks the one you pick.
+- **Per-agent `agent_args`**: a table (`claude = ["--model", "opus"]`, `codex = [...]`) so each
+  agent gets its own model and flags, merged key by key with repo files. A plain list still works.
+- **Worktrees tab** (`6`) and `nightporter worktrees [rm|restore <job>]`: every worktree Night
+  Porter made, removable one by one. Removing (also by `gc` and the automatic cleanup) keeps the
+  worktree's commits and uncommitted changes in its clone for 7 days, so `u` / `restore` brings
+  it back. Ignored files aren't kept. A new job on the PR also keeps what it would reset (your
+  edits after a handoff, or an earlier job's unpushed commits); restoring swaps it back in, and
+  what was there is kept too.
+- **Host aliases** on `[[accounts]]`: `aliases = ["github-work"]` for SSH `Host` aliases or mirror
+  names in clone remotes.
+
+### Security
+
+- The agent could run `git stash show --output=<file>` to write a git config into the clone, whose
+  commands Night Porter's own git calls would then run outside the sandbox. Only `git stash push`
+  and `pop` are allowed now, and the clone's git config is checked after every agent run: a
+  change is undone and fails the job. Found in our own audit; we know of no use in the wild.
+- Forgejo/Gitea: when you're not a repo admin, a collaborator with read-only access counted as
+  `collaborator` (trusted by default). They're `contributor` now.
+- Team and group member lists for `allow_teams` / `deny_teams` fail closed when they can't be
+  read to the end (too many pages, or a next-page link to another server).
+- GitHub notification paging only follows next-page links back to the API it's configured for.
+- `/nightporter approve|dismiss|retry|status` ignores edited comments: people with write access
+  can edit yours.
+- Taking over a job on someone else's code is refused until you've approved running it.
+- `pack update` refuses a pack that renamed itself (it would have replaced another installed
+  pack), `pack add` refuses a name already installed from another URL, and pack descriptions
+  and diffs are printed without terminal control characters.
+- Two marketplace URLs could share a local folder. Marketplaces are cloned again on the next
+  `nightporter market update`.
+- Discord notifications escape Markdown, so a PR title can't render as a link.
+- Handoff briefings (sent to herdr and Rex as typed text) have terminal control characters
+  removed, so comment or CI text can't break out of the paste.
+- Your own comments are matched by user id as well as login, so someone who takes over a login
+  you renamed away from isn't treated as you.
+- A reply style from a pack only applies in repos where that pack is enabled.
+
+### Fixed
+
+- Clones whose remote uses `git.drupal.org` (the old name of git.drupalcode.org) weren't found,
+  so the repo couldn't be subscribed. The alias is now built in.
+- **Security**: GitLab group lookups for `allow_teams` / `deny_teams` only read the first 100
+  members, so a member of a larger group named in `deny_teams` wasn't denied. Every page is read
+  now, as on GitHub and Forgejo/Gitea.
+- `gc` no longer stops at the first worktree it can't remove.
+- The setup wizard dropped your working hours when `config.toml` had no `[defaults]` table.
+- GitLab: when listing your open MRs failed during the very first sweep, the next sweep could
+  start jobs for MRs that were already red or conflicted.
+- API errors are matched by their HTTP status instead of by the error text, which includes the
+  server's response body.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
@@ -79,6 +148,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/night-porter/nightporter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/night-porter/nightporter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/night-porter/nightporter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/night-porter/nightporter/compare/v0.1.0...v0.1.1

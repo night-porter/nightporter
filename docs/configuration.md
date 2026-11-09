@@ -34,7 +34,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 |---|---|---|
 | `version` | `1` | config format version |
 | `code_dir` | `~/coding` | where your clones live |
-| `scan_depth` | `3` | how deep to look for clones |
+| `scan_depth` | `3` | how many folders deep to look for clones (`~/coding/drupal/token` is 2). A clone is matched to an account by its remote's host; see `aliases` below if one is missing from `nightporter repos --all` |
 | `poll_interval` | `2m` | never faster than the forge's `X-Poll-Interval` |
 | `sweep_interval` | `10m` | open-PR sweep for merge conflicts and CI |
 | `min_free_gb` | `5` | jobs wait when free disk is below this |
@@ -43,10 +43,11 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `retention_days` | `30` | history kept in the state db |
 | `worktree_idle_days` | `14` | idle worktrees are removed after this |
 | `marketplaces` | `[]` | extra marketplace git URLs |
+| `handoff_agent` | `job` | which agent a handoff starts: `job` (the one that ran it), `claude`, `opencode`, `codex`, `gemini`, or a handoff-only agent: `pi`, `cursor`, `copilot`, `goose`, `qwen`, `droid`, `kiro` ([details](/herdr#choose-the-agent)) |
 | `handoff` | `auto` | where `h` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print` ([details](/herdr#take-over-a-job)) |
 | `pr_commands` | `true` | act on `/nightporter approve`, `dismiss`, `retry` and `status` in your own comments on a PR or MR (see [From your phone](/daily-use#from-your-phone)). Only the token's own user, checked by user id |
 | `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
-| `[[accounts]]` | | `forge = "github" \| "gitlab" \| "forgejo"` (`"gitea"` works too), `host` (default github.com / gitlab.com / codeberg.org), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`/`tea`; store a keyring token with `nightporter token set <forge> [host]`). See [Forgejo and Gitea](#forgejo-and-gitea) |
+| `[[accounts]]` | | `forge = "github" \| "gitlab" \| "forgejo"` (`"gitea"` works too), `host` (default github.com / gitlab.com / codeberg.org), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`/`tea`; store a keyring token with `nightporter token set <forge> [host]`), `aliases` (other host names your clone remotes use, such as an SSH `Host` alias from `~/.ssh/config`: `["github-work"]`; `git.drupal.org` is built in for `git.drupalcode.org`). See [Forgejo and Gitea](#forgejo-and-gitea) |
 | `[notifications]` | all `true` | `needs_approval`, `failed`, `done`, `new_author`: the desktop notification for each kind |
 | `[[notifications.targets]]` | none | webhooks and commands that also get notifications; see [Notification targets](#notification-targets) |
 
@@ -56,7 +57,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 |---|---|---|
 | `subscribed` | `false` | repo files only |
 | `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+, experimental) |
-| `agent_args` | `[]` | extra CLI args, e.g. `["--model", "opus"]` |
+| `agent_args` | `[]` | extra CLI args. A list goes to whichever agent runs (`["--model", "opus"]`); a table sets them per agent (see [Models per agent](#models-per-agent)). Empty: each agent uses its own default model and settings |
 | `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
@@ -164,6 +165,28 @@ teardown = ["ddev stop"]
 cleanup = ["ddev delete -O -y"]
 prompt = "prompts/drupal.md"
 ```
+
+## Models per agent
+
+Leave `agent_args` empty and each agent uses whatever it's set up to use: Claude Code runs with
+your own user settings, so the model you picked there (`/model`, or `model` in
+`~/.claude/settings.json`) applies to jobs too. To pin a model, give each agent its own list:
+
+```toml
+# config.toml
+[defaults.agent_args]
+claude = ["--model", "opus"]
+codex = ["-m", "gpt-5"]
+opencode = ["--model", "anthropic/claude-sonnet-5-5"]
+
+# repos/gitlab/project/token.toml: only Claude changes here, Codex keeps the default above
+[agent_args]
+claude = ["--model", "sonnet"]
+```
+
+Tables merge key by key, so a repo file only needs the agents it changes. Use a table when a
+[schedule window](/advanced#working-hours) switches agents: a plain list would hand Claude's
+flags to Codex. `nightporter repo <owner/name>` shows the args that apply.
 
 ## Forgejo and Gitea
 

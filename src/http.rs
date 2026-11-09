@@ -39,7 +39,7 @@ impl Api {
         Ok(Self { http, base: base.trim_end_matches('/').into(), token, gitlab })
     }
 
-    fn is_ours(&self, url: &str) -> bool {
+    pub fn is_ours(&self, url: &str) -> bool {
         match (reqwest::Url::parse(&self.base), reqwest::Url::parse(url)) {
             (Ok(b), Ok(u)) => same_origin(&b, &u),
             _ => false,
@@ -68,6 +68,16 @@ impl Api {
     /// GET every page (follows `Link: <…>; rel="next"`, which GitHub and GitLab both send), up to
     /// `max_pages`. Errors on any page fail the whole call so callers don't advance cursors.
     pub async fn get_all<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>> {
+        self.pages(path, max_pages, false).await
+    }
+
+    /// Like [`Api::get_all`], but an error unless every page was read: for lists where a missing
+    /// entry fails open (team members for `deny_teams`).
+    pub async fn get_every<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>> {
+        self.pages(path, max_pages, true).await
+    }
+
+    async fn pages<T: DeserializeOwned>(&self, path: &str, max_pages: usize, complete: bool) -> Result<Vec<T>> {
         let mut out = Vec::new();
         let mut next = Some(path.to_string());
         for _ in 0..max_pages {
@@ -76,11 +86,16 @@ impl Api {
                 Got::Fresh(v, h) => {
                     out.extend(v);
                     // Only follow `next` links back to our own API: they carry the token.
-                    next = next_link(&h).filter(|u| self.is_ours(u));
+                    next = next_link(&h);
+                    if let Some(u) = next.as_ref().filter(|u| !self.is_ours(u)) {
+                        anyhow::ensure!(!complete, "{path}: next page is on another server ({u}); not following it");
+                        next = None;
+                    }
                 }
                 Got::NotModified => break,
             }
         }
+        anyhow::ensure!(!complete || next.is_none(), "{path}: more than {max_pages} pages");
         Ok(out)
     }
 
@@ -121,6 +136,27 @@ pub fn plain() -> reqwest::Client {
     .clone()
 }
 
+/// A forge API answered with an error status. Match on [`status`], never on the message: the
+/// body is the server's text and can say anything.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: u16,
+    msg: String,
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+/// The HTTP status of a failed API call, if that's what failed.
+pub fn status(e: &anyhow::Error) -> Option<u16> {
+    e.downcast_ref::<HttpError>().map(|h| h.status)
+}
+
 async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response> {
     let s = resp.status();
     if s.is_success() {
@@ -128,7 +164,7 @@ async fn check(resp: reqwest::Response, path: &str) -> Result<reqwest::Response>
     }
     let body = resp.text().await.unwrap_or_default();
     let body: String = body.chars().take(300).collect();
-    bail!("{path}: HTTP {s}: {body}")
+    Err(HttpError { status: s.as_u16(), msg: format!("{path}: HTTP {s}: {body}") }.into())
 }
 
 fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {

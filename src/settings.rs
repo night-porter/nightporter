@@ -57,6 +57,11 @@ pub static SETTINGS: &[Setting] = &[
     s("worktree_idle_days", Int, "Idle worktrees are removed after this many days."),
     s("handoff", Choice(&["auto", "herdr", "rex", "tmux", "zellij", "terminal", "print"]), "Where h (take over) opens a job."),
     s(
+        "handoff_agent",
+        Choice(crate::config::HandoffAgent::NAMES),
+        "Agent h (take over) starts: job (the one that ran it), or pi, cursor, copilot, goose, qwen, droid, kiro, ...",
+    ),
+    s(
         "check_updates",
         Bool,
         "Once a day, ask GitHub for the latest release number and tell you when there's a new one. Sends nothing about you or your repos.",
@@ -82,7 +87,11 @@ pub static SETTINGS: &[Setting] = &[
         Choice(&["claude", "opencode", "codex", "gemini"]),
         "Coding agent: Claude Code, OpenCode, Codex or Gemini CLI (experimental).",
     ),
-    s("defaults.agent_args", List, "Extra agent CLI arguments, e.g. --model, opus"),
+    s(
+        "defaults.agent_args",
+        List,
+        "Extra agent CLI arguments for every agent, e.g. --model, opus (per agent: [defaults.agent_args] in config.toml)",
+    ),
     risky(
         "defaults.level",
         Choice(LEVELS),
@@ -353,7 +362,8 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "\nWHAT IT DOES");
     let _ = writeln!(o, "  watching       {}", if s.subscribed { "yes" } else { "no (not subscribed)" });
     let _ = writeln!(o, "  level          {}", s.level.as_str());
-    let args = if s.agent_args.is_empty() { String::new() } else { format!("  args: {}", s.agent_args.join(" ")) };
+    let args = s.agent_args.for_agent(s.agent);
+    let args = if args.is_empty() { "  (its own default model)".to_string() } else { format!("  args: {}", args.join(" ")) };
     let _ = writeln!(o, "  agent          {}{args}", s.agent.label());
     let triggers: Vec<String> = s.triggers.iter().map(crate::state::enum_str).collect();
     let _ = writeln!(o, "  starts on      {}", triggers.join(", "));
@@ -370,7 +380,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  style          {}{}", s.reply.style, if builtin { "  (built in)" } else { "" });
     let _ = writeln!(o, "  language       {}", s.reply.language);
     let _ = writeln!(o, "  footer         {}   resolve threads {}", on(s.reply.footer), on(s.reply.resolve_threads));
-    match crate::prompts::style(paths, &s.reply.style) {
+    match crate::prompts::style(paths, &s.reply.style, &s.packs) {
         Ok(text) => {
             let _ = writeln!(o, "  style text:\n{}", indent(&text, 12));
         }
@@ -477,6 +487,44 @@ mod tests {
         assert!(t.contains("Set here:   level, reply.style"), "{t}");
         assert!(t.contains("level          suggest") && t.contains("non-technical  (built in)"), "{t}");
         assert!(t.contains("Always run the linter."), "the prompt file's text is shown: {t}");
+    }
+
+    #[test]
+    fn repo_text_shows_windows_budget_open_trust_and_broken_files() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        std::fs::write(
+            paths.config_file(),
+            "[defaults]\nmax_budget_usd = 2.5\nprompt = \"missing.md\"\n[defaults.trust]\nopen = true\n\
+             [[defaults.schedule]]\ndays = \"mon-fri\"\nwindows = [\"08:00-09:00\", \"17:00-22:00\"]\n\
+             [[defaults.schedule]]\ndays = \"sat\"\nwindows = [\"10:00-12:00\"]\nlevel = \"auto\"\nagent = \"codex\"\nnotify = [\"phone\", \"desktop\"]\n[[notifications.targets]]\nname = \"phone\"\ntype = \"command\"\ncommand = [\"true\"]\n",
+        )
+        .unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(clone.join("AGENTS.md"), "").unwrap();
+        let repo = crate::forge::RepoId::new(crate::forge::ForgeKind::GitHub, "github.com", "o/r");
+        let cfg = Config::load(&paths).unwrap();
+        let t = super::repo_text(&paths, &cfg, &repo, Some(&clone)).unwrap();
+        for want in [
+            &format!("Clone:      {}", clone.display()),
+            "(not created: every value is the default)",
+            "hours          mon-fri 08:00-09:00,17:00-22:00; sat 10:00-12:00 (auto, codex, phone+desktop)",
+            "budget         $2.50 per run",
+            "OPEN: everyone is trusted",
+            "from the repo  AGENTS.md",
+            "prompt         missing.md  ERROR: ",
+            "env.prompt     (none)",
+        ] {
+            assert!(t.contains(want), "missing {want:?} in:\n{t}");
+        }
+        // The one-line schedule field can't hold per-window settings, so it refuses instead of dropping them.
+        let e = set(&paths, setting("defaults.schedule"), "daily 09:00-10:00").unwrap_err().to_string();
+        assert!(e.contains("press e to edit the file"), "{e}");
+        assert!(set(&paths, setting("defaults.max_budget_usd"), "lots").unwrap_err().to_string().contains("is not a number"));
+        set(&paths, setting("defaults.max_budget_usd"), "0.5").unwrap();
+        assert_eq!(get(&paths, "defaults.max_budget_usd").value, "0.5");
     }
 
     #[test]

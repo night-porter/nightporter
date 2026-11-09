@@ -2,8 +2,7 @@
 //! interactive agent that already knows what Night Porter did. Night Porter works the night
 //! shift; you pick it up in herdr.
 
-use crate::config::AgentKind;
-use crate::state::{Db, Job, JobStatus};
+use crate::state::{Db, Job};
 use anyhow::{Context, Result, bail};
 use std::fmt::Write as _;
 use std::process::Command;
@@ -66,25 +65,22 @@ pub fn briefing(db: &Db, j: &Job) -> String {
         let _ = writeln!(s, "\nIt drafted {} repl{} (not posted).", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
     }
     if !j.head_before.is_empty() && !j.head_after.is_empty() && j.head_before != j.head_after {
-        let _ =
-            writeln!(s, "\nIts commits are {}..{} on this branch. Nothing has been pushed.", short(&j.head_before), short(&j.head_after));
+        let _ = writeln!(
+            s,
+            "\nIts commits are {}..{} on this branch. Nothing has been pushed.",
+            crate::git::short(&j.head_before),
+            crate::git::short(&j.head_after)
+        );
     }
     s += "\nStart by summarising the current state in a few lines, then ask what they want to do.";
-    s
-}
-
-fn short(s: &str) -> &str {
-    &s[..s.len().min(10)]
+    // Comment and CI text can carry terminal control sequences; herdr and Rex type the briefing
+    // into a terminal, where those could end a paste early and run a command.
+    crate::printable(&s)
 }
 
 /// Open a herdr workspace at the job's worktree, start the agent and brief it.
-pub fn handoff(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
-    if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
-        bail!("job {} is {}; wait for it to finish before taking over", j.id, j.status.label());
-    }
-    if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
-        bail!("job {} has no worktree (it may have been cleaned up)", j.id);
-    }
+pub fn handoff(db: &Db, j: &Job, agent: crate::config::HandoffAgent) -> Result<String> {
+    crate::handoff::can_take_over(j)?;
     let label = format!("np {}#{}", j.repo, j.number);
     let ws = herdr(&["workspace", "create", "--cwd", &j.worktree, "--label", &label, "--focus"])?;
     let pane = ws.pointer("/result/root_pane/pane_id").and_then(|v| v.as_str()).context("herdr returned no pane id")?.to_string();
@@ -99,6 +95,7 @@ pub fn handoff(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
 mod tests {
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
+    use crate::state::JobStatus;
 
     #[test]
     fn handoff_drives_herdr_cli() {
@@ -127,10 +124,12 @@ mod tests {
         let mut j = db.job(id).unwrap().unwrap();
         j.status = JobStatus::Running;
         j.worktree = d.path().to_string_lossy().into();
-        assert!(handoff(&db, &j, AgentKind::Claude).is_err(), "running jobs can't be taken over");
+        assert!(handoff(&db, &j, crate::config::HandoffAgent::Claude).is_err(), "running jobs can't be taken over");
         j.status = JobStatus::AwaitingApproval;
+        j.summary = "renamed foo\x1b[201~\r!rm -rf ~\r".into();
+        assert!(!briefing(&db, &j).contains('\x1b') && !briefing(&db, &j).contains('\r'), "no control characters reach the terminal");
         j.summary = "renamed foo".into();
-        let msg = handoff(&db, &j, AgentKind::Claude).unwrap();
+        let msg = handoff(&db, &j, crate::config::HandoffAgent::Claude).unwrap();
         assert!(msg.contains("np o/r#3"));
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(calls.contains(&format!("workspace create --cwd {} --label np o/r#3 --focus", d.path().display())), "{calls}");

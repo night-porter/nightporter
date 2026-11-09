@@ -248,12 +248,47 @@ Maintainer mode is capped at `draft`, so you always approve before anything is p
 - When the work would run someone else’s code (their PR, or `reproduce` with an environment or
   allowed commands), the job first waits as **NEEDS RUN APPROVAL**. Check the build files it lists,
   then press `a` to let it run on that exact commit.
+- `triage` first checks whether the code already does what the issue asks. If it does, the reply
+  says so, with the files or commits that show it, and recommends closing the issue. Night Porter
+  never closes it for you.
+
+### Work through the backlog
+
+`nightporter sweep` queues a maintainer job for each open issue in a repo (or each open PR/MR by
+someone else, with `--prs`), oldest first. It's how you go through a module with hundreds of
+open issues and find the ones that are already done.
+
+```sh
+nightporter sweep project/token --dry-run                    # list what would be queued
+nightporter sweep project/token --older-than 90d             # triage everything older than 3 months
+nightporter sweep project/token --newer-than 14d --verb fix  # draft MRs for the last two weeks
+nightporter sweep project/token --label "Needs work" --label Bug --limit 20
+nightporter sweep project/token --prs                        # review open MRs from others
+```
+
+| flag | what it does |
+|---|---|
+| `--verb` | `triage` (default for issues), `reproduce`, `fix` (draft PR/MR per issue) or `review` (default with `--prs`) |
+| `--label` | only items with this label; repeat it and all must match |
+| `--older-than`, `--newer-than` | only items opened more than / less than this long ago (`90d`, `14d`, `12h`) |
+| `--limit` | at most this many, oldest first |
+| `--dry-run` | list them, queue nothing (works before the repo is subscribed) |
+
+The repo must be subscribed with maintainer mode on. Sweep jobs go through the same queue as
+everything else: your schedule, `max_concurrent_jobs` and `daily_job_cap` apply, and every reply
+or draft MR waits for your approval. Your own PRs always go first, and sweep jobs never use the
+last quarter of the daily cap, so a big backlog can't hold up review comments on your PRs. A
+large backlog takes a few days at the default cap of 50; raise `daily_job_cap` to go faster.
+Running the same sweep again only queues items it hasn't queued before.
+
+For a sweep that only reads, set `level = "suggest"` under `[maintainer]`: triage replies then
+show up in the TUI as copy-paste text and nothing is posted.
 
 ## Replies
 
 ```toml
 [defaults.reply]
-style = "concise"          # detailed-tech-lead, non-technical, or one from a pack
+style = "concise"          # detailed-tech-lead, non-technical, or one from an enabled pack
 language = "German"
 footer = true              # "via Night Porter (Claude Code)"
 resolve_threads = false

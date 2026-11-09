@@ -2,22 +2,38 @@
 //! (<https://www.superlogical.com/rex>), tmux, Zellij or a new terminal window at the job's
 //! worktree, with an agent that's already briefed (or print the command to do it by hand).
 
-use crate::config::{AgentKind, Handoff};
+use crate::config::{Handoff, HandoffAgent};
 use crate::paths::Paths;
 use crate::state::{Db, Job, JobStatus};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
+/// A job can be taken over once it's finished or waiting, has a worktree, and (for someone else's
+/// code) you approved running it: an interactive agent there loads the branch's own agent config
+/// with none of a job's isolation.
+pub fn can_take_over(j: &Job) -> Result<()> {
     if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
         bail!("job {} is {}; wait for it to finish before taking over", j.id, j.status.label());
     }
     if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
         bail!("job {} has no worktree (it may have been cleaned up)", j.id);
     }
-    let choice = crate::config::Config::load(paths).map(|c| c.handoff).unwrap_or_default();
-    let agent = crate::agent_for(paths, &j.repo);
+    if j.meta.untrusted_code && !(j.meta.run_approved && j.meta.run_approved_head == j.head_before) {
+        bail!(
+            "job {} is on someone else's code you haven't approved running: approve the run first (a), or review {} by hand",
+            j.id,
+            j.worktree
+        );
+    }
+    Ok(())
+}
+
+pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
+    can_take_over(j)?;
+    let cfg = crate::config::Config::load(paths).ok();
+    let choice = cfg.as_ref().map(|c| c.handoff).unwrap_or_default();
+    let agent = cfg.map(|c| c.handoff_agent).unwrap_or_default().or_job(crate::agent_for(paths, &j.repo));
     let target = pick(choice, |k| std::env::var_os(k).is_some(), available);
     let res = match target {
         Handoff::Herdr => crate::herdr::handoff(db, j, agent),
@@ -83,18 +99,6 @@ fn label(j: &Job) -> String {
     format!("np-{slug}-{}-{}", j.number, crate::state::now() % 100_000)
 }
 
-/// The agent's interactive command line, with `brief` as its first prompt.
-fn agent_cmd(agent: AgentKind, brief: &str) -> Vec<String> {
-    let mut v = vec![agent.bin().to_string()];
-    match agent {
-        AgentKind::Claude | AgentKind::Codex => v.push(brief.into()),
-        AgentKind::OpenCode => v.extend(["--prompt".into(), brief.into()]),
-        // A bare prompt makes `gemini` answer once and exit; `-i` keeps the session open.
-        AgentKind::Gemini => v.extend(["-i".into(), brief.into()]),
-    }
-    v
-}
-
 /// POSIX single-quoting: safe for any string (paths and briefings come from strangers).
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -102,9 +106,10 @@ fn sh_quote(s: &str) -> String {
 
 /// `cd <worktree> && <agent> "$(cat <brief file>)"`: the briefing is read from a file at run
 /// time, never pasted into the command.
-fn shell_line(worktree: &str, agent: AgentKind, brief_file: &Path) -> String {
+fn shell_line(worktree: &str, agent: HandoffAgent, brief_file: &Path) -> String {
     const BRIEF: &str = "\0brief";
-    let cmd: Vec<String> = agent_cmd(agent, BRIEF)
+    let cmd: Vec<String> = agent
+        .argv(BRIEF)
         .iter()
         .map(|a| if a == BRIEF { format!("\"$(cat {})\"", sh_quote(&brief_file.to_string_lossy())) } else { sh_quote(a) })
         .collect();
@@ -113,7 +118,7 @@ fn shell_line(worktree: &str, agent: AgentKind, brief_file: &Path) -> String {
 
 /// tmux, Zellij, a new terminal window, or printing: all run (or show) a small script in the
 /// job's directory that starts the briefed agent at the worktree.
-fn launch(paths: &Paths, db: &Db, j: &Job, agent: AgentKind, target: Handoff) -> Result<String> {
+fn launch(paths: &Paths, db: &Db, j: &Job, agent: HandoffAgent, target: Handoff) -> Result<String> {
     let dir = paths.job_dir(j.id);
     std::fs::create_dir_all(&dir)?;
     let brief = dir.join("handoff-brief.md");
@@ -220,14 +225,14 @@ fn terminal() -> Option<(PathBuf, Vec<&'static str>)> {
 }
 
 /// A new Rex session at the worktree, running the agent with the briefing as its first prompt.
-fn rex(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
+fn rex(db: &Db, j: &Job, agent: HandoffAgent) -> Result<String> {
     let bin = rex_bin().context("Rex not found: install it from https://www.superlogical.com/rex or set REX_BIN")?;
     let label = label(j);
     // Through your login shell, so the agent is on PATH as it is in your terminal.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let brief = crate::herdr::briefing(db, j);
     let mut cmd = Command::new(&bin);
-    cmd.args(["new", &label, "-c", &j.worktree, "--keep-open", "--shell", &shell, "--json", "--"]).args(agent_cmd(agent, &brief));
+    cmd.args(["new", &label, "-c", &j.worktree, "--keep-open", "--shell", &shell, "--json", "--"]).args(agent.argv(&brief));
     let out = cmd.output().context("run rex")?;
     if !out.status.success() {
         bail!("rex new: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -239,6 +244,28 @@ fn rex(db: &Db, j: &Job, agent: AgentKind) -> Result<String> {
 mod tests {
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
+
+    #[test]
+    fn someone_elses_code_needs_run_approval_before_a_take_over() {
+        let d = tempfile::tempdir().unwrap();
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 7, "maintainer", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::AwaitingRunApproval;
+        j.worktree = d.path().to_string_lossy().into();
+        j.head_before = "abc".into();
+        j.meta.untrusted_code = true;
+        assert!(can_take_over(&j).unwrap_err().to_string().contains("approve the run first"));
+        // Approved, but for an older head: still no.
+        (j.meta.run_approved, j.meta.run_approved_head) = (true, "old".into());
+        assert!(can_take_over(&j).is_err());
+        j.meta.run_approved_head = "abc".into();
+        j.status = JobStatus::AwaitingApproval;
+        can_take_over(&j).unwrap();
+        j.status = JobStatus::Running;
+        assert!(can_take_over(&j).is_err());
+    }
 
     #[test]
     fn rex_handoff_opens_a_session_at_the_worktree() {
@@ -261,7 +288,7 @@ mod tests {
         j.status = JobStatus::AwaitingApproval;
         j.worktree = d.path().to_string_lossy().into();
         j.summary = "renamed foo".into();
-        let msg = rex(&db, &j, AgentKind::Claude).unwrap();
+        let msg = rex(&db, &j, HandoffAgent::Claude).unwrap();
         assert!(msg.contains("np-acme-api-7-"), "{msg}");
         let calls = std::fs::read_to_string(&log).unwrap();
         let args: Vec<&str> = calls.lines().collect();
@@ -289,6 +316,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn every_handoff_agent_starts_interactive_with_the_brief() {
+        use crate::config::AgentKind;
+        let argv = |a: HandoffAgent| a.argv("B").join(" ");
+        assert_eq!(argv(HandoffAgent::Pi), "pi B");
+        assert_eq!(argv(HandoffAgent::Cursor), "cursor-agent B");
+        assert_eq!(argv(HandoffAgent::Copilot), "copilot -i B");
+        assert_eq!(argv(HandoffAgent::Goose), "goose run -s -t B");
+        assert_eq!(argv(HandoffAgent::Qwen), "qwen -i B");
+        assert_eq!(argv(HandoffAgent::Kiro), "kiro-cli chat B");
+        assert_eq!(argv(HandoffAgent::Gemini), "gemini -i B");
+        assert_eq!(argv(HandoffAgent::OpenCode), "opencode --prompt B");
+        // `job` follows the job's agent; anything else overrides it.
+        assert_eq!(HandoffAgent::Job.or_job(AgentKind::Codex), HandoffAgent::Codex);
+        assert_eq!(HandoffAgent::Pi.or_job(AgentKind::Codex), HandoffAgent::Pi);
+        // Every config name parses, and the brief is always the last argument.
+        for n in HandoffAgent::NAMES {
+            let a: HandoffAgent = toml::Value::String((*n).into()).try_into().unwrap();
+            assert_eq!(a.or_job(AgentKind::Claude).argv("B").last().map(String::as_str), Some("B"), "{n}");
+        }
+    }
+
+    #[test]
     fn shell_line_passes_hostile_paths_and_briefings_through_intact() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
@@ -305,7 +354,7 @@ mod tests {
         std::fs::write(&stub, format!("#!/bin/sh\nprintf '%s\\0' \"$(pwd -P)\" \"$@\" > '{}'\n", out.display())).unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let line = shell_line(wt.to_str().unwrap(), AgentKind::OpenCode, &brief);
+        let line = shell_line(wt.to_str().unwrap(), HandoffAgent::OpenCode, &brief);
         assert!(!line.contains("rm -rf"), "the briefing is never in the command: {line}");
         let st = Command::new("/bin/sh").arg("-c").arg(&line).env("PATH", format!("{}:/usr/bin:/bin", bin.display())).status().unwrap();
         assert!(st.success(), "{line}");
@@ -325,9 +374,41 @@ mod tests {
         let mut j = db.job(id).unwrap().unwrap();
         j.worktree = d.path().to_string_lossy().into();
         j.summary = "renamed foo".into();
-        let msg = launch(&paths, &db, &j, AgentKind::Claude, Handoff::Print).unwrap();
+        let msg = launch(&paths, &db, &j, HandoffAgent::Claude, Handoff::Print).unwrap();
         let brief = paths.job_dir(id).join("handoff-brief.md");
         assert!(std::fs::read_to_string(&brief).unwrap().contains("renamed foo"));
         assert!(msg.contains(&format!("&& 'claude' \"$(cat '{}')\"", brief.display())), "{msg}");
+    }
+
+    #[test]
+    fn take_over_needs_a_finished_job_with_a_worktree() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.config_file(), "handoff = \"print\"\n[defaults]\nagent = \"codex\"\n").unwrap();
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Pr, 7, "my_prs", "draft", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        for s in [JobStatus::Running, JobStatus::Queued, JobStatus::Approved] {
+            j.status = s;
+            assert!(take_over(&paths, &db, &j).unwrap_err().to_string().contains("wait for it to finish"));
+        }
+        j.status = JobStatus::Ready;
+        assert!(take_over(&paths, &db, &j).unwrap_err().to_string().contains("has no worktree"));
+        j.worktree = d.path().join("gone").to_string_lossy().into();
+        assert!(take_over(&paths, &db, &j).is_err(), "a cleaned-up worktree is refused too");
+        j.worktree = d.path().to_string_lossy().into();
+        let msg = take_over(&paths, &db, &j).unwrap();
+        assert!(msg.starts_with("run this in a terminal to take over: cd ") && msg.contains("&& 'codex'"), "{msg}");
+    }
+
+    #[test]
+    fn run_reports_stderr_on_failure() {
+        run("true", &[]).unwrap();
+        let e = run("sh", &["-c", "echo broken >&2; exit 3"]).unwrap_err().to_string();
+        assert_eq!(e, "sh: broken");
+        assert!(run("nightporter-no-such-tool", &[]).unwrap_err().to_string().contains("run nightporter-no-such-tool"));
+        assert!(on_path("nightporter-no-such-tool").is_none() && on_path("sh").is_some());
     }
 }

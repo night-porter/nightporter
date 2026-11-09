@@ -258,13 +258,37 @@ pub fn run(paths: &Paths) -> Result<()> {
     ];
     let level = levels[choose("\n5. Default autonomy level?", &levels.map(|l| l.1), 2)?].0;
     let sched = ask_valid("\n6. Active hours, e.g. `mon-fri 08:00-09:00,17:00-22:00` (empty = always)", "", parse_schedule)?;
+    save(&paths.config_file(), &code_dir, &forges, &keyring_hosts, agent, level, sched.as_ref())?;
 
-    edit_file(&paths.config_file(), |d| {
-        d["code_dir"] = toml_edit::value(&code_dir);
+    subscribe_repos(paths)?;
+
+    // 8. Service
+    if yes("\n8. Install the background service now?", true)? {
+        match crate::service::install(&paths.log_file()) {
+            Ok(m) => println!("  {m}"),
+            Err(e) => println!("  could not install: {e:#}"),
+        }
+    }
+    println!("\nDone. Open the TUI with `nightporter`, check health with `nightporter doctor`.");
+    Ok(())
+}
+
+/// Write the wizard's answers into config.toml, keeping everything else in it.
+fn save(
+    file: &std::path::Path,
+    code_dir: &str,
+    forges: &[(ForgeKind, String)],
+    keyring_hosts: &[String],
+    agent: AgentKind,
+    level: Level,
+    sched: Option<&Window>,
+) -> Result<()> {
+    edit_file(file, |d| {
+        d["code_dir"] = toml_edit::value(code_dir);
         // Keep accounts that are already there (and their token settings); add new ones.
         let accounts = d["accounts"].or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
         if let Some(aot) = accounts.as_array_of_tables_mut() {
-            for (f, host) in &forges {
+            for (f, host) in forges {
                 let default_host = f.default_host();
                 let keyring = *f == ForgeKind::Forgejo && keyring_hosts.contains(host);
                 let existing = aot.iter_mut().find(|t| {
@@ -288,9 +312,18 @@ pub fn run(paths: &Paths) -> Result<()> {
                 }
             }
         }
+        // A real `[defaults]` table: indexing a missing key makes an inline table, which can't
+        // hold `[[defaults.schedule]]` (the schedule would be silently dropped).
+        if !d.contains_table("defaults") {
+            let mut t = toml_edit::Table::new();
+            if let Some(old) = d.get("defaults").and_then(toml_edit::Item::as_inline_table) {
+                t = old.clone().into_table();
+            }
+            d["defaults"] = toml_edit::Item::Table(t);
+        }
         d["defaults"]["agent"] = toml_edit::value(agent.bin());
         d["defaults"]["level"] = toml_edit::value(level.as_str());
-        if let Some(w) = &sched {
+        if let Some(w) = sched {
             let mut t = toml_edit::Table::new();
             t["days"] = toml_edit::value(&w.days);
             t["windows"] = toml_edit::value(w.windows.iter().map(String::as_str).collect::<toml_edit::Array>());
@@ -298,19 +331,7 @@ pub fn run(paths: &Paths) -> Result<()> {
             aot.push(t);
             d["defaults"]["schedule"] = toml_edit::Item::ArrayOfTables(aot);
         }
-    })?;
-
-    subscribe_repos(paths)?;
-
-    // 8. Service
-    if yes("\n8. Install the background service now?", true)? {
-        match crate::service::install(&paths.log_file()) {
-            Ok(m) => println!("  {m}"),
-            Err(e) => println!("  could not install: {e:#}"),
-        }
-    }
-    println!("\nDone. Open the TUI with `nightporter`, check health with `nightporter doctor`.");
-    Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -324,5 +345,62 @@ mod tests {
         assert_eq!(parse_schedule("mon-fri 08:00-09:00, 17:00-22:00").unwrap().unwrap().windows.len(), 2);
         assert!(parse_schedule("daily").is_err());
         assert!(parse_schedule("mon-fri 8-9").is_err());
+    }
+
+    #[test]
+    fn prompts_stop_on_cancel() {
+        assert_eq!(label("\nQ?"), "Q?");
+        assert_eq!(label("Q?"), "Q?");
+        assert_eq!(answer(Ok(3)).unwrap(), 3);
+        let e = answer::<()>(Err(inquire::InquireError::OperationCanceled)).unwrap_err();
+        assert_eq!(e.to_string(), "setup cancelled");
+        assert!(answer::<()>(Err(inquire::InquireError::OperationInterrupted)).is_err());
+        assert!(answer::<()>(Err(inquire::InquireError::NotTTY)).unwrap_err().to_string() != "setup cancelled");
+    }
+
+    #[test]
+    fn saves_answers_and_keeps_existing_accounts() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("config.toml");
+        std::fs::write(
+            &file,
+            "# my notes\n[[accounts]]\nforge = \"github\" # mine\n[[accounts]]\nforge = \"forgejo\"\nhost = \"Codeberg.org\"\n[defaults]\n",
+        )
+        .unwrap();
+        let forges = [
+            (ForgeKind::GitHub, "github.com".to_string()),
+            (ForgeKind::Forgejo, "codeberg.org".to_string()),
+            (ForgeKind::Forgejo, "git.example.org".to_string()),
+            (ForgeKind::GitLab, "gitlab.com".to_string()),
+            (ForgeKind::GitLab, "git.drupalcode.org".to_string()),
+        ];
+        let sched = parse_schedule("mon-fri 08:00-09:00,17:00-22:00").unwrap();
+        let keyring = ["codeberg.org".to_string(), "git.example.org".to_string()];
+        save(&file, "~/src", &forges, &keyring, AgentKind::Codex, Level::Auto, sched.as_ref()).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# my notes") && text.contains("forge = \"github\" # mine"), "{text}");
+        let cfg = Config::parse(&text).unwrap();
+        assert_eq!(cfg.code_dir, "~/src");
+        let accts: Vec<_> = cfg.accounts.iter().map(|a| (a.forge, a.host().to_string())).collect();
+        assert_eq!(accts.len(), 5, "existing accounts are matched by forge and host, not duplicated: {text}");
+        assert!(accts.contains(&(ForgeKind::Forgejo, "Codeberg.org".into())) && accts.contains(&(ForgeKind::GitLab, "gitlab.com".into())));
+        assert_eq!(text.matches("token = \"keyring\"").count(), 2, "{text}");
+        assert!(!text.contains("host = \"gitlab.com\""), "default hosts aren't written: {text}");
+        let s = cfg.resolve(None).unwrap();
+        assert_eq!((s.agent, s.level), (AgentKind::Codex, Level::Auto));
+        assert!(text.contains("days = \"mon-fri\"") && text.contains("\"17:00-22:00\""), "{text}");
+
+        // A config with no [defaults] table still gets the schedule.
+        std::fs::create_dir(d.path().join("bare")).unwrap();
+        let bare = d.path().join("bare/config.toml");
+        std::fs::write(&bare, "[[accounts]]\nforge = \"github\"\n").unwrap();
+        save(&bare, "~/src", &forges[..1], &[], AgentKind::Claude, Level::Draft, sched.as_ref()).unwrap();
+        let s = Config::parse(&std::fs::read_to_string(&bare).unwrap()).unwrap().resolve(None).unwrap();
+        assert_eq!(s.schedule.len(), 1);
+
+        // Without a schedule the existing one stays.
+        save(&file, "~/src", &forges[..1], &[], AgentKind::Claude, Level::Draft, None).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("days = \"mon-fri\"") && text.contains("level = \"draft\""), "{text}");
     }
 }

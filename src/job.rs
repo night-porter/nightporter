@@ -177,7 +177,10 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     };
 
     log(ctx, j.id, &format!("preparing worktree {}", wt.display()));
-    let (head, gitfile) = git::prepare_worktree(&clone, &wt, &fetch_url, &fetch_ref, &branch).await?;
+    let (head, gitfile, kept) = git::prepare_worktree(&clone, &wt, &fetch_url, &fetch_ref, &branch).await?;
+    if kept.is_some() {
+        log(ctx, j.id, "kept the worktree's earlier changes for 7 days: `nightporter worktrees` lists them, Worktrees tab (6) restores");
+    }
     j.head_before = head;
     if let Some(pr) = &pr
         && pr.head_sha != j.head_before
@@ -212,7 +215,7 @@ async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work) -> Result<bool> {
             j.meta.run_approved = false;
             j.meta.run_approved_head.clone_from(&j.head_before);
             j.status = JobStatus::AwaitingRunApproval;
-            j.summary = format!("untrusted code at {}: approve before the agent or any setup runs", short(&j.head_before));
+            j.summary = format!("untrusted code at {}: approve before the agent or any setup runs", crate::git::short(&j.head_before));
             ctx.db(|d| d.update_job(j))?;
             note(ctx, j, Kind::NeedsApproval, "Untrusted code wants to run: review build files and approve");
             return Ok(true);
@@ -424,7 +427,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             // A previous delivery attempt (before a restart) got this far.
             log(ctx, id, "already pushed; continuing with replies");
         } else {
-            log(ctx, id, &format!("pushing {} to {}", short(&j.head_after), j.meta.push_ref));
+            log(ctx, id, &format!("pushing {} to {}", crate::git::short(&j.head_after), j.meta.push_ref));
             // Other push failures (protected branch, auth) are real failures, not a retry loop.
             git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref).await?;
         }
@@ -464,7 +467,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     drop(f);
     j.status = JobStatus::Done;
     ctx.db(|d| d.update_job(&j))?;
-    let pushed = if has_code { format!("pushed {} and ", short(&j.head_after)) } else { String::new() };
+    let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
     note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
     Ok(())
 }
@@ -533,22 +536,43 @@ pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
                 Ok(f) => f.lock().await.pr(&j.repo, j.number).await.is_ok_and(|p| p.state != PrState::Open),
                 Err(_) => false,
             };
-        if all || old || closed {
-            let s = cfg.settings_for(&ctx.paths, &j.repo).ok();
-            let snap = ctx.paths.job_dir(j.id).join("env-snapshot");
-            let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
-            if let Some(s) = s.as_ref().filter(|_| restored) {
-                let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
-                for c in &s.env.cleanup {
-                    let _ = sh(&wt, &ctx.paths.job_dir(j.id), &vars.apply(c), s).await;
-                }
+        if (all || old || closed)
+            && let Err(e) = remove(&ctx.paths, &cfg, &j).await
+        {
+            tracing::warn!("couldn't remove worktree {}: {e:#}", wt.display());
+        }
+    }
+    // Trash older than a week goes for good.
+    let now = crate::state::now();
+    let clones: std::collections::BTreeSet<_> = ctx.db(|d| d.recent_jobs(10_000))?.into_iter().map(|j| j.meta.clone).collect();
+    for c in clones.iter().filter(|c| !c.is_empty()) {
+        for (r, _, at) in git::trash_refs(Path::new(c)).await.unwrap_or_default() {
+            if now - at > crate::worktrees::KEEP_SECS {
+                git(Path::new(c), &["update-ref", "-d", &r]).await.ok();
             }
-            let clone = PathBuf::from(&j.meta.clone);
-            tracing::info!("removing worktree {}", wt.display());
-            git::remove_worktree(&clone, &wt, &j.branch).await?;
         }
     }
     Ok(())
+}
+
+/// Remove a job's worktree: keep its work in the trash (undo for a week), run the repo's env
+/// cleanup, then remove it and its branch. The caller checks no job is using it.
+pub async fn remove(paths: &crate::paths::Paths, cfg: &crate::config::Config, j: &Job) -> Result<Option<String>> {
+    let wt = PathBuf::from(&j.worktree);
+    let clone = PathBuf::from(&j.meta.clone);
+    let kept = git::trash(&clone, &wt, &j.branch, crate::state::now()).await.context("keep its work in the trash")?;
+    let s = cfg.settings_for(paths, &j.repo).ok();
+    let snap = paths.job_dir(j.id).join("env-snapshot");
+    let restored = !snap.exists() || restore_env(&wt, &snap).is_ok();
+    if let Some(s) = s.as_ref().filter(|_| restored && wt.exists()) {
+        let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &wt, branch: &j.branch };
+        for c in &s.env.cleanup {
+            let _ = sh(&wt, &paths.job_dir(j.id), &vars.apply(c), s).await;
+        }
+    }
+    tracing::info!("removing worktree {}", wt.display());
+    git::remove_worktree(&clone, &wt, &j.branch).await?;
+    Ok(kept)
 }
 
 struct Vars<'a> {
@@ -776,10 +800,6 @@ fn truncate(s: &str, n: usize) -> &str {
     &s[..i]
 }
 
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(10)]
-}
-
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("Night Porter fix").chars().take(72).collect()
 }
@@ -885,5 +905,83 @@ mod tests {
     fn verbs() {
         assert!(!pushes_code(Some(Verb::Review)) && pushes_code(Some(Verb::Fix)) && pushes_code(None));
         assert!(read_only_verb(Some(Verb::Triage)) && !read_only_verb(Some(Verb::Reproduce)));
+    }
+
+    #[test]
+    fn truncate_keeps_char_boundaries() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("aé", 2), "a", "never splits a multi-byte char");
+    }
+
+    #[test]
+    fn gate_prompt_marks_requests_as_untrusted() {
+        let e = crate::state::tests::ev("e1", 1);
+        let p = gate_prompt("Check licences.", std::slice::from_ref(&e));
+        assert!(p.starts_with(prompts::SYSTEM) && p.contains("You are a read-only gate") && p.contains("Check licences."));
+        assert!(p.contains(&format!("- @alice (ReviewComment): {}", prompts::untrusted("fix"))), "{p}");
+        assert!(p.trim_end().ends_with("\"summary\": \"reason\"}"));
+    }
+
+    #[tokio::test]
+    async fn env_commands_log_output_and_report_failures() {
+        let d = tempfile::tempdir().unwrap();
+        let s = crate::config::Config::parse("").unwrap().resolve(None).unwrap();
+        sh(d.path(), d.path(), "echo out; echo err >&2", &s).await.unwrap();
+        assert_eq!(std::fs::read_to_string(d.path().join("env.log")).unwrap(), "out\nerr\n");
+        let e = sh(d.path(), d.path(), "echo first >&2; echo last words >&2; exit 4", &s).await.unwrap_err().to_string();
+        assert!(e.starts_with("exit ") && e.ends_with(": last words"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn gc_removes_idle_or_all_worktrees_but_never_busy_ones() {
+        use crate::forge::{ForgeKind, RepoId};
+        use crate::paths::Paths;
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        git_in(&clone, &["init", "--quiet"]);
+        let marker = d.path().join("cleaned");
+        let cfg = crate::config::Config::parse(&format!(
+            "retention_days = 1\n[defaults.env]\ncleanup = [\"/usr/bin/touch '{}'\"]\n",
+            marker.display()
+        ))
+        .unwrap();
+        let ctx = crate::daemon::test_ctx(paths.clone(), cfg, crate::repos::CloneMap::new());
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let mk = |n: u64, status: JobStatus, wt: &str| {
+            ctx.db(|db| {
+                let id = db.create_job(&repo, Target::Pr, n, "my_prs", "draft", &[])?;
+                let mut j = db.job(id)?.unwrap();
+                j.status = status;
+                j.branch = format!("np/{n}");
+                j.meta.clone = clone.to_string_lossy().into();
+                if !wt.is_empty() {
+                    let p = d.path().join(wt);
+                    std::fs::create_dir_all(&p)?;
+                    j.worktree = p.to_string_lossy().into();
+                }
+                db.update_job(&j)?;
+                Ok(id)
+            })
+            .unwrap()
+        };
+        let done = mk(1, JobStatus::Done, "wt-done");
+        mk(2, JobStatus::AwaitingApproval, "wt-busy");
+        mk(3, JobStatus::Failed, "");
+
+        gc(&ctx, false).await.unwrap();
+        assert!(d.path().join("wt-done").exists(), "fresh worktrees stay");
+        gc(&ctx, true).await.unwrap();
+        assert!(!d.path().join("wt-done").exists() && marker.exists(), "--all removes it after the cleanup commands");
+        assert!(d.path().join("wt-busy").exists(), "a PR with a pending job keeps its worktree");
+
+        // Housekeeping also drops job folders whose job is gone.
+        std::fs::create_dir_all(paths.job_dir(999)).unwrap();
+        std::fs::create_dir_all(paths.job_dir(done)).unwrap();
+        housekeeping(&ctx).await.unwrap();
+        assert!(!paths.job_dir(999).exists() && paths.job_dir(done).exists());
     }
 }

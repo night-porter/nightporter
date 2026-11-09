@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Log = Arc<Mutex<Vec<(String, String, String)>>>;
 
 /// Minimal HTTP/1.1 server: routes by method + path prefix, records every request.
-async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log) {
+pub(crate) async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let log: Log = Arc::default();
@@ -57,8 +57,13 @@ async fn mock(routes: Vec<(&'static str, &'static str, String)>) -> (String, Log
                     .iter()
                     .find(|(m, p, _)| *m == method && bare == *p)
                     .map_or(("404 Not Found", r#"{"message":"not found"}"#.into()), |(_, _, r)| ("200 OK", r.clone()));
+                // A response starting `NEXT /path\n` is one page of several: send a `Link` to the next.
+                let (link, resp) = match resp.strip_prefix("NEXT ").and_then(|r| r.split_once('\n')) {
+                    Some((next_path, page)) => (format!("Link: <http://{addr}{next_path}>; rel=\"next\"\r\n"), page.to_string()),
+                    None => (String::new(), resp),
+                };
                 let out = format!(
-                    "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp}",
+                    "HTTP/1.1 {code}\r\nContent-Type: application/json\r\n{link}Content-Length: {}\r\nConnection: close\r\n\r\n{resp}",
                     resp.len()
                 );
                 let _ = s.write_all(out.as_bytes()).await;
@@ -518,6 +523,7 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
         number: 1,
         trigger: Trigger::Comment,
         author: "alice".into(),
+        author_id: 0,
         role: Role::Maintainer,
         is_bot: false,
         body: "/nightporter review".into(),
@@ -663,4 +669,119 @@ async fn gitlab_pr_commands_and_award() {
     assert_eq!(got, vec![ControlComment { id: "11".into(), control: Control::Retry }]);
     f.ack(&repo, Target::Pr, 3, "11").await.unwrap();
     assert!(log.lock().unwrap().iter().any(|(m, p, _)| m == "POST" && p.contains("/notes/11/award_emoji?name=thumbsup")));
+}
+
+/// `nightporter sweep` listing: each forge's open issues and PRs/MRs, PRs left out of GitHub's
+/// issue list, and the same shape back from all three.
+#[tokio::test]
+async fn open_items_on_every_forge() {
+    use crate::forge::{Listed, Target, forgejo::Forgejo, gitlab::GitLab};
+    let hub_issues = r#"[{"number":1,"title":"bug","user":{"login":"ann"},"created_at":"2026-01-01T00:00:00Z","labels":[{"name":"Bug"}]},
+                        {"number":2,"title":"a PR","user":{"login":"bob"},"created_at":"2026-01-02T00:00:00Z","labels":[],"pull_request":{}}]"#;
+    let gh_pulls = r#"[{"number":2,"title":"a PR","user":{"login":"bob"},"created_at":"2026-01-02T00:00:00Z"}]"#;
+    let lab_issues =
+        r#"[{"iid":5,"title":"old","author":{"id":2,"username":"ann"},"created_at":"2025-06-01T00:00:00Z","labels":["needs work"]}]"#;
+    let gl_mrs = r#"[{"iid":6,"title":"mr","author":{"id":3,"username":"bob"},"created_at":"2026-02-01T00:00:00Z","labels":[]}]"#;
+    let fj_items = r#"[{"number":9,"title":"fj","user":{"login":"cat"},"created_at":"2026-03-01T00:00:00Z","labels":[{"name":"x"}]}]"#;
+    let (url, log) = mock(vec![
+        ("GET", "/repos/o/r/issues", hub_issues.into()),
+        ("GET", "/repos/o/r/pulls", gh_pulls.into()),
+        ("GET", "/projects/project%2Fx/issues", lab_issues.into()),
+        ("GET", "/projects/project%2Fx/merge_requests", gl_mrs.into()),
+        ("GET", "/repos/f/r/issues", fj_items.into()),
+    ])
+    .await;
+    let api = |gl| Api::new(&url, "t".to_string().into(), gl).unwrap();
+    let nums = |v: Vec<Listed>| v.into_iter().map(|i| (i.number, i.author, i.labels)).collect::<Vec<_>>();
+    let gh = Forge::GitHub(GitHub::new("github.com", api(false)));
+    let r = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+    assert_eq!(nums(gh.open_items(&r, Target::Issue).await.unwrap()), [(1, "ann".into(), vec!["Bug".to_string()])]);
+    assert_eq!(nums(gh.open_items(&r, Target::Pr).await.unwrap()), [(2, "bob".into(), vec![])]);
+    let gl = Forge::GitLab(GitLab::new("git.drupalcode.org", api(true)));
+    let r = RepoId::new(ForgeKind::GitLab, "git.drupalcode.org", "project/x");
+    assert_eq!(nums(gl.open_items(&r, Target::Issue).await.unwrap()), [(5, "ann".into(), vec!["needs work".to_string()])]);
+    assert_eq!(nums(gl.open_items(&r, Target::Pr).await.unwrap()), [(6, "bob".into(), vec![])]);
+    let fj = Forge::Forgejo(Forgejo::new("codeberg.org", api(false)));
+    let r = RepoId::new(ForgeKind::Forgejo, "codeberg.org", "f/r");
+    assert_eq!(nums(fj.open_items(&r, Target::Pr).await.unwrap()), [(9, "cat".into(), vec!["x".to_string()])]);
+    let log = log.lock().unwrap();
+    let q = |p: &str| log.iter().find(|(_, path, _)| path.starts_with(p)).map(|(_, p, _)| p.clone()).unwrap();
+    assert!(q("/projects/project%2Fx/issues").contains("state=opened"));
+    assert!(q("/repos/f/r/issues").contains("type=pulls"));
+}
+
+/// `nightporter sweep`, from the forge list to queued maintainer jobs: filters apply, your own
+/// PRs are skipped, a repeat queues nothing, and setup problems are refused except on a dry run.
+#[tokio::test]
+async fn sweep_queues_triage_jobs_for_the_backlog() {
+    use crate::forge::{Pick, Target, Verb};
+    let issues = r#"[{"number":10,"title":"old bug","user":{"login":"ann"},"created_at":"2025-01-01T00:00:00Z","labels":[{"name":"bug"}]},
+                     {"number":11,"title":"new","user":{"login":"bob"},"created_at":"2026-11-01T00:00:00Z","labels":[{"name":"bug"}]},
+                     {"number":12,"title":"no label","user":{"login":"cat"},"created_at":"2025-02-01T00:00:00Z","labels":[]}]"#;
+    let pulls = r#"[{"number":1,"title":"mine","user":{"login":"me"},"created_at":"2026-01-01T00:00:00Z"},
+                    {"number":3,"title":"theirs","user":{"login":"dan"},"created_at":"2026-01-02T00:00:00Z"}]"#;
+    let w = world_with(
+        "[maintainer]\nenabled = true",
+        vec![("GET", "/repos/o/r/issues", issues.into()), ("GET", "/repos/o/r/pulls", pulls.into())],
+    )
+    .await;
+    let old = Pick { labels: vec!["bug".into()], created_before: Some("2026-06-01T00:00:00Z".parse().unwrap()), ..Default::default() };
+    let rep = crate::sweep::run(&w.ctx, &w.repo, Target::Issue, Verb::Triage, old.clone(), true).await.unwrap();
+    assert_eq!((rep.picked.iter().map(|i| i.number).collect::<Vec<_>>(), rep.queued), (vec![10], 0), "dry run queues nothing");
+    let rep = crate::sweep::run(&w.ctx, &w.repo, Target::Issue, Verb::Triage, old.clone(), false).await.unwrap();
+    assert_eq!(rep.queued, 1);
+    assert_eq!(crate::sweep::run(&w.ctx, &w.repo, Target::Issue, Verb::Triage, old, false).await.unwrap().queued, 0);
+    let prs = crate::sweep::run(&w.ctx, &w.repo, Target::Pr, Verb::Review, Pick::default(), true).await.unwrap();
+    assert_eq!(prs.picked.iter().map(|i| i.number).collect::<Vec<_>>(), [3], "your own PRs are skipped");
+    daemon::dispatch(&w.ctx).unwrap();
+    let jobs = w.ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+    assert_eq!(jobs.len(), 1);
+    let j = &jobs[0];
+    assert_eq!((j.number, j.mode.as_str(), j.level.as_str()), (10, "maintainer", "draft"));
+
+    // Maintainer mode off: refused, but a dry run still lists.
+    let off = world_with("", vec![("GET", "/repos/o/r/issues", issues.into())]).await;
+    let err = crate::sweep::run(&off.ctx, &off.repo, Target::Issue, Verb::Triage, Pick::default(), false).await.err().unwrap();
+    assert!(err.to_string().contains("maintainer mode is off"), "{err}");
+    assert_eq!(crate::sweep::run(&off.ctx, &off.repo, Target::Issue, Verb::Triage, Pick::default(), true).await.unwrap().picked.len(), 3);
+}
+
+/// `deny_teams` must see every member: a GitLab group member on page two still counts, and the
+/// list is fetched once per hour, not per event.
+#[tokio::test]
+async fn gitlab_group_members_are_read_past_the_first_page() {
+    use crate::forge::gitlab::GitLab;
+    let (url, log) = mock(vec![
+        ("GET", "/groups/core/members/all", "NEXT /groups/core/members/all/p2\n[{\"id\":1,\"username\":\"ann\"}]".into()),
+        ("GET", "/groups/core/members/all/p2", r#"[{"id":2,"username":"Mallory"}]"#.into()),
+    ])
+    .await;
+    let gl = GitLab::new("git.example.org", Api::new(&url, "t".to_string().into(), true).unwrap());
+    assert!(gl.in_team("core", "mallory").await.unwrap());
+    assert!(gl.in_team("core", "ann").await.unwrap());
+    assert!(!gl.in_team("core", "bob").await.unwrap());
+    assert_eq!(log.lock().unwrap().len(), 2, "cached after the first lookup");
+}
+
+/// Lists that fail open when cut short (team members for `deny_teams`) must be read to the end.
+#[tokio::test]
+async fn get_every_refuses_a_partial_list() {
+    let (url, _) = mock(vec![("GET", "/m", "NEXT /m/p2\n[1]".into()), ("GET", "/m/p2", "[2]".into())]).await;
+    let api = Api::new(&url, "t".to_string().into(), false).unwrap();
+    assert_eq!(api.get_all::<u32>("/m", 1).await.unwrap(), vec![1], "get_all stops at the cap");
+    assert!(api.get_every::<u32>("/m", 1).await.is_err(), "get_every won't");
+    assert_eq!(api.get_every::<u32>("/m", 5).await.unwrap(), vec![1, 2]);
+}
+
+/// Error handling keys off the real status, not text a server could put in a body.
+#[tokio::test]
+async fn http_errors_carry_their_status() {
+    use anyhow::Context as _;
+    let (url, _) = mock(vec![("GET", "/ok", r#"{"message":"HTTP 404 (not really)"}"#.into())]).await;
+    let api = Api::new(&url, "t".to_string().into(), false).unwrap();
+    let e = api.get::<serde_json::Value>("/missing").await.unwrap_err();
+    assert_eq!(crate::http::status(&e), Some(404));
+    assert_eq!(crate::http::status(&Err::<(), _>(e).context("wrapped").unwrap_err()), Some(404));
+    assert!(api.get::<serde_json::Value>("/ok").await.is_ok());
+    assert_eq!(crate::http::status(&anyhow::anyhow!("HTTP 404 in a message")), None);
 }

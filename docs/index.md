@@ -12,8 +12,8 @@ hero:
       text: Configuration
       link: /configuration
 features:
-  - title: What's new in 0.3
-    details: Day and night shifts, notifications on your phone, approve from a PR comment, Forgejo/Gitea, Gemini CLI (experimental).
+  - title: What's new in 0.4
+    details: Sweep an issue backlog, a Worktrees tab with undo, hand off to pi, Cursor, Copilot and more, a model per agent.
     link: /whats-new
   - title: Getting started
     details: Install, run the setup wizard, subscribe to a repo and see your first job.

@@ -70,9 +70,10 @@ pub fn parse_remote(url: &str, accounts: &[Account]) -> Option<RepoId> {
         rest.split_once(':')?
     };
     let host = host.to_ascii_lowercase();
-    let acct = accounts.iter().find(|a| a.host() == host)?;
+    let acct = accounts.iter().find(|a| a.matches_host(&host))?;
     let path = path.trim_end_matches('/').trim_end_matches(".git");
-    (path.contains('/')).then(|| RepoId::new(acct.forge, &host, path))
+    // Keyed by the account's host, not the alias, so it matches what the forge reports.
+    (path.contains('/')).then(|| RepoId::new(acct.forge, acct.host(), path))
 }
 
 #[cfg(test)]
@@ -104,6 +105,23 @@ mod tests {
         assert_eq!(parse_remote("git@codeberg.org:o/r.git", &a), fj);
         assert_eq!(parse_remote("https://codeberg.org/o/r.git", &a), fj);
         assert_eq!(parse_remote("git@bitbucket.org:o/r.git", &a), None);
+    }
+
+    #[test]
+    fn host_aliases() {
+        let a: Vec<Account> = toml::from_str::<toml::Table>(
+            "[[a]]\nforge='github'\naliases=['github-work']\n[[a]]\nforge='gitlab'\nhost='git.drupalcode.org'",
+        )
+        .unwrap()["a"]
+            .clone()
+            .try_into()
+            .unwrap();
+        let drupal = Some(RepoId::new(ForgeKind::GitLab, "git.drupalcode.org", "project/ai_provider_amazeeio"));
+        assert_eq!(parse_remote("git@git.drupal.org:project/ai_provider_amazeeio.git", &a), drupal);
+        assert_eq!(parse_remote("https://git.drupal.org/project/ai_provider_amazeeio.git", &a), drupal);
+        assert_eq!(parse_remote("git@GitHub-Work:me/r.git", &a), Some(RepoId::new(ForgeKind::GitHub, "github.com", "me/r")));
+        // The built-in alias only applies to the account it aliases.
+        assert_eq!(parse_remote("git@git.drupal.org:project/x.git", &a[..1]), None);
     }
 
     #[test]

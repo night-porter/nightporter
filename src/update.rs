@@ -89,5 +89,30 @@ mod tests {
     fn compares_versions() {
         assert!(super::newer("0.2.0", "0.1.9") && super::newer("v0.10.0", "0.9.3") && super::newer("1.0.0", "0.99.99"));
         assert!(!super::newer("0.1.1", "0.1.1") && !super::newer("0.1.0", "0.1.1") && !super::newer("garbage", "0.1.0"));
+        assert!(super::newer("0.3.1-rc.1", "0.3.0") && !super::newer("1.2", "0.1.0"), "suffixes ignored, short versions never newer");
+    }
+
+    #[test]
+    fn banner_only_for_a_newer_release() {
+        let db = crate::state::Db::memory().unwrap();
+        assert!(super::banner(&db).is_none());
+        db.set("latest_version", super::CURRENT).unwrap();
+        assert!(super::available(&db).is_none() && super::banner(&db).is_none());
+        db.set("latest_version", "999.0.0").unwrap();
+        let b = super::banner(&db).unwrap();
+        assert!(b.starts_with(&format!("Night Porter 999.0.0 is out (you have {}): ", super::CURRENT)), "{b}");
+        assert!(b.ends_with(super::how_to_upgrade()));
+    }
+
+    #[tokio::test]
+    async fn daily_check_waits_a_day() {
+        let db = std::sync::Mutex::new(crate::state::Db::memory().unwrap());
+        let recent = (crate::state::now() - 60).to_string();
+        db.lock().unwrap().set("update_checked_at", &recent).unwrap();
+        // Checked a minute ago: no request, nothing changes.
+        super::daily_check(&db).await;
+        let db = db.lock().unwrap();
+        assert_eq!(db.get("update_checked_at").unwrap().as_deref(), Some(recent.as_str()));
+        assert!(db.get("latest_version").unwrap().is_none());
     }
 }

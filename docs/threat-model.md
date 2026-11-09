@@ -91,7 +91,12 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
 - The generated agent settings deny `git push`, `gh`, `glab`, `tea`, `fj` and network commands, deny
   reading credential files (`~/.ssh`, `~/.config/gh`, `~/.config/tea`, `~/.git-credentials`, ...) and Night
   Porter's own config, state database, log and other jobs' files, and only
-  allow git subcommands that can't write outside the repo (`git log/diff/show` take `--output`).
+  allow git subcommands that can't write outside the repo (`git log/diff/show` and `git stash
+  show` take `--output`; only `git stash push` and `pop` are allowed).
+- The agent can write to the clone's git dir (it commits there), and Night Porter's own git calls
+  read that dir's config outside the sandbox. So the clone's `config` and the worktree's
+  `config.worktree`, `commondir` and `gitdir` are compared before and after every agent run; any
+  change is put back and the job fails.
 - Claude Code runs with `--setting-sources user`, so a branch's `.claude/settings.json` (hooks,
   permission allows) is ignored. Your own `~/.claude/settings.json` still loads (that's where
   your login comes from), but hooks are switched off for jobs (`disableAllHooks`) and Night
@@ -175,6 +180,8 @@ detected. `reproduce` jobs that may run commands need
 the same approval. The TUI shows
 which build files changed (`composer.json`, `package.json`, `Makefile`, CI files) before you
 approve. Environment commands only ever come from your own config, never from the repository.
+Taking over such a job (`h`, `nightporter handoff`) is refused until you've approved the run at
+its current head: an interactive agent in that worktree loads the branch's own agent config.
 
 Environment commands run outside the agent's sandbox, and what they do depends on files in the
 worktree. So Night Porter copies the files they typically read (`.ddev/`, `.devcontainer/`,

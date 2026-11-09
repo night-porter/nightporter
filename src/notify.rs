@@ -219,10 +219,24 @@ pub fn payload(format: WebhookFormat, ev: &Event) -> (Vec<(&'static str, String)
             (vec![], json!({ "text": text }).to_string(), JSON)
         }
         WebhookFormat::Discord => {
-            let mut text = format!("**{head}**\n{}", ev.summary);
-            for line in [pr, ev.url.as_deref()].into_iter().flatten() {
+            // Escape Markdown, so a PR title can't render as a masked link or fake formatting.
+            let esc = |s: &str| {
+                s.chars().fold(String::new(), |mut o, c| {
+                    if "\\*_~`|[]()<>#-".contains(c) {
+                        o.push('\\');
+                    }
+                    o.push(c);
+                    o
+                })
+            };
+            let mut text = format!("**{}**\n{}", esc(&head), esc(&ev.summary));
+            if let Some(t) = pr {
                 text.push('\n');
-                text.push_str(line);
+                text.push_str(&esc(t));
+            }
+            if let Some(u) = &ev.url {
+                text.push('\n');
+                text.push_str(u);
             }
             // Discord's limit is 2000 characters.
             let text: String = text.chars().take(1900).collect();
@@ -376,7 +390,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["allowed_mentions"]["parse"], json!([]));
         let c = v["content"].as_str().unwrap();
-        assert!(c.starts_with("**Night Porter: grp/proj#7**") && c.ends_with("/-/merge_requests/7"));
+        assert!(c.starts_with("**Night Porter: grp/proj\\#7**") && c.ends_with("/-/merge_requests/7"), "{c}");
+        let mut e = ev();
+        e.pr_title = Some("[Approve job](https://evil.example)".into());
+        let (_, body, _) = payload(WebhookFormat::Discord, &e);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["content"].as_str().unwrap().contains("\\[Approve job\\]\\(https://evil.example\\)"));
     }
 
     #[test]
@@ -402,6 +421,71 @@ mod tests {
         assert_eq!(v["summary"], "checks need you");
         t.command = vec!["false".into()];
         assert!(deliver(&t, &ev()).await.is_err());
+    }
+
+    fn webhook(url: Option<String>, url_env: Option<&str>, format: WebhookFormat) -> NotifyTarget {
+        let mut t: NotifyTarget = toml::from_str("name = \"hook\"\ntype = \"webhook\"").unwrap();
+        (t.url, t.url_env, t.format) = (url, url_env.map(Into::into), format);
+        t
+    }
+
+    #[tokio::test]
+    async fn webhooks_post_the_payload() {
+        let (base, log) = crate::e2e_tests::mock(vec![("POST", "/hook", "{}".into())]).await;
+        deliver(&webhook(Some(format!("{base}/hook")), None, WebhookFormat::Slack), &ev()).await.unwrap();
+        let (method, path, body) = log.lock().unwrap()[0].clone();
+        assert_eq!((method.as_str(), path.as_str()), ("POST", "/hook"));
+        assert!(body.contains("Night Porter: grp/proj#7"), "{body}");
+
+        let e = deliver(&webhook(Some(format!("{base}/missing")), None, WebhookFormat::Json), &ev()).await.unwrap_err();
+        assert_eq!(e.to_string(), "HTTP 404 Not Found");
+        let e = deliver(&webhook(None, Some("NIGHTPORTER_TEST_UNSET_HOOK"), WebhookFormat::Json), &ev()).await.unwrap_err();
+        assert!(e.to_string().contains("NIGHTPORTER_TEST_UNSET_HOOK is not set"));
+        assert_eq!(deliver(&webhook(None, None, WebhookFormat::Json), &ev()).await.unwrap_err().to_string(), "no url");
+        let mut t = target(&[]);
+        t.command.clear();
+        assert_eq!(deliver(&t, &ev()).await.unwrap_err().to_string(), "empty command");
+    }
+
+    #[tokio::test]
+    async fn test_sends_to_the_named_targets_and_reports_each() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("ev.json");
+        let mut n = Notifications::default();
+        let mut ok = target(&[Kind::Done]);
+        ok.name = "phone".into();
+        ok.command = vec!["sh".into(), "-c".into(), format!("cat > '{}'", out.display())];
+        let mut bad = target(&[]);
+        bad.name = "broken".into();
+        bad.command = vec!["false".into()];
+        n.targets = vec![ok, bad];
+
+        assert_eq!(test(&n, Some("phone")).await.unwrap(), "phone: sent");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v["kind"], "needs_approval", "kinds are ignored by a test: {v}");
+        let e = test(&n, Some("broken")).await.unwrap_err().to_string();
+        assert!(e.starts_with("broken: failed: false exited with") && e.ends_with("1 failed"), "{e}");
+        let e = test(&n, Some("nope")).await.unwrap_err().to_string();
+        assert_eq!(e, "no notification target \"nope\"; there are: desktop, phone, broken");
+    }
+
+    #[test]
+    fn popup_shows_the_pr_title_above_the_summary() {
+        let p = popup(&ev());
+        assert_eq!(p.summary, "Night Porter: grp/proj#7");
+        assert_eq!(p.body, "Fix <!channel> & @everyone\nchecks need you");
+        let mut e = ev();
+        e.pr_title = Some(String::new());
+        assert_eq!(popup(&e).body, "checks need you");
+    }
+
+    #[test]
+    fn desktop_toggles_per_kind() {
+        let n = Notifications { needs_approval: false, ..Notifications::default() };
+        assert!(!desktop_on(&n, Kind::NeedsApproval));
+        assert_eq!(desktop_on(&n, Kind::NewAuthor), n.new_author);
+        assert_eq!(web_url(&RepoId::new(ForgeKind::GitLab, "gitlab.com", "g/p"), Target::Issue, 2), "https://gitlab.com/g/p/-/issues/2");
+        assert_eq!(web_url(&RepoId::new(ForgeKind::Forgejo, "codeberg.org", "o/r"), Target::Pr, 2), "https://codeberg.org/o/r/pulls/2");
     }
 
     #[test]

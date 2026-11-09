@@ -33,8 +33,12 @@ nightporter retry <id>      # run the same requests again
 nightporter dismiss <id>... # put jobs away: nothing pushed or posted; they stay in History
 nightporter restore <id>    # bring a dismissed job back
 nightporter purge <id>...   # delete finished or dismissed jobs and their logs for good (asks; --yes skips)
+nightporter sweep <repo> --dry-run [--prs] [--label L] [--older-than 90d] [--newer-than 14d]
+                            # list open issues (or PRs/MRs) a backlog sweep would queue; without
+                            # --dry-run it queues maintainer jobs (ask the user first)
 nightporter handoff <id>    # open the job with a briefed agent in herdr, Rex, tmux, Zellij or a new
                             # terminal (config `handoff`; `auto` falls back to printing the command)
+nightporter worktrees       # Night Porter's worktrees; `rm <id>` removes one, `restore <id>` undoes
 nightporter notify test [target]  # send a sample notification to the desktop and/or webhook and
                             # command targets ([[notifications.targets]]); it reaches real people
 nightporter inbox allow-once <event> | allow <user> --repo <r> | deny <user> --repo <r> | ignore <event>

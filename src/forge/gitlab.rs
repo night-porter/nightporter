@@ -89,6 +89,8 @@ struct Note {
     system: bool,
     created_at: String,
     #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
     position: Option<Position>,
 }
 #[derive(Deserialize)]
@@ -189,32 +191,22 @@ impl GitLab {
             cur.since = Some(started);
         }
 
-        let due = cur.last_sweep.is_none_or(|t| crate::state::now() - t >= i64::try_from(self.sweep_every.as_secs()).unwrap_or(i64::MAX));
-        if due {
-            cur.last_sweep = Some(crate::state::now());
+        if cur.sweep_due(self.sweep_every) {
             // All open MRs, not just the ones updated since the last poll: CI can go red without
             // the MR itself changing.
-            let open: Vec<Mr> = match self.api.get_all("/merge_requests?scope=created_by_me&state=opened&per_page=100", 10).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("sweep: {e:#}");
-                    vec![]
-                }
-            };
-            for mr in open.iter().filter(|m| self.subscribed.contains(&self.repo(&m.references.full).path)) {
-                let repo = self.repo(&mr.references.full);
-                match self.sweep_one(&repo, mr.project_id, mr.iid).await {
-                    Ok((evs, status)) => {
-                        // First sweep only records state (see GitHub).
-                        if cur.swept {
-                            out.extend(evs);
-                        }
-                        cur.seen_status.insert(format!("{}#{}", repo.key(), mr.iid), status);
+            match self.api.get_all::<Mr>("/merge_requests?scope=created_by_me&state=opened&per_page=100", 10).await {
+                Ok(open) => {
+                    for mr in open.iter().filter(|m| self.subscribed.contains(&self.repo(&m.references.full).path)) {
+                        let repo = self.repo(&mr.references.full);
+                        let r = self.sweep_one(&repo, mr.project_id, mr.iid).await;
+                        cur.record(format!("{}#{}", repo.key(), mr.iid), r, &mut out);
                     }
-                    Err(e) => tracing::warn!("sweep {repo}!{}: {e:#}", mr.iid),
+                    // Only once the list was read: else the next sweep would fire for MRs that
+                    // were already red.
+                    cur.swept = true;
                 }
+                Err(e) => tracing::warn!("sweep: {e:#}"),
             }
-            cur.swept = true;
         }
         Ok(out)
     }
@@ -237,22 +229,19 @@ impl GitLab {
                 }
                 let role = self.role(&pid.to_string(), &n.author).await;
                 let (path, line) = n.position.map(|p| (p.new_path, p.new_line)).unwrap_or_default();
+                let trigger = if path.is_some() { Trigger::ReviewComment } else { Trigger::Comment };
                 out.push(Event {
-                    id: format!("gl-{}-n{}", self.host, n.id),
-                    repo: repo.clone(),
-                    target: Target::Pr,
-                    number: iid,
-                    trigger: if path.is_some() { Trigger::ReviewComment } else { Trigger::Comment },
                     is_bot: n.author.is_bot(),
+                    author_id: n.author.id,
                     author: n.author.username,
                     role,
                     body: n.body,
-                    url: String::new(),
                     thread: Some(d.id.clone()),
                     path,
                     line,
                     created_at: n.created_at,
                     verb,
+                    ..Event::new(format!("gl-{}-n{}", self.host, n.id), repo, Target::Pr, iid, trigger)
                 });
             }
         }
@@ -300,21 +289,14 @@ impl GitLab {
     #[allow(clippy::too_many_arguments)]
     fn request(repo: &RepoId, target: Target, n: u64, id: String, u: &User, role: Role, body: String, at: String, verb: Verb) -> Event {
         Event {
-            id,
-            repo: repo.clone(),
-            target,
-            number: n,
-            trigger: Trigger::Comment,
             author: u.username.clone(),
+            author_id: u.id,
             role,
             is_bot: u.is_bot(),
             body,
-            url: String::new(),
-            thread: None,
-            path: None,
-            line: None,
             created_at: at,
             verb: Some(verb),
+            ..Event::new(id, repo, target, n, Trigger::Comment)
         }
     }
 
@@ -336,7 +318,7 @@ impl GitLab {
             }
             // Not a member: cache. Other errors (5xx, rate limit): don't, so a hiccup doesn't
             // send maintainers to the inbox for an hour.
-            Err(e) if e.to_string().contains("HTTP 404") => {
+            Err(e) if crate::http::status(&e) == Some(404) => {
                 self.roles.put(key, Role::None);
                 Role::None
             }
@@ -356,22 +338,9 @@ impl GitLab {
         let mr = &mr;
         let sha = mr.sha.clone().unwrap_or_default();
         let mut out = Vec::new();
-        let ev = |trigger: Trigger, body: String| Event {
-            id: format!("gl-{}-{}-{}!{}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path, mr.iid),
-            repo: repo.clone(),
-            target: Target::Pr,
-            number: mr.iid,
-            trigger,
-            author: self.me.clone(),
-            role: Role::Owner,
-            is_bot: false,
-            body,
-            url: String::new(),
-            thread: None,
-            path: None,
-            line: None,
-            created_at: now_iso(),
-            verb: None,
+        let ev = |trigger: Trigger, body: String| {
+            let id = format!("gl-{}-{}-{}!{}-{sha}", self.host, crate::state::enum_str(&trigger), repo.path, mr.iid);
+            Event::state(id, repo, mr.iid, trigger, &self.me, body)
         };
         if mr.has_conflicts {
             out.push(ev(Trigger::MergeConflict, format!("This MR has merge conflicts with `{}`.", mr.target_branch)));
@@ -394,7 +363,7 @@ impl GitLab {
         Ok((out, format!("{conflict}{status}")))
     }
 
-    pub async fn mr(&self, repo: &RepoId, iid: u64) -> Result<PrInfo> {
+    pub async fn pr(&self, repo: &RepoId, iid: u64) -> Result<PrInfo> {
         #[derive(Deserialize)]
         struct Proj {
             ssh_url_to_repo: String,
@@ -420,6 +389,25 @@ impl GitLab {
             draft: m.draft,
             body: m.description.unwrap_or_default(),
         })
+    }
+
+    pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
+        #[derive(Deserialize)]
+        struct Item {
+            iid: u64,
+            title: String,
+            author: User,
+            created_at: String,
+            #[serde(default)]
+            labels: Vec<String>,
+        }
+        let kind = if target == Target::Pr { "merge_requests" } else { "issues" };
+        let path = format!("/projects/{}/{kind}?state=opened&per_page=100", enc(&repo.path));
+        let items: Vec<Item> = self.api.get_all(&path, super::LIST_PAGES).await?;
+        Ok(items
+            .into_iter()
+            .map(|i| super::Listed { number: i.iid, title: i.title, author: i.author.username, created_at: i.created_at, labels: i.labels })
+            .collect())
     }
 
     pub async fn issue(&self, repo: &RepoId, iid: u64) -> Result<super::IssueInfo> {
@@ -472,7 +460,7 @@ impl GitLab {
             .rev()
             .filter(|n| !n.system)
             .filter_map(|n| {
-                let control = super::control_of(self.me_id, n.author.id, false, &n.body, &n.created_at, since)?;
+                let control = super::control_of(self.me_id, n.author.id, false, &n.body, &n.created_at, &n.updated_at, since)?;
                 Some(super::ControlComment { id: n.id.to_string(), control })
             })
             .collect())
@@ -485,14 +473,11 @@ impl GitLab {
         Ok(())
     }
 
-    pub async fn in_group(&self, group: &str, user: &str) -> Result<bool> {
-        if let Some(m) = self.groups.get(&group.to_string()) {
-            return Ok(m.iter().any(|x| x.eq_ignore_ascii_case(user)));
-        }
-        let members: Vec<User> = self.api.get(&format!("/groups/{}/members/all?per_page=100", enc(group))).await?;
-        let names: Vec<String> = members.into_iter().map(|u| u.username).collect();
-        let hit = names.iter().any(|x| x.eq_ignore_ascii_case(user));
-        self.groups.put(group.into(), names);
-        Ok(hit)
+    pub async fn in_team(&self, group: &str, user: &str) -> Result<bool> {
+        let fetch = async {
+            let members: Vec<User> = self.api.get_every(&format!("/groups/{}/members/all?per_page=100", enc(group)), 100).await?;
+            Ok(members.into_iter().map(|u| u.username).collect())
+        };
+        self.groups.member(group, user, fetch).await
     }
 }

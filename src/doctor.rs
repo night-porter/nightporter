@@ -100,6 +100,13 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
 }
 
 pub fn run(paths: &Paths) -> bool {
+    let checks = collect(paths, tools, claude_user_settings_check());
+    print(&checks);
+    checks.iter().all(|c| c.ok || c.optional)
+}
+
+/// Every check, with the tool probes and the Claude settings finding passed in (tests stub them).
+fn collect(paths: &Paths, tools: impl Fn(&[(ForgeKind, String)], &[AgentKind]) -> Vec<Check>, claude: Option<Check>) -> Vec<Check> {
     let mut checks = Vec::new();
     let cfg = match Config::load(paths) {
         Ok(c) => {
@@ -138,6 +145,10 @@ pub fn run(paths: &Paths) -> bool {
             }
         }
         checks.extend(tools(&forges, &agents));
+        let h = cfg.handoff_agent;
+        if h != crate::config::HandoffAgent::Job && !agents.iter().any(|a| a.bin() == h.bin()) {
+            checks.push(tool(h.bin(), "--version", &format!("install {} or set handoff_agent = \"job\"", h.label()), false));
+        }
         let dir = cfg.code_dir();
         checks.push(Check {
             name: "code dir".into(),
@@ -164,9 +175,7 @@ pub fn run(paths: &Paths) -> bool {
             });
         }
     }
-    if let Some(c) = claude_user_settings_check() {
-        checks.push(c);
-    }
+    checks.extend(claude);
     let running = paths.daemon_running();
     checks.push(Check {
         name: "daemon".into(),
@@ -175,9 +184,7 @@ pub fn run(paths: &Paths) -> bool {
         detail: if running { "running".into() } else { "not running".into() },
         fix: "nightporter start   (and `nightporter service install` to start it at login)".into(),
     });
-
-    print(&checks);
-    checks.iter().all(|c| c.ok || c.optional)
+    checks
 }
 
 /// Your own Claude Code settings also load for Night Porter's jobs (hooks are switched off, and
@@ -186,6 +193,10 @@ pub fn run(paths: &Paths) -> bool {
 fn claude_user_settings_check() -> Option<Check> {
     let dir =
         std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).or_else(|| std::env::home_dir().map(|h| h.join(".claude")))?;
+    claude_settings_in(&dir)
+}
+
+fn claude_settings_in(dir: &std::path::Path) -> Option<Check> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).ok()?).ok()?;
     Some(claude_settings_finding(&v))
 }
@@ -215,6 +226,12 @@ fn claude_settings_finding(v: &serde_json::Value) -> Check {
 
 /// Text markers, not colour, so it reads the same in any terminal or screen reader.
 pub fn print(checks: &[Check]) {
+    print!("{}", render(checks));
+}
+
+fn render(checks: &[Check]) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
     for c in checks {
         let mark = if c.ok {
             "[ok]  "
@@ -223,11 +240,12 @@ pub fn print(checks: &[Check]) {
         } else {
             "[FAIL]"
         };
-        println!("{mark} {:<22} {}", c.name, c.detail);
+        let _ = writeln!(s, "{mark} {:<22} {}", c.name, c.detail);
         if !c.ok {
-            println!("       fix: {}", c.fix);
+            let _ = writeln!(s, "       fix: {}", c.fix);
         }
     }
+    s
 }
 
 pub fn walk_repo_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
@@ -254,5 +272,102 @@ mod tests {
         let c = super::claude_settings_finding(&v);
         assert!(!c.ok && c.optional && c.detail.contains("1 allow rule(s) and 1 plugin(s)"), "{}", c.detail);
         assert!(super::claude_settings_finding(&serde_json::json!({})).ok);
+    }
+
+    use super::*;
+    use std::cell::RefCell;
+
+    fn check(name: &str, ok: bool, optional: bool) -> Check {
+        Check { name: name.into(), ok, optional, detail: format!("{name} detail"), fix: format!("fix {name}") }
+    }
+
+    #[test]
+    fn renders_text_markers_and_fixes_for_failures() {
+        let s = render(&[check("a", true, false), check("b", false, true), check("c", false, false)]);
+        assert_eq!(
+            s,
+            "[ok]   a                      a detail\n\
+             [warn] b                      b detail\n       fix: fix b\n\
+             [FAIL] c                      c detail\n       fix: fix c\n"
+        );
+    }
+
+    #[test]
+    fn reads_claude_settings_from_the_config_dir() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(claude_settings_in(d.path()).is_none(), "no settings file, no finding");
+        std::fs::write(d.path().join("settings.json"), "not json").unwrap();
+        assert!(claude_settings_in(d.path()).is_none());
+        std::fs::write(d.path().join("settings.json"), r#"{"permissions":{"allow":["a","b"]}}"#).unwrap();
+        assert!(claude_settings_in(d.path()).is_some_and(|c| c.detail.contains("2 allow rule(s) that also apply")));
+    }
+
+    #[test]
+    fn missing_tools_say_how_to_install_them() {
+        let c = tool("nightporter-no-such-tool", "--version", "install it", true);
+        assert!(!c.ok && c.optional && c.detail == "not found on PATH" && c.fix == "install it");
+        let git = tool("git", "--version", "", false);
+        assert!(git.ok && git.detail.starts_with("git version") && git.fix.is_empty(), "{}", git.detail);
+    }
+
+    #[test]
+    fn collects_config_driven_checks() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let code = d.path().join("code");
+        std::fs::write(
+            paths.config_file(),
+            format!(
+                "code_dir = {:?}\nmin_free_gb = 0\n[[accounts]]\nforge = \"github\"\n[[accounts]]\nforge = \"forgejo\"\nhost = \"git.example.org\"\n",
+                code.display().to_string()
+            ),
+        )
+        .unwrap();
+        let repo = crate::forge::RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        std::fs::create_dir_all(paths.repo_file(&repo).parent().unwrap()).unwrap();
+        std::fs::write(paths.repo_file(&repo), "agent = \"codex\"\n").unwrap();
+        std::fs::write(paths.repos_dir().join("github/o/broken.toml"), "agent = \"nope\"\n").unwrap();
+        let seen = RefCell::new(Vec::new());
+        let probe = |f: &[(ForgeKind, String)], a: &[AgentKind]| {
+            seen.borrow_mut().push((f.to_vec(), a.to_vec()));
+            vec![check("gh", true, false)]
+        };
+        let checks = collect(&paths, probe, Some(check("claude settings", false, true)));
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["config", "gh", "code dir", "disk", "claude settings", "daemon"]);
+        assert_eq!(
+            seen.borrow()[0],
+            (
+                vec![(ForgeKind::GitHub, "github.com".into()), (ForgeKind::Forgejo, "git.example.org".into())],
+                vec![AgentKind::Claude, AgentKind::Codex]
+            ),
+            "agents from repo files are probed too; unreadable ones are skipped"
+        );
+        let by = |n: &str| checks.iter().find(|c| c.name == n).unwrap();
+        assert!(!by("code dir").ok, "code dir doesn't exist yet");
+        assert!(by("disk").ok && by("disk").detail.ends_with("GB free (min 0)"));
+        assert!(!by("daemon").ok && by("daemon").optional);
+
+        std::fs::create_dir_all(&code).unwrap();
+        std::fs::write(paths.config_file(), format!("code_dir = {:?}\n", code.display().to_string())).unwrap();
+        let checks = collect(&paths, |_, _| vec![], None);
+        assert!(checks.iter().any(|c| c.name == "code dir" && c.ok));
+        assert!(checks.iter().any(|c| c.name == "accounts" && !c.ok && c.fix.contains("nightporter setup")));
+
+        std::fs::write(paths.config_file(), "nope = [").unwrap();
+        let checks = collect(&paths, |_, _| panic!("no tools are probed without a config"), None);
+        assert_eq!(checks.iter().map(|c| (c.name.as_str(), c.ok)).collect::<Vec<_>>(), [("config", false), ("daemon", false)]);
+        assert!(checks[0].fix.starts_with("edit "));
+    }
+
+    #[test]
+    fn walks_nested_repo_files() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(walk_repo_files(&d.path().join("missing")).unwrap(), Vec::<std::path::PathBuf>::new());
+        std::fs::create_dir_all(d.path().join("github/o")).unwrap();
+        std::fs::write(d.path().join("github/o/r.toml"), "").unwrap();
+        std::fs::write(d.path().join("github/o/notes.txt"), "").unwrap();
+        assert_eq!(walk_repo_files(d.path()).unwrap(), [d.path().join("github/o/r.toml")]);
     }
 }
