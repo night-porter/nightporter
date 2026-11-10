@@ -76,6 +76,9 @@ pub fn build(i: &Input) -> Result<String> {
     let mut p = String::with_capacity(8 * 1024);
     p.push_str(SYSTEM);
     let _ = writeln!(p, "\nNever edit these protected paths either: {}\n", s.checks.protected.join(", "));
+    if s.checks.allow_env_variants {
+        p.push_str("Exception for this repository: you may edit `.env.*` files such as `.env.example` (never `.env` itself). Keep placeholder values only, never real secrets.\n\n");
+    }
     if !s.allow_commands.is_empty() {
         let _ = writeln!(p, "Commands you may run: {}\n", s.allow_commands.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "));
     }

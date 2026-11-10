@@ -1,6 +1,6 @@
 //! Running the coding agent: no forge credentials, restricted tools, bounded time.
 
-use crate::checks::BUILTIN_PROTECTED;
+use crate::checks::protected_globs;
 use crate::config::{AgentKind, RepoSettings};
 use crate::forge::Reply;
 use anyhow::{Context, Result, bail};
@@ -250,7 +250,7 @@ pub fn claude_settings(s: &RepoSettings, wt: &Path, job_dir: &Path, read_only: b
     for p in SECRET_PATHS.iter().map(std::string::ToString::to_string).chain(own_paths()) {
         deny.push(format!("Read({p})"));
     }
-    for g in BUILTIN_PROTECTED.iter().copied().chain(s.checks.protected.iter().map(String::as_str)) {
+    for g in protected_globs(&s.checks) {
         deny.push(format!("Edit({g})"));
         deny.push(format!("Write({g})"));
     }

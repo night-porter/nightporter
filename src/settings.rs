@@ -126,6 +126,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.reply.resolve_threads", Bool, "Resolve review threads after replying."),
     s("defaults.checks.protected", List, "Extra protected path globs (added to the built-in list)."),
     s("defaults.checks.escalate_on", List, "Changes that always need your approval: deps, size."),
+    risky("defaults.checks.allow_env_variants", Bool, "true", "Let jobs edit .env.* files such as .env.example (.env stays protected)."),
     s("defaults.checks.max_diff_lines", Int, "Diff size that counts as large (for escalate_on = size)."),
     s("defaults.env.setup", List, "Commands run before the agent, e.g. ddev start"),
     s("defaults.env.teardown", List, "Commands run after the job."),
