@@ -160,9 +160,19 @@ impl Diff {
     }
 }
 
-fn globs(extra: &[String]) -> GlobSet {
+/// Env-file variants (`.env.example`, `.env.local`, …). Unprotected by `checks.allow_env_variants`.
+const ENV_VARIANTS: &str = "**/.env.*";
+
+/// The protected globs for a repo: built-ins plus its extras. `allow_env_variants` drops only
+/// [`ENV_VARIANTS`]: a bare `.env` stays protected and the secrets scan still reads every line.
+pub fn protected_globs(c: &Checks) -> impl Iterator<Item = &str> {
+    let skip_env = c.allow_env_variants;
+    BUILTIN_PROTECTED.iter().copied().filter(move |g| !(skip_env && *g == ENV_VARIANTS)).chain(c.protected.iter().map(String::as_str))
+}
+
+fn globs(c: &Checks) -> GlobSet {
     let mut b = GlobSetBuilder::new();
-    for g in BUILTIN_PROTECTED.iter().copied().chain(extra.iter().map(String::as_str)) {
+    for g in protected_globs(c) {
         // Case-insensitive: on macOS `Claude.md` *is* `CLAUDE.md`.
         if let Ok(g) = GlobBuilder::new(g).case_insensitive(true).build() {
             b.add(g);
@@ -200,7 +210,7 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
     }
     push("secrets", hits.is_empty(), true, hits.join("\n"));
 
-    let set = globs(&cfg.protected);
+    let set = globs(cfg);
     let mut prot: Vec<&str> = d.paths().filter(|p| set.is_match(p)).collect();
     prot.dedup();
     push("protected paths", prot.is_empty(), true, prot.join(", "));
@@ -293,6 +303,18 @@ mod tests {
             let r = run(&Checks::default(), &d, None, &[]);
             assert!(r.iter().any(|c| c.name == "protected paths" && !c.ok), "{p} should be protected");
         }
+    }
+
+    #[test]
+    fn allow_env_variants_unprotects_env_star_only() {
+        let hit = |c: &Checks, p: &str| {
+            let d = Diff { files: vec![FileStat { path: p.into(), added: 1, removed: 0 }], fast_forward: true, ..Default::default() };
+            run(c, &d, None, &[]).iter().any(|r| r.name == "protected paths" && !r.ok)
+        };
+        let on = Checks { allow_env_variants: true, ..Checks::default() };
+        assert!(hit(&Checks::default(), ".env.example"));
+        assert!(!hit(&on, ".env.example") && !hit(&on, "app/.env.dist"));
+        assert!(hit(&on, ".env") && hit(&on, "sub/.env") && hit(&on, ".envrc"));
     }
 
     fn cfg() -> Checks {

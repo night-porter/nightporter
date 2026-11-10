@@ -76,7 +76,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `notify` | everywhere | where notifications go: `"desktop"` and/or [target](#notification-targets) names, e.g. `["desktop", "phone"]` |
 | `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz`, and optionally `level`, `agent`, `notify` for that window; see [Working hours](/advanced#working-hours) |
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
-| `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`) |
+| `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
 | `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_runs_code` (`false`: reviews only read the code) |
 
@@ -93,7 +93,7 @@ global deny.
   still stop at `draft` unless `ci_auto`, and a window can lower maintainer jobs but never raise
   them.
 - The secrets, protected-path, history and Night Porter-file checks always run. Protected paths
-  include CI configs, CODEOWNERS, `.env*`, keys, and the agent instruction files `CLAUDE.md`,
+  include CI configs, CODEOWNERS, `.env*` (`checks.allow_env_variants = true` frees `.env.*` for one repo; `.env` stays), keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `GEMINI.md`, `.claude/`, `.opencode/`, `.codex/`, `.gemini/`, `.cursor/`.
 - Night Porter never merges, force-pushes, closes or approves.
 

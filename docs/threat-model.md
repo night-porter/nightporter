@@ -158,7 +158,7 @@ Run on every push, in every mode, including `auto`:
 | check | can be disabled? |
 |---|---|
 | secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
-| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab, Forgejo/Gitea Actions, Woodpecker and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list) |
+| protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab, Forgejo/Gitea Actions, Woodpecker and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list; the one opt-out, `checks.allow_env_variants`, frees `.env.*` templates and keeps `.env` protected and the secrets scan on) |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |

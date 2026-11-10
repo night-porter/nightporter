@@ -529,6 +529,9 @@ pub struct Checks {
     pub escalate_on: Vec<Escalation>,
     #[serde(default = "five_hundred")]
     pub max_diff_lines: usize,
+    /// Let jobs edit `.env.*` files (`.env.example` and friends). A bare `.env` stays protected.
+    #[serde(default)]
+    pub allow_env_variants: bool,
 }
 
 impl Default for Checks {
