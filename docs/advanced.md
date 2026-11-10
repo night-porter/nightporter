@@ -92,6 +92,24 @@ goes to the inbox.
 Bots are never trusted by role. A bot that isn’t in `allow_bots` is dropped, not sent to the inbox,
 so add review bots like CodeRabbit by name if you want Night Porter to act on them.
 
+### Review bots
+
+Once a bot is in `allow_bots`, every job on your own PR also reads the PR's review threads and
+takes the bot's unresolved ones that you haven't answered yet, so the agent works through the
+whole review, not only the comment that started the job. That covers a job started by a failing
+"review score" check (Greptile's confidence gate, say) and comments the bot left before you
+allowed it. GitHub only for now.
+
+```toml
+[defaults.trust]
+allow_bots = ["greptile-apps[bot]"]
+```
+
+After a job pushes commits for a bot's findings, Night Porter asks the bot for a new review when
+it has a command for that (Greptile: an `@greptile review` comment, posted as you). The new
+review's comments start the next job. This stops after `max_ci_attempts` rounds (3) per PR:
+further comments from the bot on that PR are dropped and you get a notification.
+
 `trust.open = true` lets anyone through, and caps the level at `suggest`.
 
 ## Only some triggers

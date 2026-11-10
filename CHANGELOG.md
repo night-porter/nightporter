@@ -6,6 +6,18 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Review bots in `trust.allow_bots` get their whole review handled (GitHub): a job on your own
+  PR also takes the bot's unresolved review threads you haven't answered, read from the PR
+  itself. After the push, Night Porter asks Greptile for a new review (`@greptile review`), and
+  stops after `max_ci_attempts` rounds per PR.
+
+### Fixed
+
+- A job started by a failing review-score check (Greptile's confidence gate) only saw the
+  check's title, not the review comments behind the score, and changed nothing.
+
 ## [0.4.3] - 2026-11-10
 
 ### Added

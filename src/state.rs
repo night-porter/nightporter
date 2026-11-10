@@ -312,6 +312,14 @@ impl Db {
         rows.map(|j| Ok(serde_json::from_str(&j?)?)).collect()
     }
 
+    /// Give a running job one more event, whatever happened to it before (never seen, dropped,
+    /// still pending): the job found it on the PR itself.
+    pub fn take_event(&self, job_id: i64, e: &Event) -> Result<()> {
+        self.add_event(e, Disposition::Taken, "open review thread")?;
+        self.0.execute("UPDATE events SET disposition='taken', job_id=?2 WHERE id=?1", params![e.id, job_id])?;
+        Ok(())
+    }
+
     // ---- jobs ----
     /// Create a job and atomically take the given pending events.
     pub fn create_job(&mut self, repo: &RepoId, target: Target, number: u64, mode: &str, level: &str, event_ids: &[String]) -> Result<i64> {
@@ -438,6 +446,14 @@ impl Db {
     }
     pub fn set_ci_attempts(&self, repo: &RepoId, number: u64, n: u32) -> Result<()> {
         self.set(&format!("ci:{}#{number}", repo.key()), &n.to_string())
+    }
+
+    /// Jobs started by a review bot's comments on a PR. Never reset: a cap per PR.
+    pub fn bot_rounds(&self, repo: &RepoId, number: u64) -> Result<u32> {
+        Ok(self.get(&format!("bot:{}#{number}", repo.key()))?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+    pub fn set_bot_rounds(&self, repo: &RepoId, number: u64, n: u32) -> Result<()> {
+        self.set(&format!("bot:{}#{number}", repo.key()), &n.to_string())
     }
 
     pub fn log(&self, job: i64, line: &str) -> Result<()> {

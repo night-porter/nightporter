@@ -227,6 +227,45 @@ async fn draft_flow_end_to_end() {
 }
 
 #[tokio::test]
+async fn open_threads_of_allowed_bots_join_the_job_and_get_a_new_review() {
+    let thread = |id: u64, resolved: bool, login: &str, last: &str| {
+        format!(
+            r#"{{"isResolved":{resolved},"first":{{"nodes":[{{"databaseId":{id},"author":{{"login":"{login}","__typename":"Bot"}},"body":"finding {id}","path":"a.txt","line":2,"createdAt":"2026-11-05T09:00:00Z","url":""}}]}},"last":{{"nodes":[{{"author":{{"login":"{last}"}}}}]}}}}"#
+        )
+    };
+    // 77: open. 78: resolved. 79: already answered by me. 80: a bot nobody allowed.
+    let threads = [
+        thread(77, false, "greptile-apps", "greptile-apps"),
+        thread(78, true, "greptile-apps", "greptile-apps"),
+        thread(79, false, "greptile-apps", "me"),
+        thread(80, false, "other-app", "other-app"),
+    ]
+    .join(",");
+    let gql = format!(r#"{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[{threads}]}}}}}}}}}}"#);
+    let w = world_with(
+        "[trust]\nallow_bots = [\"greptile-apps[bot]\"]",
+        vec![("POST", "/graphql", gql), ("POST", "/repos/o/r/pulls/1/comments/77/replies", "{}".into())],
+    )
+    .await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    job::run(ctx, id).await.unwrap();
+    let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
+    assert!(prompt.contains("finding 77") && prompt.contains("automated code reviewer"), "{prompt}");
+    assert!(!prompt.contains("finding 78") && !prompt.contains("finding 79") && !prompt.contains("finding 80"));
+
+    ctx.db(|d| actions::approve(d, id, false).map(|_| ())).unwrap();
+    job::deliver(ctx, id).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Done);
+    let log = w.log.lock().unwrap();
+    assert!(log.iter().any(|(m, p, _)| m == "POST" && p == "/repos/o/r/pulls/1/comments/77/replies"), "reply in the bot's thread");
+    let asks = log.iter().filter(|(m, p, b)| m == "POST" && p == "/repos/o/r/issues/1/comments" && b.contains("@greptile review")).count();
+    assert_eq!(asks, 1, "one request for a new review after the push");
+}
+
+#[tokio::test]
 async fn rejected_job_never_starts() {
     let w = world("").await;
     let ctx = &w.ctx;

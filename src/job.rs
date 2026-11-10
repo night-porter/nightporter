@@ -106,6 +106,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return finish(ctx, &mut j, format!("{} new event(s); observe only", events.len()));
     }
 
+    let events = with_bot_threads(ctx, &j, &s, events).await?;
     let Some(w) = prepare(ctx, &mut j, &cfg.accounts, &s, &events).await? else {
         return Ok(());
     };
@@ -128,6 +129,45 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let outcome = run_agent(ctx, &mut j, &s, &w, &job_dir, &events).await?;
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
+}
+
+/// On your own PR, add the open review threads of bots in `trust.allow_bots` to the job, read
+/// from the PR itself: a job started by something else (a failing "review score" check, a
+/// person's comment) still sees the whole bot review, including comments from before the bot
+/// was allowed. A failed read only costs the extra threads.
+async fn with_bot_threads(ctx: &Ctx, j: &Job, s: &RepoSettings, mut events: Vec<Event>) -> Result<Vec<Event>> {
+    if j.target != Target::Pr || j.meta.verb.is_some() || s.trust.allow_bots.is_empty() {
+        return Ok(events);
+    }
+    let threads = match ctx.forge(&j.repo)?.lock().await.open_threads(&j.repo, j.number).await {
+        Ok(t) => t,
+        Err(e) => {
+            log(ctx, j.id, &format!("could not read open review threads: {e:#}"));
+            return Ok(events);
+        }
+    };
+    let before = events.len();
+    for e in threads {
+        let trusted =
+            e.is_bot && matches!(crate::trust::decide(&s.trust, &e.author, e.role, true, |_| false), crate::trust::Decision::Trusted(_));
+        if trusted && !events.iter().any(|x| x.id == e.id) {
+            ctx.db(|d| d.take_event(j.id, &e))?;
+            events.push(e);
+        }
+    }
+    if events.len() > before {
+        log(ctx, j.id, &format!("added {} open review thread(s) from trusted bots", events.len() - before));
+    }
+    Ok(events)
+}
+
+/// The comment that asks a review bot for a fresh review, for bots that have one and don't
+/// reliably re-review on push by themselves.
+fn retrigger(bot: &str) -> Option<&'static str> {
+    match bot.to_ascii_lowercase().as_str() {
+        "greptile-apps[bot]" => Some("@greptile review"),
+        _ => None,
+    }
 }
 
 /// Resolve where to fetch from and push to, and prepare the worktree. `None`: the job was
@@ -478,6 +518,19 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             && let Err(e) = f.resolve(&j.repo, j.number, t).await
         {
             log(ctx, id, &format!("could not resolve thread {t}: {e:#}"));
+        }
+    }
+    // New commits went up on a bot's findings: ask it to look again (once per bot).
+    if has_code {
+        let mut asked = Vec::new();
+        for cmd in events.iter().filter(|e| e.is_bot).filter_map(|e| retrigger(&e.author)) {
+            if !asked.contains(&cmd) {
+                asked.push(cmd);
+                match f.reply(&j.repo, j.target, j.number, None, &format!("{cmd}\n{}", prompts::FOOTER_MARK)).await {
+                    Ok(()) => log(ctx, id, &format!("asked for a new review: {cmd}")),
+                    Err(e) => log(ctx, id, &format!("could not ask for a new review ({cmd}): {e:#}")),
+                }
+            }
         }
     }
     drop(f);
