@@ -128,6 +128,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.checks.escalate_on", List, "Changes that always need your approval: deps, size."),
     risky("defaults.checks.allow_env_variants", Bool, "true", "Let jobs edit .env.* files such as .env.example (.env stays protected)."),
     s("defaults.checks.max_diff_lines", Int, "Diff size that counts as large (for escalate_on = size)."),
+    s("defaults.env.install", Bool, "Install dependencies from lockfiles before the agent (composer, npm, pnpm, yarn, cargo)."),
     s("defaults.env.setup", List, "Commands run before the agent, e.g. ddev start"),
     s("defaults.env.teardown", List, "Commands run after the job."),
     s("defaults.env.cleanup", List, "Commands run when the worktree is removed."),
@@ -442,6 +443,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  may run        {}", list(&s.allow_commands));
     let esc: Vec<String> = s.checks.escalate_on.iter().map(crate::state::enum_str).collect();
     let _ = writeln!(o, "  always ask on  {}   protected extra: {}", esc.join(", "), list(&s.checks.protected));
+    let _ = writeln!(o, "  env install    {}", on(s.env.install));
     let _ = writeln!(o, "  env setup      {}", list(&s.env.setup));
 
     let _ = writeln!(o, "\nChange: `e` in the TUI's Repos tab, or edit {}", file.display());

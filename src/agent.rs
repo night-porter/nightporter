@@ -237,7 +237,11 @@ pub fn agent_env(job_dir: &Path) -> Vec<(String, String)> {
 pub fn claude_settings(s: &RepoSettings, wt: &Path, job_dir: &Path, read_only: bool) -> serde_json::Value {
     let mut allow: Vec<String> = ["Read", "Glob", "Grep", "LS", "TodoWrite"].map(String::from).to_vec();
     let git = GIT_ALLOWED.iter().copied().filter(|c| !read_only || !WRITE_GIT.contains(c));
-    allow.extend(git.chain(s.allow_commands.iter().map(String::as_str)).map(|c| format!("Bash({c}:*)")));
+    // `allow_commands = ["*"]`: any command. The deny list below still wins, and with the
+    // sandbox on every command stays inside it (worktree writes, no credentials, listed domains).
+    allow.extend(
+        git.chain(s.allow_commands.iter().map(String::as_str)).map(|c| if c == "*" { "Bash".into() } else { format!("Bash({c}:*)") }),
+    );
     let mut deny: Vec<String> = DENIED.iter().map(|c| format!("Bash({c}:*)")).collect();
     if read_only {
         deny.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"].map(String::from));
@@ -692,6 +696,10 @@ mod tests {
         let v = claude_settings(&s, Path::new("/w"), Path::new("/j"), false).to_string();
         assert!(v.contains("Bash(git push:*)") && v.contains("Edit(.github/workflows/**)") && v.contains("WebFetch"));
         assert!(v.contains("Bash(git commit:*)") && v.contains("Read(~/.ssh/**)"));
+        let any = crate::config::Config::parse("[defaults]\nallow_commands = [\"*\"]").unwrap().resolve(None).unwrap();
+        let any = claude_settings(&any, Path::new("/w"), Path::new("/j"), false)["permissions"].clone();
+        assert!(any["allow"].as_array().unwrap().iter().any(|a| a == "Bash"), "any command");
+        assert!(any["deny"].to_string().contains("Bash(git push:*)"), "the deny list still applies");
         assert!(!v.contains("Bash(git log:*)"), "git log accepts --output");
         let sb = &claude_settings(&s, Path::new("/w"), Path::new("/j"), false)["sandbox"];
         assert_eq!(

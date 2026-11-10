@@ -118,7 +118,7 @@ async fn world_with(repo_toml: &str, extra: Vec<(&'static str, &'static str, Str
     sh(
         &clone,
         &format!(
-            "git init -q && git config user.email me@me && git config user.name me && git remote add origin git@github.com:o/r.git && git config url.{b}.insteadOf git@github.com:o/r.git && git fetch -q {b} main && git checkout -q FETCH_HEAD",
+            "git init -q && git config user.email me@me && git config user.name me && git config commit.gpgsign false && git remote add origin git@github.com:o/r.git && git config url.{b}.insteadOf git@github.com:o/r.git && git fetch -q {b} main && git checkout -q FETCH_HEAD",
             b = bare.display()
         ),
     );

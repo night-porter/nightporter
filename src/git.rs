@@ -240,6 +240,48 @@ pub async fn push(clone: &Path, url: &str, sha: &str, remote_branch: &str) -> Re
     git(clone, &["push", "--quiet", "--no-verify", "--end-of-options", url, &format!("{sha}:refs/heads/{remote_branch}")]).await.map(|_| ())
 }
 
+/// When your git config asks for signed commits (`commit.gpgsign`), re-create the commits in
+/// `before..after` signed with your own setup (key, format, gpg program, agent), run here in the
+/// daemon: the agent never sees your keys, so its commits are unsigned. Trees, parents' order,
+/// authors, dates and messages are kept; only the signatures, and so the SHAs, change.
+/// Returns the old → new SHA of each commit, oldest first (`None`: signing isn't configured).
+pub async fn sign_range(clone: &Path, before: &str, after: &str) -> Result<Option<Vec<(String, String)>>> {
+    if git(clone, &["config", "--get", "--type=bool", "commit.gpgsign"]).await.ok().as_deref() != Some("true") {
+        return Ok(None);
+    }
+    let revs = git(clone, &["rev-list", "--reverse", "--topo-order", &format!("{before}..{after}")]).await?;
+    let mut map: Vec<(String, String)> = Vec::new();
+    for old in revs.lines() {
+        let meta = git(clone, &["show", "-s", "--format=%T%n%P%n%an%n%ae%n%aI%n%cn%n%ce%n%cI", old]).await?;
+        let f: Vec<&str> = meta.lines().collect();
+        let [tree, parents, an, ae, ad, cn, ce, cd] = f[..] else { bail!("unexpected commit metadata for {old}") };
+        let message = git(clone, &["show", "-s", "--format=%B", old]).await?;
+        let mut cmd = Command::new("git");
+        cmd.args(HARDEN).arg("-C").arg(clone).args(["commit-tree", "-S", tree, "-m", &message]);
+        for p in parents.split_whitespace() {
+            cmd.args(["-p", map.iter().find(|(o, _)| o == p).map_or(p, |(_, n)| n)]);
+        }
+        cmd.envs([
+            ("GIT_AUTHOR_NAME", an),
+            ("GIT_AUTHOR_EMAIL", ae),
+            ("GIT_AUTHOR_DATE", ad),
+            ("GIT_COMMITTER_NAME", cn),
+            ("GIT_COMMITTER_EMAIL", ce),
+            ("GIT_COMMITTER_DATE", cd),
+        ]);
+        // A key that needs a passphrase nobody is there to type must not hang the job.
+        let out = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.kill_on_drop(true).output())
+            .await
+            .context("signing timed out (is the key waiting for a passphrase?)")?
+            .context("run git")?;
+        if !out.status.success() {
+            bail!("git commit-tree -S: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        map.push((old.to_string(), String::from_utf8_lossy(&out.stdout).trim().to_string()));
+    }
+    Ok(Some(map))
+}
+
 pub async fn head(wt: &Path) -> Result<String> {
     git(wt, &["rev-parse", "HEAD"]).await
 }
@@ -309,6 +351,43 @@ pub(crate) mod tests {
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
         run(&["add", "a.txt"]);
         run(&["commit", "-qm", "base"]);
+    }
+
+    #[tokio::test]
+    async fn sign_range_resigns_commits_only_when_configured() {
+        let d = tempfile::tempdir().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        repo(&clone);
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git").args(args).current_dir(&clone).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        let before = run(&["rev-parse", "HEAD"]);
+        for n in ["one", "two"] {
+            run(&["commit", "-q", "--allow-empty", "-m", n]);
+        }
+        let after = run(&["rev-parse", "HEAD"]);
+        assert_eq!(sign_range(&clone, &before, &after).await.unwrap(), None, "signing not configured");
+
+        // An SSH signing key: no gpg keyring needed.
+        let key = d.path().join("key");
+        let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap();
+        assert!(made.status.success());
+        run(&["config", "commit.gpgsign", "true"]);
+        run(&["config", "gpg.format", "ssh"]);
+        run(&["config", "user.signingkey", &key.to_string_lossy()]);
+        let map = sign_range(&clone, &before, &after).await.unwrap().unwrap();
+        assert_eq!((map.len(), map[1].0.as_str()), (2, after.as_str()));
+        let head = &map[1].1;
+        assert!(run(&["cat-file", "commit", head]).contains("gpgsig"), "signed");
+        assert_eq!(run(&["rev-parse", &format!("{head}^")]), map[0].1, "re-parented onto the signed commit");
+        assert_eq!(run(&["rev-parse", &format!("{head}~2")]), before);
+        assert_eq!(run(&["log", "-1", "--format=%s|%an|%T", head]), run(&["log", "-1", "--format=%s|%an|%T", &after]));
     }
 
     #[tokio::test]

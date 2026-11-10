@@ -58,7 +58,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `subscribed` | `false` | repo files only |
 | `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+, experimental) |
 | `agent_args` | `[]` | extra CLI args. A list goes to whichever agent runs (`["--model", "opus"]`); a table sets them per agent (see [Models per agent](#models-per-agent)). Empty: each agent uses its own default model and settings |
-| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list |
+| `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list. `["*"]` (Claude Code) allows any command; the deny list and the sandbox still apply |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
@@ -77,7 +77,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz`, and optionally `level`, `agent`, `notify` for that window; see [Working hours](/advanced#working-hours) |
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
-| `[env]` | | `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
+| `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_runs_code` (`false`: reviews only read the code) |
 
 Arrays in a repo file replace the default, except the trust lists (`allow_users`,
