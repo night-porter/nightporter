@@ -8,6 +8,30 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.4
 
+### Review bots, tests that actually run, signed commits (0.4.4)
+
+**The whole bot review, not one comment.** With a review bot in `allow_bots`, a job on your own
+PR now reads the PR's review threads and takes the bot's unresolved ones, including comments
+from before you allowed it. A failing "review score" check (Greptile's confidence gate) used to
+start a job that saw only the check's title. After the push, Night Porter asks Greptile to
+review again, and stops after three rounds per PR. GitHub only for now.
+
+```toml
+[defaults.trust]
+allow_bots = ["greptile-apps[bot]"]
+```
+
+**Dependencies installed, checks run.** `install = true` under `[env]` installs from your
+lockfiles before the agent starts (composer, npm, pnpm, yarn, cargo), and
+`allow_commands = ["*"]` lets the agent run any command inside the sandbox. It then runs the
+tests, linters and static analysis that cover its change, the way your CI does.
+
+**Signed commits.** If your git config signs commits, Night Porter signs the agent's commits with
+your own key before you review them. The agent never sees the key.
+
+See [Review bots](/advanced#review-bots), [Dependencies and tests](/advanced#dependencies-and-tests)
+and [Signed commits](/advanced#signed-commits).
+
 ### Let jobs fix `.env.example` on your own repos (0.4.3)
 
 `.env.*` files are protected, so a review nit on `.env.example` used to wait for you. On repos

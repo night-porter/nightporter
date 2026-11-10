@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-11
+
 ### Added
 
 - `nightporter events --json` job lines include `state` (stable status name) and `actions`
