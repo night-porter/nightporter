@@ -34,7 +34,9 @@ pub fn approve(db: &Db, id: i64, override_blocking: bool) -> Result<&'static str
             Ok("run approved: the job is queued")
         }
         JobStatus::Ready => {
-            db.transition(id, JobStatus::Ready, JobStatus::Done)?;
+            if !db.transition(id, JobStatus::Ready, JobStatus::Done)? {
+                bail!("job {id} changed state; reload");
+            }
             // Suggest never delivers; say so, or "approve" reads as if it pushed and posted.
             if j.replies.is_empty() && j.diff.is_empty() {
                 Ok("marked done")
@@ -50,10 +52,14 @@ pub fn approve(db: &Db, id: i64, override_blocking: bool) -> Result<&'static str
 
 pub fn reject(db: &Db, id: i64) -> Result<()> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
-    if !j.status.needs_user() && j.status != JobStatus::Queued {
-        bail!("job {id} is {}", j.status.label());
+    if !j.status.can_reject() {
+        bail!("job {id} is {}, nothing to reject", j.status.label());
     }
-    db.set_status(id, JobStatus::Rejected)
+    // Guarded: the daemon may have started a queued job a moment ago.
+    if !db.transition(id, j.status, JobStatus::Rejected)? {
+        bail!("job {id} changed state; reload");
+    }
+    Ok(())
 }
 
 /// Re-run a finished or failed job's events as a new job.
@@ -86,7 +92,7 @@ pub fn dismiss(db: &Db, id: i64) -> Result<()> {
     let mut j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     match j.status {
         JobStatus::Dismissed => bail!("job {id} is already dismissed"),
-        s if s.is_active() => bail!("job {id} is {}; reject it instead", s.label()),
+        s if !s.can_become(JobStatus::Dismissed) => bail!("job {id} is {}; reject it instead", s.label()),
         s => {
             j.meta.dismissed_from = Some(s);
             j.status = JobStatus::Dismissed;
@@ -122,10 +128,12 @@ pub fn purge(db: &mut Db, id: i64) -> Result<()> {
 
 /// Undo an inbox ignore: the event waits in the inbox again.
 pub fn unignore(db: &Db, event_id: &str) -> Result<()> {
-    if !db.ignored_events()?.iter().any(|(e, _)| e.id == event_id) {
+    if !db.ignored_events()?.iter().any(|(e, _)| e.id == event_id)
+        || !db.move_event(event_id, Disposition::Dropped, Disposition::Inbox, "")?
+    {
         bail!("{event_id} is not an ignored inbox event");
     }
-    db.set_disposition(event_id, Disposition::Inbox, "")
+    Ok(())
 }
 
 pub fn set_paused(db: &Db, paused: bool) -> Result<()> {
@@ -174,11 +182,19 @@ fn push_unique(doc: &mut toml_edit::DocumentMut, scope: Scope, key: &str, user: 
 
 /// Inbox: allow this one event only.
 pub fn allow_once(db: &Db, event_id: &str) -> Result<()> {
-    db.set_disposition(event_id, Disposition::Pending, "allowed once")
+    from_inbox(db, event_id, Disposition::Pending, "allowed once")
 }
 
 pub fn ignore(db: &Db, event_id: &str) -> Result<()> {
-    db.set_disposition(event_id, Disposition::Dropped, "ignored")
+    from_inbox(db, event_id, Disposition::Dropped, "ignored")
+}
+
+/// Only an event still waiting in the inbox: allowing a taken one would run it again.
+fn from_inbox(db: &Db, event_id: &str, to: Disposition, reason: &str) -> Result<()> {
+    if !db.move_event(event_id, Disposition::Inbox, to, reason)? {
+        bail!("{event_id} is not waiting in the inbox (already handled?)");
+    }
+    Ok(())
 }
 
 /// Inbox: trust this author from now on (repo or global), and release their waiting events.
@@ -233,7 +249,7 @@ mod tests {
         let mut j = db.job(id).unwrap().unwrap();
         j.status = JobStatus::AwaitingApproval;
         j.checks = vec![crate::state::CheckResult { name: "secrets".into(), ok: false, blocking: true, detail: String::new() }];
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         assert!(approve(&db, id, false).is_err());
         approve(&db, id, true).unwrap();
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Approved);
@@ -245,7 +261,7 @@ mod tests {
         let mut j = db.job(id).unwrap().unwrap();
         j.status = JobStatus::Ready;
         j.diff = "+x".into();
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         assert!(approve(&db, id, false).unwrap().contains("nothing was pushed or posted"));
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Done);
     }
@@ -280,5 +296,11 @@ mod tests {
         unignore(&db, "e1").unwrap();
         assert_eq!(db.events_with(Disposition::Inbox).unwrap().len(), 1);
         assert!(unignore(&db, "e1").is_err());
+        assert!(ignore(&db, "e1").is_ok() && ignore(&db, "e1").is_err(), "only inbox events");
+        // Rejecting a job the daemon has just started is refused, not silently overwritten.
+        let id = db.create_job(&repo, Target::Pr, 7, "my_prs", "draft", &[]).unwrap();
+        db.transition(id, JobStatus::Queued, JobStatus::Running).unwrap();
+        assert!(reject(&db, id).is_err());
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Running);
     }
 }

@@ -436,7 +436,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             let rounds = ctx.db(|d| d.bot_rounds(&repo, n))?;
             if rounds >= s.max_ci_attempts {
                 for id in bot_ids {
-                    ctx.db(|d| d.set_disposition(id, Disposition::Dropped, "review-bot rounds exhausted"))?;
+                    ctx.db(|d| d.move_event(id, Disposition::Pending, Disposition::Dropped, "review-bot rounds exhausted"))?;
                 }
                 let msg = format!("review bot still has comments after {rounds} rounds; stopped fixing them");
                 ctx.notify(&repo, &notify::Event::about(Kind::Failed, &repo, evs[0].0.target, n, &msg));
@@ -449,7 +449,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             let tries = ctx.db(|d| d.ci_attempts(&repo, n))?;
             if tries >= s.max_ci_attempts {
                 for id in &ids {
-                    ctx.db(|d| d.set_disposition(id, Disposition::Dropped, "CI-fix attempts exhausted"))?;
+                    ctx.db(|d| d.move_event(id, Disposition::Pending, Disposition::Dropped, "CI-fix attempts exhausted"))?;
                 }
                 let target = evs[0].0.target;
                 ctx.notify(

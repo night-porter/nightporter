@@ -149,6 +149,11 @@ nightporter worktrees rm 42      # remove job 42's worktree (kept for 7 days)
 nightporter worktrees restore 42 # bring it back, uncommitted changes and all
 ```
 
+Each `events --json` job line carries `state`, a stable name (`queued`, `running`,
+`awaiting_approval`, `approved`, `ready`, `awaiting_run_approval`, `done`, `failed`, `rejected`,
+`dismissed`), and `actions`, the commands above that apply to it right now. Script against those,
+not the human `status` label.
+
 Setup and maintenance:
 
 ```sh

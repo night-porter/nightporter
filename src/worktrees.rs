@@ -187,7 +187,7 @@ mod tests {
         j.worktree = wt.to_string_lossy().into();
         j.branch = b.into();
         j.meta.clone = clone.to_string_lossy().into();
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         let all = list(&db).await.unwrap();
         assert_eq!(all.len(), 3, "the live worktree and two kept versions");
         assert!(all[1].line().contains("KEPT"));

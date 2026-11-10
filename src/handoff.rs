@@ -4,7 +4,7 @@
 
 use crate::config::{Handoff, HandoffAgent};
 use crate::paths::Paths;
-use crate::state::{Db, Job, JobStatus};
+use crate::state::{Db, Job};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 /// code) you approved running it: an interactive agent there loads the branch's own agent config
 /// with none of a job's isolation.
 pub fn can_take_over(j: &Job) -> Result<()> {
-    if matches!(j.status, JobStatus::Running | JobStatus::Queued | JobStatus::Approved) {
+    if j.status.is_active() {
         bail!("job {} is {}; wait for it to finish before taking over", j.id, j.status.label());
     }
     if j.worktree.is_empty() || !std::path::Path::new(&j.worktree).is_dir() {
@@ -244,6 +244,7 @@ fn rex(db: &Db, j: &Job, agent: HandoffAgent) -> Result<String> {
 mod tests {
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
+    use crate::state::JobStatus;
 
     #[test]
     fn someone_elses_code_needs_run_approval_before_a_take_over() {

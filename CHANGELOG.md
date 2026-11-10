@@ -8,6 +8,8 @@ All notable changes to Night Porter. The format follows
 
 ### Added
 
+- `nightporter events --json` job lines include `state` (stable status name) and `actions`
+  (the commands that apply now), for scripts and agents.
 - Review bots in `trust.allow_bots` get their whole review handled (GitHub): a job on your own
   PR also takes the bot's unresolved review threads you haven't answered, read from the PR
   itself. After the push, Night Porter asks Greptile for a new review (`@greptile review`), and
@@ -15,6 +17,11 @@ All notable changes to Night Porter. The format follows
 
 ### Fixed
 
+- Rejecting a queued job just as the daemon started it no longer marks a running job
+  rejected; a TUI and the daemon racing on one job now get "changed state; reload" instead of
+  overwriting each other. Allowing or ignoring an inbox event that was already handled (for
+  example from a second TUI) is refused instead of running it again, and an error after a job
+  settled no longer turns it into `failed`.
 - A job started by a failing review-score check (Greptile's confidence gate) only saw the
   check's title, not the review comments behind the score, and changed nothing.
 

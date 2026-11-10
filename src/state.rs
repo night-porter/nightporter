@@ -1,14 +1,24 @@
 //! SQLite state shared by the daemon and any number of TUIs (WAL mode).
 
 use crate::forge::{Event, RepoId, Target};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub struct Db(pub Connection);
 
-/// How an event was classified at intake.
+/// Where an event is in its life. Intake files it as `pending`, `inbox` or `dropped`; after that
+/// the only moves are [`Disposition::can_become`]'s (a job finding an event on the PR itself,
+/// [`Db::take_event`], takes it whatever it was):
+///
+/// ```text
+/// inbox ──allow──▶ pending ──job──▶ taken ──requeue──▶ pending
+///   │ ▲              │
+/// ignore/deny  unignore   cap reached
+///   ▼ │              ▼
+/// dropped ◀──────────┘
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
@@ -22,6 +32,29 @@ pub enum Disposition {
     Dropped,
 }
 
+impl Disposition {
+    pub fn can_become(self, to: Disposition) -> bool {
+        use Disposition::{Dropped, Inbox, Pending, Taken};
+        matches!((self, to), (Inbox, Pending | Dropped) | (Dropped, Inbox) | (Pending, Taken | Dropped) | (Taken, Pending))
+    }
+}
+
+/// A job's lifecycle. [`JobStatus::can_become`] is the whole table; [`Db::transition`] and
+/// [`Db::update_job`] refuse anything else, so a TUI and the daemon racing on one job can't
+/// overwrite each other (the loser gets "changed state; reload").
+///
+/// ```text
+///            ┌──────────▶ rejected ◀───────── (any waiting state)
+///            │
+/// queued ──▶ running ──┬──▶ done | failed
+///   ▲                  ├──▶ awaiting_run_approval ──approve──▶ queued
+///   │                  ├──▶ awaiting_approval ──approve──▶ approved ──▶ done | failed
+///   │                  ├──▶ approved (auto, clean checks)
+///   │                  └──▶ ready (suggest) ──approve──▶ done
+///   └─ a daemon error before running ──▶ failed
+///
+/// any settled state ──dismiss──▶ dismissed ──restore──▶ the state it came from
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -75,11 +108,74 @@ impl JobStatus {
             JobStatus::Dismissed => "dismissed",
         }
     }
+    pub const ALL: [JobStatus; 10] = [
+        JobStatus::Queued,
+        JobStatus::Running,
+        JobStatus::AwaitingApproval,
+        JobStatus::Approved,
+        JobStatus::Ready,
+        JobStatus::AwaitingRunApproval,
+        JobStatus::Done,
+        JobStatus::Failed,
+        JobStatus::Rejected,
+        JobStatus::Dismissed,
+    ];
+    /// Waiting for a decision from you.
     pub fn needs_user(self) -> bool {
         matches!(self, JobStatus::AwaitingApproval | JobStatus::AwaitingRunApproval | JobStatus::Ready)
     }
+    /// The daemon owns it: queued, running or delivering. You can't change it (reject a queued one).
     pub fn is_active(self) -> bool {
         matches!(self, JobStatus::Queued | JobStatus::Running | JobStatus::Approved)
+    }
+    /// Blocks a new job on the same PR (one job per PR at a time). A `ready` suggestion doesn't:
+    /// it never touches the PR.
+    pub fn holds_pr(self) -> bool {
+        (self.is_active() || self.needs_user()) && self != JobStatus::Ready
+    }
+    /// The whole transition table (see the diagram on [`JobStatus`]).
+    pub fn can_become(self, to: JobStatus) -> bool {
+        use JobStatus::{Approved, AwaitingApproval, AwaitingRunApproval, Dismissed, Done, Failed, Queued, Ready, Rejected, Running};
+        match (self, to) {
+            (Queued, Running | Rejected | Failed)
+            | (Running, Done | Failed | AwaitingRunApproval | AwaitingApproval | Approved | Ready)
+            | (AwaitingRunApproval, Queued)
+            | (AwaitingApproval, Approved)
+            | (Approved, Done | Failed)
+            | (Ready, Done)
+            | (AwaitingRunApproval | AwaitingApproval | Ready, Rejected) => true,
+            (from, Dismissed) => !from.is_active() && from != Dismissed,
+            (Dismissed, back) => !back.is_active() && back != Dismissed,
+            _ => false,
+        }
+    }
+    /// Reject: a queued job or one waiting for you. (A dismissed job only restores to `rejected`.)
+    pub fn can_reject(self) -> bool {
+        self == JobStatus::Queued || self.needs_user()
+    }
+    /// What you can do with a job in this state, as `nightporter <action> <id>` (and the TUI keys).
+    pub fn actions(self) -> Vec<&'static str> {
+        let mut a = Vec::new();
+        if self.needs_user() {
+            a.push("approve");
+        }
+        if self.can_reject() {
+            a.push("reject");
+        }
+        if self.can_become(JobStatus::Dismissed) {
+            a.push("dismiss");
+        }
+        if self == JobStatus::Dismissed {
+            a.push("restore");
+        }
+        if !self.is_active() && !self.needs_user() {
+            a.extend(["retry", "purge"]);
+        }
+        a
+    }
+    /// `'a','b'` of every status matching `f`, for SQL `IN (...)` (built from constants only).
+    fn sql(f: impl Fn(JobStatus) -> bool) -> String {
+        Self::ALL.into_iter().filter(|s| f(*s)).map(|s| format!("'{}'", s.as_str())).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -259,14 +355,19 @@ impl Db {
         Ok(n == 1)
     }
 
-    pub fn set_disposition(&self, id: &str, d: Disposition, reason: &str) -> Result<()> {
-        self.0.execute("UPDATE events SET disposition=?2, reason=?3 WHERE id=?1", params![id, enum_str(&d), reason])?;
-        Ok(())
+    /// Move one event `from` → `to`. `false`: it wasn't in `from` (someone else moved it).
+    pub fn move_event(&self, id: &str, from: Disposition, to: Disposition, reason: &str) -> Result<bool> {
+        anyhow::ensure!(from.can_become(to), "bug: an event can't go from {from:?} to {to:?}");
+        Ok(self.0.execute(
+            "UPDATE events SET disposition=?3, reason=?4 WHERE id=?1 AND disposition=?2",
+            params![id, enum_str(&from), enum_str(&to), reason],
+        )? == 1)
     }
 
     /// Re-classify every inbox event by `author` (after "allow always" / "deny").
     /// `repo`: only that repo's events (a per-repo decision must not release other repos').
     pub fn set_author_disposition(&self, author: &str, repo: Option<&RepoId>, d: Disposition, reason: &str) -> Result<usize> {
+        anyhow::ensure!(Disposition::Inbox.can_become(d), "bug: an inbox event can't become {d:?}");
         Ok(self.0.execute(
             "UPDATE events SET disposition=?2, reason=?3 WHERE disposition='inbox' AND author=?1 COLLATE NOCASE
                AND (?4 IS NULL OR repo=?4)",
@@ -325,7 +426,11 @@ impl Db {
     pub fn create_job(&mut self, repo: &RepoId, target: Target, number: u64, mode: &str, level: &str, event_ids: &[String]) -> Result<i64> {
         let tx = self.0.transaction()?;
         let attempt: u32 = tx.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE repo=?1 AND number=?2 AND status IN ('failed','done') AND created_at > ?3",
+            &format!(
+                "SELECT COUNT(*) FROM jobs WHERE repo=?1 AND number=?2 AND status IN ('{}','{}') AND created_at > ?3",
+                JobStatus::Failed.as_str(),
+                JobStatus::Done.as_str()
+            ),
             params![repo.key(), number.cast_signed(), now() - 86400],
             |r| r.get(0),
         )?;
@@ -347,6 +452,8 @@ impl Db {
         Ok(())
     }
 
+    /// Force a status, skipping the transition table: for seeding tests only.
+    #[cfg(test)]
     pub fn set_status(&self, id: i64, s: JobStatus) -> Result<()> {
         self.0.execute("UPDATE jobs SET status=?2, updated_at=?3 WHERE id=?1", params![id, s.as_str(), now()])?;
         Ok(())
@@ -354,16 +461,23 @@ impl Db {
 
     /// Transition only if the job is currently in `from` (prevents TUI/daemon races).
     pub fn transition(&self, id: i64, from: JobStatus, to: JobStatus) -> Result<bool> {
+        anyhow::ensure!(from.can_become(to), "bug: a job can't go from {} to {}", from.as_str(), to.as_str());
         Ok(self.0.execute(
             "UPDATE jobs SET status=?3, updated_at=?4 WHERE id=?1 AND status=?2",
             params![id, from.as_str(), to.as_str(), now()],
         )? == 1)
     }
 
+    /// Save `j`. Its status must be the stored one or a legal move from it
+    /// ([`JobStatus::can_become`]); otherwise nothing is written and this fails with "changed
+    /// state; reload" (the job moved under you, e.g. the daemon started it).
     pub fn update_job(&self, j: &Job) -> Result<()> {
-        self.0.execute(
-            "UPDATE jobs SET status=?2, level=?3, branch=?4, head_before=?5, head_after=?6, summary=?7, diff=?8,
-             replies=?9, checks=?10, error=?11, worktree=?12, updated_at=?13, meta=?14 WHERE id=?1",
+        let from = JobStatus::sql(|s| s == j.status || s.can_become(j.status));
+        let n = self.0.execute(
+            &format!(
+                "UPDATE jobs SET status=?2, level=?3, branch=?4, head_before=?5, head_after=?6, summary=?7, diff=?8,
+             replies=?9, checks=?10, error=?11, worktree=?12, updated_at=?13, meta=?14 WHERE id=?1 AND status IN ({from})"
+            ),
             params![
                 j.id,
                 j.status.as_str(),
@@ -381,7 +495,18 @@ impl Db {
                 serde_json::to_string(&j.meta)?
             ],
         )?;
+        if n == 0 {
+            let now = self.job(j.id)?.map_or("gone", |k| k.status.as_str());
+            bail!("job {} changed state (it is {now} now, can't become {}); reload", j.id, j.status.as_str());
+        }
         Ok(())
+    }
+
+    /// Seed a job in any state, skipping the transition table: for tests only.
+    #[cfg(test)]
+    pub fn seed_job(&self, j: &Job) -> Result<()> {
+        self.set_status(j.id, j.status)?;
+        self.update_job(j)
     }
 
     /// Delete a job, its log, and the events it took. Permanent.
@@ -394,9 +519,14 @@ impl Db {
         Ok(())
     }
 
-    pub fn fail(&self, id: i64, err: &str) -> Result<()> {
-        self.0.execute("UPDATE jobs SET status='failed', error=?2, updated_at=?3 WHERE id=?1", params![id, err, now()])?;
-        Ok(())
+    /// Fail a job the daemon still owns. `false`: it had already settled (done, waiting for
+    /// you, ...), which an error afterwards mustn't overwrite.
+    pub fn fail(&self, id: i64, err: &str) -> Result<bool> {
+        let from = JobStatus::sql(|s| s.can_become(JobStatus::Failed));
+        Ok(self.0.execute(
+            &format!("UPDATE jobs SET status='failed', error=?2, updated_at=?3 WHERE id=?1 AND status IN ({from})"),
+            params![id, err, now()],
+        )? == 1)
     }
 
     pub fn job(&self, id: i64) -> Result<Option<Job>> {
@@ -420,7 +550,8 @@ impl Db {
     pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!(
             "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY repo, target, number)
-               AND (status IN ('awaiting_approval','awaiting_run_approval','ready') OR updated_at >= ?1) ORDER BY id"
+               AND (status IN ({}) OR updated_at >= ?1) ORDER BY id",
+            JobStatus::sql(JobStatus::needs_user)
         ))?;
         let rows = st.query_map([since], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -429,8 +560,10 @@ impl Db {
     /// Any job on this PR that isn't finished (one job per PR at a time).
     pub fn pr_busy(&self, repo: &RepoId, number: u64) -> Result<bool> {
         Ok(self.0.query_row(
-            "SELECT EXISTS(SELECT 1 FROM jobs WHERE repo=?1 AND number=?2
-               AND status IN ('queued','running','approved','awaiting_approval','awaiting_run_approval'))",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE repo=?1 AND number=?2 AND status IN ({}))",
+                JobStatus::sql(JobStatus::holds_pr)
+            ),
             params![repo.key(), number.cast_signed()],
             |r| r.get(0),
         )?)
@@ -486,8 +619,8 @@ impl Db {
     pub fn prune(&self, retention_days: u32) -> Result<()> {
         let cutoff = now() - i64::from(retention_days) * 86400;
         self.0.execute("DELETE FROM job_log WHERE ts < ?1", [cutoff])?;
-        self.0
-            .execute("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ('done','failed','rejected','ready','dismissed')", [cutoff])?;
+        let settled = JobStatus::sql(|s| !s.holds_pr());
+        self.0.execute(&format!("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ({settled})"), [cutoff])?;
         self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped','inbox')", [cutoff])?;
         Ok(())
     }
@@ -588,6 +721,57 @@ pub(crate) mod tests {
         for s in [JobStatus::AwaitingRunApproval, JobStatus::Ready, JobStatus::Rejected] {
             assert_eq!(JobStatus::parse(s.as_str()), s);
         }
+    }
+
+    #[test]
+    fn lifecycle_table_is_sound() {
+        use JobStatus::*;
+        // Every state is reachable from `queued`, and every non-final one has a way out.
+        let mut seen = vec![Queued];
+        while let Some(s) = JobStatus::ALL.into_iter().find(|t| !seen.contains(t) && seen.iter().any(|f| f.can_become(*t))) {
+            seen.push(s);
+        }
+        assert_eq!(
+            seen.len(),
+            JobStatus::ALL.len(),
+            "unreachable: {:?}",
+            JobStatus::ALL.iter().filter(|s| !seen.contains(s)).collect::<Vec<_>>()
+        );
+        for s in JobStatus::ALL {
+            assert_eq!(JobStatus::parse(s.as_str()), s);
+            assert!(!s.can_become(s), "{s:?} -> itself is a save, not a transition");
+            assert!(JobStatus::ALL.iter().any(|t| s.can_become(*t)), "{s:?} is a dead end");
+        }
+        // You never take a job away from the daemon, and nothing skips your approval.
+        for from in [Queued, Running, Approved] {
+            assert!(!from.can_become(Dismissed));
+        }
+        assert!(!Running.can_become(Rejected));
+        assert!(!AwaitingApproval.can_become(Done) && !AwaitingRunApproval.can_become(Running));
+        assert_eq!(Ready.actions(), ["approve", "reject", "dismiss"]);
+        assert_eq!(Running.actions(), Vec::<&str>::new());
+        assert_eq!(Dismissed.actions(), ["restore", "retry", "purge"]);
+    }
+
+    #[test]
+    fn saves_refuse_illegal_or_stale_moves() {
+        let mut db = Db::memory().unwrap();
+        let r = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&r, Target::Pr, 4, "my_prs", "draft", &[]).unwrap();
+        let tui_copy = db.job(id).unwrap().unwrap();
+        assert!(db.transition(id, JobStatus::Queued, JobStatus::Running).unwrap(), "the daemon starts it");
+        // A stale copy can't drag it back, and an illegal move is a bug, not a no-op.
+        assert!(db.update_job(&tui_copy).unwrap_err().to_string().contains("changed state"));
+        assert!(db.transition(id, JobStatus::Running, JobStatus::Queued).is_err());
+        assert!(!db.transition(id, JobStatus::Queued, JobStatus::Rejected).unwrap());
+        db.set_status(id, JobStatus::AwaitingApproval).unwrap();
+        assert!(!db.fail(id, "late error").unwrap(), "an error after settling doesn't overwrite it");
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
+        // Events: only from the state they're in.
+        db.add_event(&ev("t", 4), Disposition::Pending, "").unwrap();
+        db.create_job(&r, Target::Pr, 4, "my_prs", "draft", &["t".into()]).unwrap();
+        assert!(!db.move_event("t", Disposition::Inbox, Disposition::Pending, "").unwrap(), "a taken event isn't in the inbox");
+        assert!(db.move_event("t", Disposition::Taken, Disposition::Inbox, "").is_err());
     }
 
     #[test]
