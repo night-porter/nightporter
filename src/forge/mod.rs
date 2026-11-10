@@ -542,6 +542,16 @@ impl Forge {
         each!(self, g => g.resolve(repo, number, thread).await)
     }
 
+    /// Unresolved review threads on PR `number` that you haven't answered, one event per thread.
+    // ponytail: GitHub only; GitLab and Forgejo return nothing until someone needs them there
+    // (GitLab discussions carry `resolved`; Forgejo has no thread state to read).
+    pub async fn open_threads(&self, repo: &RepoId, number: u64) -> Result<Vec<Event>> {
+        match self {
+            Forge::GitHub(g) => g.open_threads(repo, number).await,
+            Forge::GitLab(_) | Forge::Forgejo(_) => Ok(vec![]),
+        }
+    }
+
     /// Open a draft PR/MR (maintainer `fix`). Returns its URL.
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
         each!(self, g => g.open_draft(repo, head, base, title, body).await)

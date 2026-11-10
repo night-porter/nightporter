@@ -429,6 +429,21 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let verb = evs.iter().find_map(|(e, _)| e.verb);
         let mode = if verb.is_some() { Mode::Maintainer } else { Mode::MyPrs };
         let ids: Vec<String> = evs.iter().map(|(e, _)| e.id.clone()).collect();
+        // Review-bot loop guard: each push can bring a fresh bot review. Only the bot's events
+        // are dropped; a person's comments in the same batch go out on the next tick.
+        let bot_ids: Vec<&String> = evs.iter().filter(|(e, _)| e.is_bot).map(|(e, _)| &e.id).collect();
+        if !bot_ids.is_empty() {
+            let rounds = ctx.db(|d| d.bot_rounds(&repo, n))?;
+            if rounds >= s.max_ci_attempts {
+                for id in bot_ids {
+                    ctx.db(|d| d.set_disposition(id, Disposition::Dropped, "review-bot rounds exhausted"))?;
+                }
+                let msg = format!("review bot still has comments after {rounds} rounds; stopped fixing them");
+                ctx.notify(&repo, &notify::Event::about(Kind::Failed, &repo, evs[0].0.target, n, &msg));
+                continue;
+            }
+            ctx.db(|d| d.set_bot_rounds(&repo, n, rounds + 1))?;
+        }
         // CI-fix loop guard.
         if evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure) {
             let tries = ctx.db(|d| d.ci_attempts(&repo, n))?;
@@ -633,6 +648,26 @@ mod tests {
         intake(&ctx, &cfg, "me", ev(&repo, "5", "me", Role::Owner, Trigger::CiFailure)).await.unwrap();
         dispatch(&ctx).unwrap();
         assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_bot_rounds_are_capped_per_pr() {
+        let (_d, ctx, repo) = setup("subscribed = true\nmax_ci_attempts = 1\n[trust]\nallow_bots = [\"rev[bot]\"]");
+        let cfg = ctx.cfg();
+        let bot = |id: &str| Event { is_bot: true, ..ev(&repo, id, "rev[bot]", Role::None, Trigger::ReviewComment) };
+        intake(&ctx, &cfg, "me", bot("1")).await.unwrap();
+        dispatch(&ctx).unwrap();
+        let jobs = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        ctx.db(|d| d.set_status(jobs[0].id, JobStatus::Done)).unwrap();
+        // Second round: the bot's comment is dropped, alice's in the same batch still gets a job.
+        intake(&ctx, &cfg, "me", bot("2")).await.unwrap();
+        intake(&ctx, &cfg, "me", ev(&repo, "3", "alice", Role::Member, Trigger::Comment)).await.unwrap();
+        dispatch(&ctx).unwrap();
+        assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty());
+        dispatch(&ctx).unwrap();
+        let j = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+        assert_eq!(ctx.db(|d| d.job_events(j[0].id)).unwrap().iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["3"]);
     }
 
     #[tokio::test]

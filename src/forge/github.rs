@@ -516,6 +516,44 @@ impl GitHub {
         Ok(())
     }
 
+    /// PR `n`'s review threads that are unresolved and not yet answered by you, as the event of
+    /// each thread's first comment (same id as when it arrives by notification). GraphQL only:
+    /// REST doesn't say whether a thread is resolved.
+    // ponytail: first 100 threads; page when a PR has more open ones.
+    pub async fn open_threads(&self, repo: &RepoId, n: u64) -> Result<Vec<Event>> {
+        let (owner, name) = repo.path.split_once('/').context("repo must be owner/name")?;
+        let query = json!({
+            "query": "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ reviewThreads(first:100){ nodes { isResolved first:comments(first:1){ nodes { databaseId author { login __typename } body path line createdAt url } } last:comments(last:1){ nodes { author { login } } } } } } } }",
+            "variables": { "o": owner, "r": name, "n": n }
+        });
+        let v = self.api.send(Method::POST, &format!("{}/graphql", self.api.base.trim_end_matches("/v3")), &query).await?;
+        let threads = v.pointer("/data/repository/pullRequest/reviewThreads/nodes").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        let text = |v: &serde_json::Value, p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let mut out = Vec::new();
+        for t in threads {
+            let c = &t["first"]["nodes"][0];
+            let Some(id) = c["databaseId"].as_u64() else { continue };
+            if t["isResolved"] != false || text(&t, "/last/nodes/0/author/login").eq_ignore_ascii_case(&self.me) {
+                continue;
+            }
+            // GraphQL gives an app's login without the `[bot]` that REST (and `allow_bots`) use.
+            let is_bot = text(c, "/author/__typename") == "Bot";
+            let login = text(c, "/author/login");
+            out.push(Event {
+                is_bot,
+                author: if is_bot && !login.ends_with("[bot]") { format!("{login}[bot]") } else { login },
+                body: text(c, "/body"),
+                url: text(c, "/url"),
+                thread: Some(id.to_string()),
+                path: c["path"].as_str().map(String::from),
+                line: c["line"].as_u64(),
+                created_at: text(c, "/createdAt"),
+                ..Event::new(format!("gh-{}-rc-{id}", self.host), repo, Target::Pr, n, Trigger::ReviewComment)
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
         ghlike::open_pr(&self.api, repo, &json!({ "title": title, "head": head, "base": base, "body": body, "draft": true })).await
     }

@@ -130,6 +130,14 @@ pub fn build(i: &Input) -> Result<String> {
     }
 
     p.push_str("\n## Requests (from trusted people unless marked untrusted)\n");
+    if i.events.iter().any(|e| e.is_bot) {
+        p.push_str(
+            "Some requests are findings from an automated code reviewer. Work through every one, so a fresh \
+             review of this branch would have nothing left to raise. Check each claim against the code first: \
+             fix what is right; where a finding is wrong or out of scope, leave the code alone and say why in \
+             your reply to that event.\n",
+        );
+    }
     for e in i.events {
         let loc = match (&e.path, e.line) {
             (Some(path), Some(l)) => format!(" on {path}:{l}"),
