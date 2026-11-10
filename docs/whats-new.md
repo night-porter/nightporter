@@ -8,6 +8,20 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.4
 
+### Let jobs fix `.env.example` on your own repos (0.4.3)
+
+`.env.*` files are protected, so a review nit on `.env.example` used to wait for you. On repos
+you maintain, opt in per repo:
+
+```toml
+[checks]
+allow_env_variants = true
+```
+
+Jobs can then edit `.env.example`, `.env.dist` and other `.env.*` files. A bare `.env` stays
+protected and the secrets scan still checks every added line. Also new: approving a
+`suggest`-level job now says nothing was pushed or posted, instead of just "marked done".
+
 ### Reviews when someone asks for yours (0.4.1)
 
 When someone requests your review on a GitHub PR, Night Porter can prepare one: a summary,
