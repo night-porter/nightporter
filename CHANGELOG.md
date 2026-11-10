@@ -6,6 +6,19 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-10
+
+### Added
+
+- `checks.allow_env_variants = true` (per repo, off by default): jobs may edit `.env.*` files such
+  as `.env.example`, so a review nit on a template no longer has to wait for you. A bare `.env`
+  stays protected and the secrets scan still runs.
+
+### Fixed
+
+- Approving a `suggest`-level job said "marked done", which read as if it had pushed and posted.
+  It now says nothing went out and how to get the diff and replies.
+
 ## [0.4.2] - 2026-11-09
 
 ### Added
@@ -182,7 +195,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/night-porter/nightporter/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/night-porter/nightporter/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/night-porter/nightporter/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/night-porter/nightporter/compare/v0.3.0...v0.4.0
