@@ -543,6 +543,10 @@ impl Default for Checks {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Env {
+    /// Install dependencies from the lockfiles in the repo root before the agent starts
+    /// (`composer install`, `npm ci`, …). Runs outside the sandbox, like `setup`.
+    #[serde(default)]
+    pub install: bool,
     #[serde(default)]
     pub setup: Vec<String>,
     #[serde(default)]

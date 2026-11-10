@@ -114,6 +114,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         // Nothing from the branch runs: no allowed commands (tests), no env setup.
         s.allow_commands.clear();
         s.env.setup.clear();
+        s.env.install = false;
         s.env.teardown.clear();
         log(ctx, id, "reviewing someone else's code without running it: no tests, no env setup");
     } else if await_run_approval(ctx, &mut j, &w).await? {
@@ -216,7 +217,8 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             // A later request on the same issue continues the branch from earlier work.
             let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
             // Reproducing can mean running the reporter's snippet through allowed commands.
-            j.meta.untrusted_code = verb == Some(Verb::Reproduce) && (!s.env.setup.is_empty() || !s.allow_commands.is_empty());
+            j.meta.untrusted_code =
+                verb == Some(Verb::Reproduce) && (s.env.install || !s.env.setup.is_empty() || !s.allow_commands.is_empty());
             let from = if continue_branch { branch.clone() } else { base };
             (None, repo_url.clone(), format!("refs/heads/{from}"))
         }
@@ -297,11 +299,35 @@ async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_d
 /// The user's `env.setup` commands, in order; the first failure fails the job.
 async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Path) -> Result<()> {
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
+    // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
+    // install doesn't stop the job; the agent reports what it couldn't run.
+    for cmd in lockfile_installs(&w.wt).into_iter().filter(|_| s.env.install) {
+        log(ctx, j.id, &format!("installing dependencies: {cmd}"));
+        if let Err(e) = sh(&w.wt, job_dir, cmd, s).await {
+            log(ctx, j.id, &format!("`{cmd}` failed: {e:#}"));
+        }
+    }
     for cmd in &s.env.setup {
         log(ctx, j.id, &format!("env setup: {cmd}"));
         sh(&w.wt, job_dir, &vars.apply(cmd), s).await.with_context(|| format!("env setup `{cmd}`"))?;
     }
     Ok(())
+}
+
+/// The install command for each lockfile in the repo root (`env.install`). Lockfile installs
+/// only: nothing here resolves or upgrades versions.
+fn lockfile_installs(wt: &Path) -> Vec<&'static str> {
+    [
+        ("composer.lock", "composer install --no-interaction --no-progress --prefer-dist"),
+        ("package-lock.json", "npm ci --no-audit --no-fund"),
+        ("pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
+        ("yarn.lock", "yarn install --frozen-lockfile"),
+        ("Cargo.lock", "cargo fetch --locked"),
+    ]
+    .into_iter()
+    .filter(|(lock, _)| wt.join(lock).is_file())
+    .map(|(_, cmd)| cmd)
+    .collect()
 }
 
 /// Teardown and cleanup run outside the sandbox on files the agent can edit (.ddev, compose
@@ -377,6 +403,22 @@ async fn inspect(
     let (clone, wt) = (&w.clone, &w.wt);
     git::verify_gitfile(wt, &w.gitfile)?;
     j.head_after = git::head(wt).await?;
+    // Sign before anything is checked or shown, so the SHA you approve is the SHA that's pushed.
+    let mut signed: Vec<(String, String)> = Vec::new();
+    let mut sign_error = None;
+    if pushes_code(j.meta.verb) && j.head_after != j.head_before {
+        match git::sign_range(clone, &j.head_before, &j.head_after).await {
+            Ok(Some(map)) if !map.is_empty() => {
+                let new_head = map[map.len() - 1].1.clone();
+                git(clone, &["update-ref", &format!("refs/heads/{}", w.branch), &new_head, &j.head_after]).await?;
+                log(ctx, j.id, &format!("signed {} commit(s) with your git signing setup", map.len()));
+                j.head_after = new_head;
+                signed = map;
+            }
+            Ok(_) => {}
+            Err(e) => sign_error = Some(format!("your git config signs commits, but signing failed: {e:#}")),
+        }
+    }
     let (before, after) = (j.head_before.clone(), j.head_after.clone());
     let range = format!("{before}..{after}");
     let commits: usize = git(clone, &["rev-list", "--count", &range]).await?.parse().unwrap_or(0);
@@ -389,6 +431,9 @@ async fn inspect(
     // The summary becomes a draft PR title/body for issue fixes: scan it like a reply.
     let reply_texts: Vec<&str> = outcome.replies.iter().map(|r| r.body.as_str()).chain([outcome.summary.as_str()]).collect();
     let mut results = checks::run(&s.checks, &diff, leaks.as_deref(), &reply_texts);
+    if let Some(detail) = sign_error {
+        results.push(CheckResult { name: "signing".into(), ok: false, blocking: false, detail });
+    }
     // Pack pre-push gates can only add failures.
     if commits > 0 {
         for (name, text, _) in packs::steps(&ctx.paths, &s.packs, Hook::PrePush) {
@@ -413,7 +458,10 @@ async fn inspect(
     j.checks = results;
     j.diff = truncate(&patch, 2_000_000).to_string();
     j.replies = outcome.replies;
+    // The agent quoted its own (unsigned) SHAs: point them at the signed commits.
+    j.summary = resha(&j.summary, &signed);
     for reply in &mut j.replies {
+        reply.body = resha(&reply.body, &signed);
         // A reply must never read as a command to Night Porter (it would come back as ours).
         reply.body = reply.body.replace("/nightporter", "/\u{200b}nightporter");
         if s.reply.footer {
@@ -423,6 +471,18 @@ async fn inspect(
         reply.body.push_str(prompts::FOOTER_MARK);
     }
     Ok(commits)
+}
+
+/// Replace each old SHA in `text`, full or abbreviated to 7+ characters, with the new one at the
+/// same length.
+fn resha(text: &str, map: &[(String, String)]) -> String {
+    let mut out = text.to_string();
+    for (old, new) in map {
+        for n in (7..=old.len().min(new.len())).rev() {
+            out = out.replace(&old[..n], &new[..n]);
+        }
+    }
+    out
 }
 
 /// Nothing to deliver: finish. Otherwise set the status by level, then deliver or notify.
@@ -878,6 +938,23 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lockfile_installs_follow_the_lockfiles_present() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(lockfile_installs(d.path()), [] as [&str; 0]);
+        for f in ["composer.lock", "package-lock.json"] {
+            std::fs::write(d.path().join(f), "").unwrap();
+        }
+        let cmds = lockfile_installs(d.path());
+        assert!(cmds.len() == 2 && cmds[0].starts_with("composer install") && cmds[1].starts_with("npm ci"), "{cmds:?}");
+    }
+
+    #[test]
+    fn resha_swaps_full_and_short_shas() {
+        let map = [("1111111aaaaaaaaa".to_string(), "2222222bbbbbbbbb".to_string())];
+        assert_eq!(resha("Fixed in 1111111 (1111111aaa), not 111111.", &map), "Fixed in 2222222 (2222222bbb), not 111111.");
+    }
 
     fn git_in(dir: &Path, args: &[&str]) {
         let o = std::process::Command::new("git")

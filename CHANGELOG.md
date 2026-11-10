@@ -14,6 +14,18 @@ All notable changes to Night Porter. The format follows
   PR also takes the bot's unresolved review threads you haven't answered, read from the PR
   itself. After the push, Night Porter asks Greptile for a new review (`@greptile review`), and
   stops after `max_ci_attempts` rounds per PR.
+- Signed commits: when your git config has `commit.gpgsign = true`, Night Porter signs the
+  agent's commits with your own git signing setup before they are checked and shown, so the SHA
+  you approve is signed. The agent still never sees your keys. If signing fails, the job waits
+  for you with a failed `signing` check.
+- `env.install = true`: install dependencies from the lockfiles in the repo root before the
+  agent starts (`composer install`, `npm ci`, `pnpm install --frozen-lockfile`,
+  `yarn install --frozen-lockfile`, `cargo fetch --locked`). Runs outside the sandbox, like
+  `env.setup`; never for a read-only review of someone else's code.
+- `allow_commands = ["*"]` (Claude Code): the agent may run any command. The deny list still
+  applies, and with the sandbox on every command stays inside it.
+- The agent is told to verify its work the way the project's CI does (tests, linters, static
+  analysis) and to name the exact command and error when something can't run.
 
 ### Fixed
 
