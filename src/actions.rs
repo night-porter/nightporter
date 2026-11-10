@@ -35,7 +35,14 @@ pub fn approve(db: &Db, id: i64, override_blocking: bool) -> Result<&'static str
         }
         JobStatus::Ready => {
             db.transition(id, JobStatus::Ready, JobStatus::Done)?;
-            Ok("marked done")
+            // Suggest never delivers; say so, or "approve" reads as if it pushed and posted.
+            if j.replies.is_empty() && j.diff.is_empty() {
+                Ok("marked done")
+            } else {
+                Ok(
+                    "marked done; nothing was pushed or posted (suggest level): copy the diff and replies from `nightporter show`, or raise the level",
+                )
+            }
         }
         s => bail!("job {id} is {}, nothing to approve", s.label()),
     }
@@ -230,6 +237,17 @@ mod tests {
         assert!(approve(&db, id, false).is_err());
         approve(&db, id, true).unwrap();
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Approved);
+        // Approving a suggest job only marks it done, and says nothing went out.
+        let id = db.create_job(&repo, Target::Pr, 2, "maintainer", "suggest", &[]).unwrap();
+        db.set_status(id, JobStatus::Ready).unwrap();
+        assert_eq!(approve(&db, id, false).unwrap(), "marked done");
+        let id = db.create_job(&repo, Target::Pr, 3, "maintainer", "suggest", &[]).unwrap();
+        let mut j = db.job(id).unwrap().unwrap();
+        j.status = JobStatus::Ready;
+        j.diff = "+x".into();
+        db.update_job(&j).unwrap();
+        assert!(approve(&db, id, false).unwrap().contains("nothing was pushed or posted"));
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Done);
     }
 
     #[test]
