@@ -106,6 +106,19 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
   sandboxed commands can't read your home folder except the worktree, its git dir and common
   toolchain folders (`sandbox_read_allow` adds more). The agent's git uses its own config with
   only your name and email.
+- Signing keys stay with the daemon. When your git config asks for signed commits, Night Porter
+  re-creates the agent's commits signed (`git commit-tree -S`, same tree, author, dates and
+  message) before the B3 checks, using the clone's git config, which is compared before and
+  after every agent run (above). The agent can't read `~/.gnupg` or `~/.ssh` and its own git
+  config turns signing off.
+- `allow_commands = ["*"]` (opt-in, Claude Code) allows any command. The deny list still
+  applies, but a deny by command prefix is easy to step around (`sh -c`), so the sandbox is the
+  boundary: with it on, commands write only in the worktree, read no credentials and reach only
+  `sandbox_domains`. With `sandbox = false` as well, the agent's commands run as you.
+- `env.install = true` (opt-in) runs lockfile installs outside the sandbox before the agent,
+  with your registry logins: package install scripts run as you, as they do when you install by
+  hand. Like `env.setup`, it's skipped for read-only reviews and waits for run approval on
+  someone else's code (B4).
 - The prompt reaches Claude Code, Codex and Gemini CLI on stdin, not as a command-line argument (visible in `ps`).
 - **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
   and approve are not implemented at all.

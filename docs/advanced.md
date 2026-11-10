@@ -146,6 +146,12 @@ allow_commands = ["npm test", "npm run lint"]   # prefix match, Claude Code and 
 prompt = "prompts/house-style.md"               # relative to the config dir
 ```
 
+`allow_commands = ["*"]` (Claude Code) lets the agent run any command, which it needs to run a
+project's checks the way CI does (`APP_KEY=… php artisan test`, pipes, one-off scripts). The deny
+list still applies (no `git push`, no forge CLIs), and with the sandbox on every command stays
+inside it: writes only in the worktree, no credentials, no network beyond `sandbox_domains`. With
+`sandbox = false` it means any command as you, so don't combine the two on repos you don't own.
+
 `nightporter repo <owner/name>` shows what all of this adds up to for one repo, including the
 contents of your prompt files and the repo's own `CLAUDE.md` / `AGENTS.md`.
 
@@ -228,6 +234,35 @@ Cursor CLI and Amp aren't supported: neither can run a job with only Night Porte
 that fails closed. See the [threat model](/threat-model#agent-sandboxes).
 
 OpenCode has no sandbox.
+
+## Dependencies and tests
+
+A fresh worktree has no `vendor/` or `node_modules/`, and the agent's commands have no network,
+so by default it can't run your tests. Let Night Porter install from your lockfiles before the
+agent starts:
+
+```toml
+[defaults.env]
+install = true
+```
+
+It runs the install for each lockfile in the repo root: `composer install`, `npm ci`,
+`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`, `cargo fetch --locked`. These
+run outside the sandbox with your own tools and registry logins, like `env.setup` commands, so
+the repo's install scripts run as you. They never run for a read-only review of someone else's
+code, and other people's branches wait for your run approval first. A failed install doesn't
+stop the job; the agent says what it couldn't run.
+
+With that and `allow_commands = ["*"]`, the agent runs the tests, linters and static analysis
+that cover its change and says which ones it ran.
+
+## Signed commits
+
+If your git config has `commit.gpgsign = true`, Night Porter signs the agent's commits with your
+own signing setup (GPG or SSH key, whatever `git commit -S` uses in that clone). The agent never
+sees the key: its commits are unsigned, and the daemon re-creates them signed before the checks
+run, so the commit you review is the one that's pushed. If signing fails (a key waiting for a
+passphrase, say), the job waits for you with a failed `signing` check. Nothing to configure.
 
 ## Environments (DDEV, Docker, …)
 

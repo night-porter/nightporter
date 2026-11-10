@@ -63,7 +63,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
 | `max_concurrent` | unlimited | running jobs for this repo |
-| `max_ci_attempts` | `3` | automatic CI-fix attempts before giving up (reset when CI goes green). Also the number of rounds per PR with a [review bot](advanced.md#review-bots) (never reset) |
+| `max_ci_attempts` | `3` | automatic CI-fix attempts before giving up (reset when CI goes green). Also the number of rounds per PR with a [review bot](/advanced#review-bots) (never reset) |
 | `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
