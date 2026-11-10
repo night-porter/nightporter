@@ -1056,7 +1056,7 @@ mod tests {
                     std::fs::create_dir_all(&p)?;
                     j.worktree = p.to_string_lossy().into();
                 }
-                db.update_job(&j)?;
+                db.seed_job(&j)?;
                 Ok(id)
             })
             .unwrap()

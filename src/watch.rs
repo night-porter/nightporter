@@ -14,6 +14,10 @@ fn job_json(j: &Job) -> serde_json::Value {
         "repo": j.repo.to_string(),
         "number": j.number,
         "status": j.status.label(),
+        // Stable for scripts and agents: `state` never changes wording, `actions` are the
+        // `nightporter <action> <id>` commands that apply now.
+        "state": j.status.as_str(),
+        "actions": j.status.actions(),
         "needs_you": j.status.needs_user(),
         "summary": j.summary.lines().next().unwrap_or_default(),
         "at": j.updated_at,

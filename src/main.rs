@@ -1042,7 +1042,7 @@ mod tests {
         let mut j = db.job(id).unwrap().unwrap();
         j.status = status;
         j.summary = summary.into();
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         id
     }
 

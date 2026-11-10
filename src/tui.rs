@@ -1200,7 +1200,7 @@ mod tests {
         j.status = JobStatus::AwaitingApproval;
         j.summary = "renamed foo".into();
         j.checks = vec![crate::state::CheckResult { name: "secrets".into(), ok: false, blocking: true, detail: "x".into() }];
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         // SAFETY: test-only env; no concurrent readers of NO_COLOR in this module.
         unsafe { std::env::set_var("NO_COLOR", "1") };
         let mut app = App::new(&paths, db);
@@ -1346,7 +1346,7 @@ mod tests {
         j.worktree = wt.to_string_lossy().into();
         j.branch = "nightporter/pr-4".into();
         j.meta.clone = clone.to_string_lossy().into();
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         let mut app = App::new(&paths, db);
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.key(key('6'));
@@ -1450,7 +1450,7 @@ mod tests {
             crate::forge::Reply { event: None, body: "summary".into() },
         ];
         j.diff = "+added".into();
-        db.update_job(&j).unwrap();
+        db.seed_job(&j).unwrap();
         db.log(id, "started").unwrap();
         let t = job_text(&db, &j);
         for want in [
