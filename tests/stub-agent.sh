@@ -15,4 +15,7 @@ for id in $(printf '%s' "$prompt" | sed -n 's/.*event `\([^`]*\)`.*/\1/p'); do
   replies="$replies{\\\"event\\\":\\\"$id\\\",\\\"body\\\":\\\"Done in $sha\\\"},"
 done
 replies="${replies%,}"
-printf '{"result":"ok\\n```nightporter\\n{\\"summary\\":\\"stub fixed it\\",\\"replies\\":[%s]}\\n```","total_cost_usd":0.01}\n' "$replies"
+# Review steps also give a verdict.
+verdict=""
+case "$prompt" in *"Task: review"*) verdict=',\"verdict\":\"approve\"';; esac
+printf '{"result":"ok\\n```nightporter\\n{\\"summary\\":\\"stub fixed it\\",\\"replies\\":[%s]%s}\\n```","total_cost_usd":0.01}\n' "$replies" "$verdict"

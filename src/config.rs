@@ -574,6 +574,10 @@ pub struct Maintainer {
     /// of PRs nobody asked you to look at.
     #[serde(default)]
     pub watch_prs: bool,
+    /// Outcomes a review job may post as a real review, after you approve the job: `comment`,
+    /// `request_changes`, `approve`. Empty: reviews are posted as a plain comment.
+    #[serde(default)]
+    pub review_verdicts: Vec<crate::forge::ReviewVerdict>,
     /// Reviews of someone else's PR may run its tests and env setup, after you approve running
     /// it. Off: they only read the code and don't wait for that approval (Claude Code, Gemini CLI).
     #[serde(default)]

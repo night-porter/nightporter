@@ -457,6 +457,16 @@ impl GitLab {
         Ok(())
     }
 
+    /// The review text as a note, then an approval for `approve`. GitLab has no API to request
+    /// changes, so `request_changes` is the note alone (its text says what needs to change).
+    pub async fn review(&self, repo: &RepoId, n: u64, verdict: super::ReviewVerdict, body: &str) -> Result<()> {
+        self.reply(repo, Target::Pr, n, None, body).await?;
+        if verdict == super::ReviewVerdict::Approve {
+            self.api.send(Method::POST, &format!("/projects/{}/merge_requests/{n}/approve", enc(&repo.path)), &json!({})).await?;
+        }
+        Ok(())
+    }
+
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
         let p = enc(&repo.path);
         let v = self

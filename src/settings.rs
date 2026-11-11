@@ -136,6 +136,11 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.maintainer.enabled", Bool, "Maintainer mode: triage, reproduce, fix or review others' issues and MRs on request."),
     s("defaults.maintainer.level", Choice(&["observe", "suggest", "draft"]), "Level for maintainer jobs (capped at draft)."),
     s("defaults.maintainer.label", Text, "Label that asks Night Porter to look at an issue or MR."),
+    s(
+        "defaults.maintainer.review_verdicts",
+        List,
+        "Post reviews as real reviews with these outcomes: comment, request_changes, approve. Empty: a plain comment.",
+    ),
     s("defaults.maintainer.watch_prs", Bool, "Put others' ready PRs/MRs in the inbox, to queue a review with one key."),
 ];
 

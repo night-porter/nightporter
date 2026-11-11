@@ -1081,6 +1081,9 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     }
     if !j.replies.is_empty() {
         let _ = writeln!(s, "\nReplies to post:");
+        if let Some(v) = j.meta.review {
+            let _ = writeln!(s, "  (the first one as a review: {})", crate::state::enum_str(&v).replace('_', " ").to_uppercase());
+        }
         for r in &j.replies {
             let _ = writeln!(s, "  → {}\n    {}", r.event.as_deref().unwrap_or("(PR comment)"), r.body.replace('\n', "\n    "));
         }

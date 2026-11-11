@@ -41,7 +41,7 @@ when that something was written by a stranger.
 | `draft` | agent commits; Night Porter pushes and replies after you approve |
 | `auto` | Night Porter pushes and replies on its own (pre-push checks still apply) |
 
-Night Porter **never** merges, force-pushes, closes or approves.
+Night Porter **never** merges, force-pushes or closes, and approves a PR only as a review you opted into (`review_verdicts`) and approved yourself.
 
 ## Features
 

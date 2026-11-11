@@ -78,7 +78,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
 | `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
-| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code) |
+| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_verdicts` (`[]`: post reviews as a real review with the agent's outcome when it's listed here: `comment`, `request_changes`, `approve`; always waits for your approval; GitLab has no request-changes API, so that one is a comment), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code) |
 
 Arrays in a repo file replace the default, except the trust lists (`allow_users`,
 `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`) and `checks.protected`, which combine
@@ -95,7 +95,7 @@ global deny.
 - The secrets, protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*` (`checks.allow_env_variants = true` frees `.env.*` for one repo; `.env` stays), keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `GEMINI.md`, `.claude/`, `.opencode/`, `.codex/`, `.gemini/`, `.cursor/`.
-- Night Porter never merges, force-pushes, closes or approves.
+- Night Porter never merges, force-pushes or closes. It approves a PR only when you opt in with `review_verdicts` and approve that review job yourself.
 
 ## Notification targets
 

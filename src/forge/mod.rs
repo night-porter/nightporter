@@ -118,6 +118,15 @@ pub enum Trigger {
     MergeConflict,
 }
 
+/// How a review job's reply is posted: as a GitHub/Forgejo/GitLab review with this outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Comment,
+    RequestChanges,
+    Approve,
+}
+
 /// What a trusted maintainer asked for in maintainer mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -552,6 +561,11 @@ impl Forge {
             Forge::GitHub(g) => g.open_threads(repo, number).await,
             Forge::GitLab(_) | Forge::Forgejo(_) => Ok(vec![]),
         }
+    }
+
+    /// Post `body` as a review of PR/MR `n` with `verdict`.
+    pub async fn review(&self, repo: &RepoId, n: u64, verdict: ReviewVerdict, body: &str) -> Result<()> {
+        each!(self, g => g.review(repo, n, verdict, body).await)
     }
 
     /// Open a draft PR/MR (maintainer `fix`). Returns its URL.

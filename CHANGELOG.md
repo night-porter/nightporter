@@ -8,6 +8,12 @@ All notable changes to Night Porter. The format follows
 
 ### Added
 
+- **Review verdicts**: with `review_verdicts = ["request_changes", "approve"]` (any of
+  `comment`, `request_changes`, `approve`) under `[maintainer]`, a review job's reply is posted
+  as a real review with the agent's outcome instead of a plain comment. It always waits for
+  your approval, even at `auto`; the job shows the outcome before you approve. Never on your
+  own PR. GitLab: approve = note + approval; request changes = note (no API for it).
+
 - **Watch all PRs**: with `watch_prs = true` under `[maintainer]`, every ready (non-draft)
   PR/MR by someone else in a subscribed repo lands in the inbox, polled every `sweep_interval`,
   for PRs nobody assigned you. Allow once (`o`) queues a review at maintainer level; ignore
