@@ -83,6 +83,9 @@ pub(super) struct ListItem {
     created_at: String,
     #[serde(default)]
     labels: Vec<Name>,
+    /// GitHub `/pulls`; Forgejo/Gitea say it in `pull_request.draft` (newer) or a `WIP:` title.
+    #[serde(default)]
+    draft: bool,
     /// GitHub lists PRs among issues, marked with this.
     #[serde(default)]
     pub pull_request: Option<Value>,
@@ -94,7 +97,11 @@ pub(super) struct Name {
 
 impl ListItem {
     pub fn listed(self) -> Listed {
+        let draft = self.draft
+            || self.pull_request.as_ref().is_some_and(|p| p["draft"] == true)
+            || ["wip:", "[wip]"].iter().any(|w| self.title.to_ascii_lowercase().starts_with(w));
         Listed {
+            draft,
             number: self.number,
             title: self.title,
             author: self.user.login,

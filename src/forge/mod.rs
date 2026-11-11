@@ -391,13 +391,15 @@ pub struct Reply {
 }
 
 /// One open issue or PR/MR, as listed for `nightporter sweep`. Text is untrusted.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Listed {
     pub number: u64,
     pub title: String,
     pub author: String,
     pub created_at: String,
     pub labels: Vec<String>,
+    /// A draft PR/MR (never set for issues).
+    pub draft: bool,
 }
 
 /// Which listed items a sweep takes: all set conditions must hold.
@@ -759,6 +761,7 @@ mod tests {
             author: who.into(),
             created_at: at.into(),
             labels: labels.iter().map(ToString::to_string).collect(),
+            ..Default::default()
         };
         let items = vec![
             it(3, "2026-10-01T00:00:00Z", "ann", &["Bug"]),
