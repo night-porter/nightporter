@@ -252,6 +252,13 @@ pub struct JobMeta {
     /// Indexes of replies already posted (delivery can be retried without double-posting).
     #[serde(default)]
     pub posted: Vec<usize>,
+    /// The PR/MR author (reviews of your own PR can't approve or request changes).
+    #[serde(default)]
+    pub pr_author: String,
+    /// A review job's first reply is posted as a review with this outcome (already checked
+    /// against `review_verdicts`).
+    #[serde(default)]
+    pub review: Option<crate::forge::ReviewVerdict>,
     /// The status a dismissed job had, so restore can put it back.
     #[serde(default)]
     pub dismissed_from: Option<JobStatus>,

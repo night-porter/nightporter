@@ -4,7 +4,7 @@
 use crate::checks::{self, Diff};
 use crate::config::{Level, RepoSettings};
 use crate::daemon::Ctx;
-use crate::forge::{Event, IssueInfo, PrInfo, PrState, Target, Verb};
+use crate::forge::{Event, IssueInfo, PrInfo, PrState, ReviewVerdict, Target, Verb};
 use crate::git::{self, git};
 use crate::notify::{self, Kind};
 use crate::packs::{self, Hook};
@@ -191,6 +191,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
         Target::Pr => {
             let pr = forge.lock().await.pr(&j.repo, j.number).await?;
             j.meta.title.clone_from(&pr.title);
+            j.meta.pr_author.clone_from(&pr.author);
             if pr.state != PrState::Open {
                 finish(ctx, j, format!("PR is {:?}; nothing to do", pr.state).to_lowercase())?;
                 return Ok(None);
@@ -458,6 +459,17 @@ async fn inspect(
     j.checks = results;
     j.diff = truncate(&patch, 2_000_000).to_string();
     j.replies = outcome.replies;
+    j.meta.review = None;
+    if j.meta.verb == Some(Verb::Review) && j.target == Target::Pr && !j.replies.is_empty() {
+        let me = ctx.forge(&j.repo)?.lock().await.me().to_string();
+        let own = j.meta.pr_author.eq_ignore_ascii_case(&me);
+        j.meta.review = review_verdict(outcome.verdict.as_deref(), &s.maintainer.review_verdicts, own);
+        if let (Some(said), None) = (&outcome.verdict, j.meta.review)
+            && !s.maintainer.review_verdicts.is_empty()
+        {
+            log(ctx, j.id, &format!("the review says {said}; posting it as a plain comment (not in review_verdicts, or your own PR)"));
+        }
+    }
     // The agent quoted its own (unsigned) SHAs: point them at the signed commits.
     j.summary = resha(&j.summary, &signed);
     for reply in &mut j.replies {
@@ -471,6 +483,13 @@ async fn inspect(
         reply.body.push_str(prompts::FOOTER_MARK);
     }
     Ok(commits)
+}
+
+/// The outcome to post a review with: what the agent decided, if `allowed` has it. Never on your
+/// own PR (forges refuse it).
+fn review_verdict(said: Option<&str>, allowed: &[ReviewVerdict], own: bool) -> Option<ReviewVerdict> {
+    let v: ReviewVerdict = serde_json::from_value(serde_json::Value::from(said?)).ok()?;
+    (allowed.contains(&v) && !own).then_some(v)
 }
 
 /// Replace each old SHA in `text`, full or abbreviated to 7+ characters, with the new one at the
@@ -494,7 +513,8 @@ async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level) -> Result<
     let clean = checks::all_ok(&j.checks);
     j.status = match lvl {
         Level::Suggest => JobStatus::Ready,
-        Level::Auto if clean => JobStatus::Approved,
+        // A formal review (approve above all) always waits for you.
+        Level::Auto if clean && j.meta.review.is_none() => JobStatus::Approved,
         _ => JobStatus::AwaitingApproval,
     };
     ctx.db(|d| d.update_job(j))?;
@@ -567,9 +587,14 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         if j.target == Target::Issue && has_code && ev.is_none() && verb == Some(Verb::Fix) {
             continue;
         }
-        f.reply(&j.repo, j.target, j.number, ev, &r.body)
-            .await
-            .with_context(|| format!("post reply to {}", r.event.as_deref().unwrap_or("PR")))?;
+        if let (0, Some(v)) = (i, j.meta.review) {
+            f.review(&j.repo, j.number, v, &r.body).await.with_context(|| format!("post review ({})", crate::state::enum_str(&v)))?;
+            log(ctx, id, &format!("posted review: {}", crate::state::enum_str(&v)));
+        } else {
+            f.reply(&j.repo, j.target, j.number, ev, &r.body)
+                .await
+                .with_context(|| format!("post reply to {}", r.event.as_deref().unwrap_or("PR")))?;
+        }
         j.meta.posted.push(i);
         ctx.db(|d| d.update_job(&j))?;
         if s.reply.resolve_threads
@@ -938,6 +963,19 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_verdict_only_when_allowed_and_not_yours() {
+        use ReviewVerdict::{Approve, Comment, RequestChanges};
+        let all = [Comment, RequestChanges, Approve];
+        assert_eq!(review_verdict(Some("approve"), &all, false), Some(Approve));
+        assert_eq!(review_verdict(Some("request_changes"), &all, false), Some(RequestChanges));
+        assert_eq!(review_verdict(Some("approve"), &[Comment, RequestChanges], false), None, "approve needs its own opt-in");
+        assert_eq!(review_verdict(Some("approve"), &[], false), None);
+        assert_eq!(review_verdict(Some("approve"), &all, true), None, "never on your own PR");
+        assert_eq!(review_verdict(Some("lgtm"), &all, false), None);
+        assert_eq!(review_verdict(None, &all, false), None);
+    }
 
     #[test]
     fn lockfile_installs_follow_the_lockfiles_present() {

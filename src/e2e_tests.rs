@@ -606,7 +606,7 @@ async fn untrusted_head_needs_run_approval_bound_to_sha() {
 async fn review_request_world(maintainer: &str) -> World {
     let toml =
         format!("allow_commands = [\"make test\"]\n[env]\nsetup = [\"touch setup-ran\"]\n[maintainer]\nenabled = true\n{maintainer}");
-    let w = world_with(&toml, vec![]).await;
+    let mut w = world_with(&toml, vec![]).await;
     let head = sh(&w.bare, "git rev-parse feature");
     let pull = format!(
         r#"{{"number":1,"title":"Add miner","body":"","user":{{"login":"stranger","type":"User"}},"state":"open","merged":false,"draft":false,
@@ -615,8 +615,9 @@ async fn review_request_world(maintainer: &str) -> World {
         b = w.bare.display()
     );
     let note = r#"[{"reason":"review_requested","updated_at":"2026-11-05T10:00:00Z","subject":{"type":"PullRequest","url":"https://api.github.com/repos/o/r/pulls/1"},"repository":{"full_name":"o/r"}}]"#;
-    let (url, _log) = mock(vec![
+    let (url, log) = mock(vec![
         ("GET", "/user", r#"{"login":"me","type":"User"}"#.into()),
+        ("POST", "/repos/o/r/pulls/1/reviews", "{}".into()),
         ("GET", "/notifications", note.into()),
         ("GET", "/repos/o/r/pulls/1", pull),
         ("GET", "/repos/o/r/issues/1/comments", "[]".into()),
@@ -628,7 +629,29 @@ async fn review_request_world(maintainer: &str) -> World {
     let mut gh = Forge::GitHub(GitHub::new("github.com", Api::new(&url, "t".to_string().into(), false).unwrap()));
     gh.login().await.unwrap();
     *w.ctx.forges[&(ForgeKind::GitHub, "github.com".to_string())].lock().await = gh;
+    w.log = log;
     w
+}
+
+#[tokio::test]
+async fn review_posts_an_allowed_verdict_after_you_approve() {
+    let w = review_request_world("review_requests = true\nreview_verdicts = [\"request_changes\", \"approve\"]").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    job::run(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
+    assert_eq!(j.meta.review, Some(crate::forge::ReviewVerdict::Approve));
+    assert!(!w.log.lock().unwrap().iter().any(|(m, _, _)| m == "POST"), "nothing before you approve");
+    ctx.db(|d| actions::approve(d, id, false).map(|_| ())).unwrap();
+    job::deliver(ctx, id).await.unwrap();
+    let log = w.log.lock().unwrap();
+    let review = log.iter().find(|(m, p, _)| m == "POST" && p == "/repos/o/r/pulls/1/reviews").expect("posted as a review");
+    let v: serde_json::Value = serde_json::from_str(&review.2).unwrap();
+    assert_eq!(v["event"], "APPROVE");
+    assert!(!log.iter().any(|(m, p, _)| m == "POST" && p == "/repos/o/r/issues/1/comments"), "not also as a comment");
 }
 
 #[tokio::test]

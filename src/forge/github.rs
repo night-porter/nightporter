@@ -554,6 +554,16 @@ impl GitHub {
         Ok(out)
     }
 
+    pub async fn review(&self, repo: &RepoId, n: u64, verdict: super::ReviewVerdict, body: &str) -> Result<()> {
+        let event = match verdict {
+            super::ReviewVerdict::Comment => "COMMENT",
+            super::ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+            super::ReviewVerdict::Approve => "APPROVE",
+        };
+        self.api.send(Method::POST, &format!("/repos/{}/pulls/{n}/reviews", repo.path), &json!({ "event": event, "body": body })).await?;
+        Ok(())
+    }
+
     pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
         ghlike::open_pr(&self.api, repo, &json!({ "title": title, "head": head, "base": base, "body": body, "draft": true })).await
     }

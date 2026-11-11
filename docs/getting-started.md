@@ -152,7 +152,7 @@ Jobs show up in the **Queue** tab when your subscribed PRs get activity. Press `
 | `draft` | the agent commits; Night Porter pushes and replies after you approve |
 | `auto` | Night Porter pushes and replies on its own (pre-push checks still apply) |
 
-At any level, Night Porter **never** merges, force-pushes, closes or approves.
+At any level, Night Porter **never** merges, force-pushes or closes. It approves a PR only when you opt in with `review_verdicts` and approve that review job yourself.
 
 ## Subscribing to more repos
 
