@@ -110,7 +110,8 @@ Comments by collaborators, maintainers, bots or apps posting for you are ignored
 comment ever reaches the agent as feedback. `approve` from a comment is stricter than `a`: it
 can't approve past a failed blocking check (`A`), and it can't let the agent run someone else's
 code (**NEEDS RUN APPROVAL**); use the TUI for those. "Approve" is always Night Porter's job,
-never the PR: Night Porter still never merges, closes or approves a PR. Night Porter looks at
+not the PR: Night Porter never merges or closes a PR. If the job is a review with an outcome
+from `review_verdicts`, approving the job posts that review, an approval included. Night Porter looks at
 PRs whose newest job is waiting for you or changed in the last three days, once per
 `poll_interval`. Set `pr_commands = false` to turn it off.
 
