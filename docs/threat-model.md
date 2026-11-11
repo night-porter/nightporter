@@ -120,8 +120,11 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
   hand. Like `env.setup`, it's skipped for read-only reviews and waits for run approval on
   someone else's code (B4).
 - The prompt reaches Claude Code, Codex and Gemini CLI on stdin, not as a command-line argument (visible in `ps`).
-- **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push, close
-  and approve are not implemented at all.
+- **Only Night Porter pushes and posts**, and only after the B3 checks. Merge, force-push and
+  close are not implemented at all. A review job can approve or request changes only when the
+  repo lists that outcome in `review_verdicts` (opt-in), never on your own PR, and always after
+  you approve the job, even at `auto`. The agent's verdict is a word from a fixed set; anything
+  else posts a plain comment.
 - With Claude Code, the agent's shell commands run in Claude Code's OS sandbox by default
   (`sandbox = true`): no network unless you list domains, and the read denies above also apply
   to commands. It fails closed: if the sandbox can't start, the job fails. Verified in headless

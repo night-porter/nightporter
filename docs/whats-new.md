@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.4: reviews prepared when someone requests yours, backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
+description: "What's new in Night Porter 0.4: every ready PR in the inbox and real reviews (approve, request changes), reviews prepared when someone requests yours, backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
 ---
 
 # What's new
@@ -7,6 +7,25 @@ description: "What's new in Night Porter 0.4: reviews prepared when someone requ
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
 ## 0.4
+
+### Every ready PR, real reviews (0.4.5)
+
+**Watch every ready PR.** `watch_prs = true` under `[maintainer]` puts each ready (not draft)
+PR/MR by someone else in the inbox, not just the ones where your review was requested. Press
+`o` to queue a review, `i` to skip it.
+
+**Approve or request changes.** With `review_verdicts`, a review job is posted as a real
+review with the agent's outcome instead of a comment. It always waits for you to approve it.
+
+```toml
+[maintainer]
+enabled = true
+watch_prs = true
+review_verdicts = ["request_changes", "approve"]
+```
+
+See [Approve or request changes](/advanced#approve-or-request-changes) and
+[Watch every ready PR](/advanced#watch-every-ready-pr).
 
 ### Review bots, tests that actually run, signed commits (0.4.4)
 
