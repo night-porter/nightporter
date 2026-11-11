@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-11
+
 ### Added
 
 - **Review verdicts**: with `review_verdicts = ["request_changes", "approve"]` (any of
@@ -242,7 +244,9 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/night-porter/nightporter/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/night-porter/nightporter/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/night-porter/nightporter/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/night-porter/nightporter/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/night-porter/nightporter/compare/v0.4.0...v0.4.1

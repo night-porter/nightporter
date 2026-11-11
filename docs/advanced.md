@@ -326,6 +326,38 @@ It runs once per PR head while your review is still requested, so a re-request a
 gets a fresh review, and none is made once you've submitted yours. At `draft` (the default),
 approving the job posts the review as a PR comment. GitHub only for now.
 
+### Approve or request changes
+
+By default a review is posted as a comment. To post it as a real review, list the outcomes
+Night Porter may use:
+
+```toml
+[maintainer]
+review_verdicts = ["request_changes", "approve"]   # also "comment"
+```
+
+The agent ends each review with `approve`, `request_changes` or `comment`. If its outcome is in
+the list, the job shows it (`the first one as a review: APPROVE`) and approving the job posts
+the review with that outcome. Otherwise, or on your own PR, it's a plain comment. These jobs
+always wait for you, even at `auto`. On GitLab, approve posts a note and approves the MR;
+GitLab has no API to request changes, so that one is a note.
+
+### Watch every ready PR
+
+Review requests only cover PRs you were asked to look at. To see the rest:
+
+```toml
+[maintainer]
+enabled = true
+watch_prs = true
+```
+
+Every `sweep_interval` (10 minutes), Night Porter lists the repo's open PRs/MRs and puts each
+ready one by someone else in the inbox. Drafts wait until they're marked ready. In the inbox,
+`o` (allow once) queues a review and `i` ignores the PR for good. The first look at a repo
+fills the inbox with its open PRs without notifying you; after that each new one notifies.
+`a` (allow always) trusts the PR's author on the repo, as for any inbox item.
+
 ### Work through the backlog
 
 `nightporter sweep` queues a maintainer job for each open issue in a repo (or each open PR/MR by
