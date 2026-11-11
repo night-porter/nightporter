@@ -6,6 +6,12 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Concise style spaces out multi-point replies**: a review or list of notes now leads with the
+  verdict, then one `-` bullet per note, instead of one dense paragraph. Simple replies stay one
+  to three sentences.
+
 ## [0.4.5] - 2026-11-11
 
 ### Added
