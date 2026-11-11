@@ -136,6 +136,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.maintainer.enabled", Bool, "Maintainer mode: triage, reproduce, fix or review others' issues and MRs on request."),
     s("defaults.maintainer.level", Choice(&["observe", "suggest", "draft"]), "Level for maintainer jobs (capped at draft)."),
     s("defaults.maintainer.label", Text, "Label that asks Night Porter to look at an issue or MR."),
+    s("defaults.maintainer.watch_prs", Bool, "Put others' ready PRs/MRs in the inbox, to queue a review with one key."),
 ];
 
 #[derive(Clone)]
@@ -371,10 +372,11 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  starts on      {}", triggers.join(", "));
     let _ = writeln!(
         o,
-        "  maintainer     {} (level {}, label {:?})",
+        "  maintainer     {} (level {}, label {:?}, watch PRs {})",
         on(s.maintainer.enabled),
         s.maintainer.level.as_str(),
-        s.maintainer.label
+        s.maintainer.label,
+        on(s.maintainer.watch_prs)
     );
 
     let _ = writeln!(o, "\nREPLIES");

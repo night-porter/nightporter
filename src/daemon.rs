@@ -58,7 +58,7 @@ impl Ctx {
         let only = cfg.settings_for(&self.paths, repo).ok().and_then(|s| s.notify);
         notify::send(&cfg.notifications, only.as_deref(), ev);
     }
-    fn subscribed(&self, cfg: &Config) -> Vec<(RepoId, crate::config::RepoSettings)> {
+    pub(crate) fn subscribed(&self, cfg: &Config) -> Vec<(RepoId, crate::config::RepoSettings)> {
         self.clones()
             .keys()
             .filter_map(|r| cfg.settings_for(&self.paths, r).ok().filter(|s| s.subscribed).map(|s| (r.clone(), s)))
@@ -249,6 +249,9 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
         }
     }
     ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    if let Err(e) = crate::sweep::watch_prs(ctx, &cfg, key).await {
+        tracing::warn!("watch prs {}: {e:#}", key.1);
+    }
     if cfg.pr_commands
         && let Err(e) = pr_commands(ctx, key).await
     {
@@ -696,6 +699,7 @@ mod tests {
                 author: "a".into(),
                 created_at: String::new(),
                 labels: vec![],
+                draft: false,
             })
             .collect();
         crate::sweep::queue(&ctx, &repo, Target::Issue, crate::forge::Verb::Triage, "me", &items).unwrap();

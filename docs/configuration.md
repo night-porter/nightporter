@@ -78,7 +78,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
 | `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
-| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_runs_code` (`false`: reviews only read the code) |
+| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code) |
 
 Arrays in a repo file replace the default, except the trust lists (`allow_users`,
 `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`) and `checks.protected`, which combine

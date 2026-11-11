@@ -410,13 +410,22 @@ impl GitLab {
             created_at: String,
             #[serde(default)]
             labels: Vec<String>,
+            #[serde(default)]
+            draft: bool,
         }
         let kind = if target == Target::Pr { "merge_requests" } else { "issues" };
         let path = format!("/projects/{}/{kind}?state=opened&per_page=100", enc(&repo.path));
         let items: Vec<Item> = self.api.get_all(&path, super::LIST_PAGES).await?;
         Ok(items
             .into_iter()
-            .map(|i| super::Listed { number: i.iid, title: i.title, author: i.author.username, created_at: i.created_at, labels: i.labels })
+            .map(|i| super::Listed {
+                number: i.iid,
+                title: i.title,
+                author: i.author.username,
+                created_at: i.created_at,
+                labels: i.labels,
+                draft: i.draft,
+            })
             .collect())
     }
 

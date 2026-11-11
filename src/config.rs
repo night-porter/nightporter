@@ -559,6 +559,7 @@ pub struct Env {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools, reason = "mirrors the [maintainer] TOML table")]
 pub struct Maintainer {
     #[serde(default)]
     pub enabled: bool,
@@ -569,6 +570,10 @@ pub struct Maintainer {
     /// Queue a review when someone requests yours on a PR (GitHub).
     #[serde(default)]
     pub review_requests: bool,
+    /// Put each ready (non-draft) PR/MR by someone else in the inbox, so you can queue a review
+    /// of PRs nobody asked you to look at.
+    #[serde(default)]
+    pub watch_prs: bool,
     /// Reviews of someone else's PR may run its tests and env setup, after you approve running
     /// it. Off: they only read the code and don't wait for that approval (Claude Code, Gemini CLI).
     #[serde(default)]

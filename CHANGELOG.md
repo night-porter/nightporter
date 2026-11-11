@@ -6,6 +6,14 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Watch all PRs**: with `watch_prs = true` under `[maintainer]`, every ready (non-draft)
+  PR/MR by someone else in a subscribed repo lands in the inbox, polled every `sweep_interval`,
+  for PRs nobody assigned you. Allow once (`o`) queues a review at maintainer level; ignore
+  (`i`) drops it. Drafts show up once they're marked ready. The first look at a repo fills the
+  inbox quietly; after that each new PR notifies (`new_author`).
+
 ## [0.4.4] - 2026-11-11
 
 ### Added
