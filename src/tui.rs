@@ -36,6 +36,8 @@ const TABS: [(Tab, &str); 7] = [
 enum Suspend {
     Setup,
     Editor(std::path::PathBuf),
+    /// Edit a job's replies in $EDITOR.
+    Replies(i64),
 }
 
 /// A pending yes/no question and what to do on "y".
@@ -182,6 +184,7 @@ impl App {
                         "setup finished".into()
                     }
                     Suspend::Editor(path) => crate::settings::edit_in_editor(&path).unwrap_or_else(|e| format!("error: {e:#}")),
+                    Suspend::Replies(id) => actions::edit_replies(&self.paths, &self.db, id).unwrap_or_else(|e| format!("error: {e:#}")),
                 };
                 *term = ratatui::init();
                 self.refresh(true);
@@ -525,6 +528,15 @@ impl App {
                 return;
             }
             KeyCode::Char('t') => actions::retry(&self.db, id).map(|n| format!("re-queued {n} event(s)")),
+            KeyCode::Char('e') => {
+                // Checked here so a job that can't be edited says why without leaving the TUI.
+                match actions::replies_file(&self.db, id) {
+                    Ok(_) => self.suspend = Some(Suspend::Replies(id)),
+                    Err(e) => self.msg = format!("error: {e:#}"),
+                }
+                return;
+            }
+            KeyCode::Char('m') => actions::amend(&self.db, id).map(String::from),
             KeyCode::Char('x') => actions::dismiss(&self.db, id).map(|()| {
                 self.undo_jobs.push(id);
                 self.detail = None;
@@ -859,8 +871,8 @@ impl App {
             // Kept under 80 columns.
             _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file Esc back",
             (false, Tab::Repos | Tab::Settings | Tab::History) if self.filtering => "type to search, Enter keep results, Esc clear search",
-            (true, _) => "↑↓ scroll a approve r reject x dismiss u undo t retry h take over y copy Esc",
-            (_, Tab::Queue) => "Enter open a approve r reject x dismiss u undo t retry h take over ? q quit",
+            (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over y copy Esc",
+            (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over q quit",
             (_, Tab::History) => "Enter open x dismiss u restore X delete t retry / search ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny ? help q quit",
             (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit / search ? q",
@@ -1151,6 +1163,9 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies
        h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
+       e edit the replies in $EDITOR before they're posted (checked again on save)
+       m amend: after you change files in the job's worktree (by hand or in a take-over), the
+          daemon commits them, signs and checks everything again, and asks you once more
 Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
        changes; ignored files like node_modules aren't kept)   h take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
@@ -1229,6 +1244,9 @@ mod tests {
         assert_eq!(app.db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
         press(&mut app, KeyCode::Esc);
         assert!(screen_at(&mut app, 80, 24).contains("q quit"), "footer must fit 80 columns");
+        // e opens the replies in $EDITOR (via the main loop), m queues an amend.
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(app.suspend.take(), Some(Suspend::Replies(i)) if i == id) || app.msg.contains("no replies"), "{}", app.msg);
         // Reject asks first.
         press(&mut app, KeyCode::Char('r'));
         press(&mut app, KeyCode::Char('n'));

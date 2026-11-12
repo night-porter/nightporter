@@ -8,6 +8,11 @@ All notable changes to Night Porter. The format follows
 
 ### Added
 
+- **Edit before it goes out**: `e` in the TUI (or `nightporter edit <id>`) opens a waiting job's
+  replies in `$EDITOR`; the footer/marker go back on and the reply checks run again. `m` (or
+  `nightporter amend <id>`) picks up your own changes in the job's worktree: committed, signed
+  and checked again like the agent's, no agent run, then back to you for approval.
+
 - **No-trace replies**: `reply.attribution` per repo: `footer` (default: the visible "via Night
   Porter" line plus the hidden `<!-- nightporter -->` marker), `marker` (hidden only, same as
   `footer = false`) or `none` (neither; command error replies drop the "Night Porter:" prefix).

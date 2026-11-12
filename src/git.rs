@@ -83,7 +83,7 @@ pub async fn prepare_worktree(
 }
 
 /// `wt/.git` is a regular file naming a git dir directly inside the clone's `worktrees/`.
-async fn gitfile_points_into(clone: &Path, wt: &Path) -> bool {
+pub async fn gitfile_points_into(clone: &Path, wt: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(wt.join(".git")) else { return false };
     let Ok(text) = std::fs::read_to_string(wt.join(".git")) else { return false };
     let Some(dir) = text.trim_end().strip_prefix("gitdir: ") else { return false };

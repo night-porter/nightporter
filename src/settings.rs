@@ -289,6 +289,13 @@ pub fn set(paths: &Paths, s: &Setting, input: &str) -> Result<String> {
     Ok(msg)
 }
 
+/// Open `path` in `$VISUAL` / `$EDITOR` (else `vi`) and wait. `false`: the editor failed.
+pub fn run_editor(path: &Path) -> Result<bool> {
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    // Through the shell so EDITOR="code --wait" works.
+    Ok(std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(path).status()?.success())
+}
+
 /// Edit `path` in `$VISUAL` / `$EDITOR` (else `vi`), on a copy. The copy replaces the file only
 /// if it validates; otherwise you can fix it or throw it away. Runs outside the TUI.
 pub fn edit_in_editor(path: &Path) -> Result<String> {
@@ -301,10 +308,8 @@ pub fn edit_in_editor(path: &Path) -> Result<String> {
     // Outside the config folder, so the daemon never sees a half-edited file.
     let tmp = std::env::temp_dir().join(format!("nightporter-{}-{name}", std::process::id()));
     std::fs::write(&tmp, &orig)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
     let result = loop {
-        // Through the shell so EDITOR="code --wait" works.
-        let ok = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&tmp).status()?.success();
+        let ok = run_editor(&tmp)?;
         let text = std::fs::read_to_string(&tmp)?;
         if !ok || text == orig {
             break Ok("no changes saved".into());

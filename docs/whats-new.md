@@ -8,9 +8,15 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.4
 
-### No-trace replies, cheaper models per job (next release)
+### Edit before it goes out, no-trace replies, cheaper models (next release)
 
 <!-- Rename the heading to the version when it ships. -->
+
+**Fix it up before it goes out.** Press `e` on a job waiting for you and its replies open in
+your editor: change a word, drop one, save. Press `m` after changing files in the job's
+worktree (by hand or after `h`), and Night Porter commits, signs and checks your edits like the
+agent's, then waits for you again. No take-over needed for a one-line fix. See
+[Fix it up before it goes out](/daily-use#fix-it-up-before-it-goes-out).
 
 **Footer, marker, or neither.** Every reply carries a hidden `<!-- nightporter -->` marker, and
 by default a visible "via Night Porter" line too. Where a team doesn't want either in the page

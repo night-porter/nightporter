@@ -206,6 +206,17 @@ pub fn sign(body: &str, attribution: Attribution, agent: crate::config::AgentKin
     out
 }
 
+/// [`sign`] undone, for editing: the marker and footer off, `/nightporter` readable again.
+pub fn unsign(body: &str) -> String {
+    let mut b = body.strip_suffix(FOOTER_MARK).unwrap_or(body).trim_end();
+    if b.ends_with(")</sub>")
+        && let Some(i) = b.rfind("<sub>— via Night Porter (")
+    {
+        b = b[..i].trim_end();
+    }
+    b.replace("/\u{200b}nightporter", "/nightporter")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +231,9 @@ mod tests {
         assert!(!m.contains("via Night Porter") && m.ends_with(FOOTER_MARK));
         let n = sign(b, Attribution::None, Claude);
         assert!(!n.contains("Night Porter") && !n.contains("<!--") && crate::forge::parse_control(&n).is_none());
+        for s in [f, m, n] {
+            assert_eq!(unsign(&s), b);
+        }
     }
     use crate::forge::{ForgeKind, RepoId, Role, Target};
 

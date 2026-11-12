@@ -49,6 +49,7 @@ impl Disposition {
 /// queued ──▶ running ──┬──▶ done | failed
 ///   ▲                  ├──▶ awaiting_run_approval ──approve──▶ queued
 ///   │                  ├──▶ awaiting_approval ──approve──▶ approved ──▶ done | failed
+///   └──────────── awaiting_approval ──amend──▶ queued (your worktree edits, checked again)
 ///   │                  ├──▶ approved (auto, clean checks)
 ///   │                  └──▶ ready (suggest) ──approve──▶ done
 ///   └─ a daemon error before running ──▶ failed
@@ -140,7 +141,7 @@ impl JobStatus {
             (Queued, Running | Rejected | Failed)
             | (Running, Done | Failed | AwaitingRunApproval | AwaitingApproval | Approved | Ready)
             | (AwaitingRunApproval, Queued)
-            | (AwaitingApproval, Approved)
+            | (AwaitingApproval, Approved | Queued)
             | (Approved, Done | Failed)
             | (Ready, Done)
             | (AwaitingRunApproval | AwaitingApproval | Ready, Rejected) => true,
@@ -259,6 +260,9 @@ pub struct JobMeta {
     /// against `review_verdicts`).
     #[serde(default)]
     pub review: Option<crate::forge::ReviewVerdict>,
+    /// Queued by `amend`: the next run commits your worktree edits and checks them, no agent.
+    #[serde(default)]
+    pub amend: bool,
     /// The status a dismissed job had, so restore can put it back.
     #[serde(default)]
     pub dismissed_from: Option<JobStatus>,
