@@ -738,6 +738,9 @@ impl Config {
         }
         let s: RepoSettings = merged.try_into()?;
         crate::schedule::validate(&s.schedule)?;
+        if let Some(k) = s.plan_first.iter().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
+            bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
+        }
         let known = |n: &String| n == "desktop" || self.notifications.targets.iter().any(|t| &t.name == n);
         if let Some(n) = s.notify.iter().chain(s.schedule.iter().filter_map(|w| w.notify.as_ref())).flatten().find(|n| !known(n)) {
             bail!("unknown notification target {n:?} in notify (use desktop or a [[notifications.targets]] name)");
@@ -1081,6 +1084,8 @@ mod tests {
         assert_eq!(args(JobKind::of(None, [T::CiFailure, T::Comment])), "--model opus", "mixed batch");
         assert_eq!(args(JobKind::of(Some(Verb::Triage), [T::Comment])), "--model opus", "no claude entry: keep agent_args");
         assert!(Config::parse("[defaults.trigger_agent_args]\nnope = []").and_then(|c| c.resolve(None)).is_err());
+        assert!(Config::parse("[defaults]\nplan_first = [\"plan\"]").is_err(), "plan is a step, not a kind of job");
+        assert!(Config::parse("[defaults]\nplan_first = [\"fix\", \"ci_failure\"]").is_ok());
     }
 
     #[test]

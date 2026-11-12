@@ -34,6 +34,11 @@ impl Paths {
     pub fn repo_file(&self, repo: &crate::forge::RepoId) -> PathBuf {
         self.repos_dir().join(repo.forge.as_str()).join(format!("{}.toml", repo.path))
     }
+    /// A path from config: `~/` expanded, relative to the config folder.
+    pub fn resolve(&self, p: &str) -> PathBuf {
+        let p = expand_tilde(p);
+        if p.is_relative() { self.config_dir.join(p) } else { p }
+    }
     pub fn packs_dir(&self) -> PathBuf {
         self.data_dir.join("packs")
     }

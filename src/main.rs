@@ -154,7 +154,7 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
         /// How many days back.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
         days: u32,
     },
     /// Learn from your fixes on a repo: a job proposes better instructions for it, for you to approve.

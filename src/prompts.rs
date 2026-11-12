@@ -2,13 +2,13 @@
 
 use crate::config::{Attribution, RepoSettings};
 use crate::forge::{Event, PrInfo, Trigger, Verb};
-use crate::paths::{Paths, expand_tilde};
+use crate::paths::Paths;
 use anyhow::{Context, Result};
 use std::fmt::Write as _;
 
 pub const SYSTEM: &str = include_str!("../prompts/system.md");
 pub const OUTPUT: &str = include_str!("../prompts/output.md");
-pub const PLAN: &str = include_str!("../prompts/steps/plan_first.md");
+const PLAN: &str = include_str!("../prompts/steps/plan_first.md");
 pub const LEARN: &str = include_str!("../prompts/learn.md");
 
 pub fn step(name: &str) -> Option<&'static str> {
@@ -38,8 +38,7 @@ pub fn style(paths: &Paths, name: &str, packs: &[String]) -> Result<String> {
     if let Some(s) = crate::packs::style(paths, name, packs) {
         return Ok(s);
     }
-    let p = expand_tilde(name);
-    let p = if p.is_relative() { paths.config_dir.join(p) } else { p };
+    let p = paths.resolve(name);
     std::fs::read_to_string(&p)
         .with_context(|| format!("reply style {name:?}: not built in, not in a pack, and {} is unreadable", p.display()))
 }
@@ -193,8 +192,7 @@ fn one_line(s: &str) -> String {
 }
 
 pub fn read_user_file(paths: &Paths, p: &str) -> Result<String> {
-    let path = expand_tilde(p);
-    let path = if path.is_relative() { paths.config_dir.join(path) } else { path };
+    let path = paths.resolve(p);
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
 }
 

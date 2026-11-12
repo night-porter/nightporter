@@ -502,8 +502,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
-        let let_in = ctx.db(|d| d.job_event_reasons(id))?.iter().any(|r| r == "allowed once");
-        ctx.db(|d| d.set_meta(id, &JobMeta { verb, untrusted_input: let_in, ..Default::default() }))?;
+        ctx.db(|d| d.set_meta(id, &JobMeta { verb, ..Default::default() }))?;
         tracing::info!("job {id}: {repo}#{n} ({} event(s), {})", ids.len(), level.as_str());
     }
     Ok(())
@@ -548,14 +547,7 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             if let Err(e) = res {
                 tracing::error!("job {id}: {e:#}");
                 let _ = c.db(|d| d.fail(id, &format!("{e:#}")));
-                let msg = format!("job {id} failed: {e:#}");
-                let mut ev = if j.mode == crate::improve::LEARN {
-                    notify::Event::new(Kind::Failed, &format!("{} (learn)", j.repo), &msg)
-                } else {
-                    notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &msg)
-                };
-                ev.job = Some(id);
-                c.notify(&j.repo, &ev);
+                job::note(&c, &j, Kind::Failed, &format!("job {id} failed: {e:#}"));
             }
             c.running.lock().unwrap().remove(&id);
         });

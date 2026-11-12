@@ -12,7 +12,7 @@ All notable changes to Night Porter. The format follows
   read-only run and wait for you (even at `auto`); `a` builds it, `e` edits the plan first. The
   build follows the approved plan. Plans stay local.
 - **Learn from your fixes**: `L` on the Repos tab or `nightporter learn <repo>` starts a job that
-  reads your edits, amends, rejections and dismissals on that repo (trusted jobs only) and
+  reads your edits, amends, rejections and dismissals on that repo (trusted jobs only, no CI output) and
   proposes a better `prompt` instructions file, shown as a diff for you to approve. A reminder
   comes once a repo has five unlearned fixes, at most weekly.
 - **`nightporter stats`**: jobs, cost, cost per pushed job, and how often you rejected, edited,

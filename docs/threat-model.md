@@ -239,10 +239,13 @@ build prompt fenced like a request. Approving a plan doesn't approve the build's
 follows the repo's level.
 
 A learn job writes your per-repo `prompt` file, which every later job reads. So its input is
-limited to jobs that started from trusted people: jobs on someone else's code or issue, and jobs
-that took an event you let in once from the inbox, are left out. Those facts are recorded on the
-job when it starts, so a retry can't wash them out. Learn never writes a shared
-`defaults.prompt`: it writes the repo's own file. The corrections it reads are fenced
+limited to jobs that started from trusted people: jobs on someone else's code or issue, jobs that
+took an event you let in once from the inbox, and CI-failure jobs (CI logs are third-party text)
+are left out. Those facts are recorded on the job when it runs, so a retry can't wash them out,
+and jobs from before this was recorded are never read. Learn never writes a prompt file that
+`[defaults]` or another repo also reads: it writes the repo's own file. Approving fails if that
+file or the repo's `prompt` setting changed after the proposal, so what's written is the diff you
+saw. The corrections it reads are fenced
 as untrusted data. It runs with no repository, no allowed commands and read-only tools. Nothing
 is written until you approve the diff, and the secrets and personal-data checks run on the
 proposed file first.

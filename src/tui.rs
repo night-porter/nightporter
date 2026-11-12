@@ -425,10 +425,7 @@ impl App {
                 self.suspend = self.repo_view.as_ref().map(|r| Suspend::Editor(self.paths.repo_file(r)));
             }
             KeyCode::Char('L') if let Some(r) = self.repo_view.clone() => {
-                self.msg = crate::improve::start_learn(&mut self.db, &r).map_or_else(
-                    |e| format!("error: {e:#}"),
-                    |id| format!("learn job {id} queued: it proposes new instructions and waits in the Queue"),
-                );
+                self.msg = learn(&mut self.db, &r).unwrap_or_else(|e| format!("error: {e:#}"));
                 self.refresh(false);
             }
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
@@ -581,7 +578,7 @@ impl App {
                 if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|()| format!("copied: {cmd}")) }
             }
             KeyCode::Char('w') => match self.db.job(id) {
-                Ok(Some(j)) if j.mode == crate::improve::LEARN => open_url(&format!("https://{}/{}", j.repo.host, j.repo.path)),
+                Ok(Some(j)) if j.mode == crate::improve::LEARN => open_url(&crate::notify::repo_url(&j.repo)),
                 Ok(Some(j)) => open_url(&crate::notify::web_url(&j.repo, j.target, j.number)),
                 _ => Ok("job not found".into()),
             },
@@ -658,9 +655,8 @@ impl App {
             crate::config::edit_file(&path, |d| d[key] = toml_edit::value(val)).map(|()| format!("{} {key} = {val}", id.path))
         };
         let r = match k.code {
-            KeyCode::Char('w') => open_url(&format!("https://{}/{}", r.id.host, r.id.path)),
-            KeyCode::Char('L') => crate::improve::start_learn(&mut self.db, &r.id.clone())
-                .map(|id| format!("learn job {id} queued: it proposes new instructions and waits in the Queue")),
+            KeyCode::Char('w') => open_url(&crate::notify::repo_url(&r.id)),
+            KeyCode::Char('L') => learn(&mut self.db, &r.id.clone()),
             KeyCode::Char(' ' | 's') => {
                 let on = !r.subscribed;
                 actions::set_subscribed(&self.paths, &r.id, on)
@@ -897,7 +893,7 @@ impl App {
             (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over w web q quit",
             (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
-            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / ? q",
+            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
             (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
             (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
@@ -1140,6 +1136,11 @@ pub fn job_text(db: &Db, j: &Job) -> String {
         }
     }
     s
+}
+
+/// `L`: queue a learn job for the repo.
+fn learn(db: &mut Db, r: &crate::forge::RepoId) -> Result<String> {
+    crate::improve::start_learn(db, r).map(|id| format!("learn job {id} queued: it proposes new instructions and waits in the Queue"))
 }
 
 /// Open a link in the default browser. The URL is one argument, never parsed by a shell.

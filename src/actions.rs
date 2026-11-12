@@ -176,7 +176,7 @@ pub fn set_replies(paths: &Paths, db: &Db, id: i64, text: &str) -> Result<String
     }
     // What the agent wrote, kept the first time: `nightporter learn` compares it with your edit.
     if j.meta.drafted.is_empty() {
-        j.meta.drafted = j.replies.iter().map(|r| crate::prompts::unsign(&r.body)).collect::<Vec<_>>().join("\n\n---\n\n");
+        j.meta.drafted = j.reply_text();
     }
     anyhow::ensure!(!kept.is_empty() || !j.diff.is_empty(), "every reply is empty; dismiss the job instead (x)");
     j.replies = kept;
@@ -245,8 +245,7 @@ fn set_single(paths: &Paths, db: &Db, mut j: crate::state::Job, text: &str) -> R
         return Ok("no changes".into());
     }
     j.meta.proposal = format!("{body}\n");
-    let current = std::fs::read_to_string(&j.meta.prompt_path).unwrap_or_default();
-    j.diff = crate::improve::file_diff(&paths.job_dir(id), &current, &j.meta.proposal);
+    j.diff = crate::improve::file_diff(&paths.job_dir(id), &j.meta.baseline, &j.meta.proposal);
     j.checks = crate::improve::text_checks(&j.meta.proposal);
     db.update_waiting(&j)?;
     let checks = if crate::checks::all_ok(&j.checks) { "checks pass" } else { "checks need you" };
@@ -263,10 +262,7 @@ pub fn amend(db: &Db, id: i64) -> Result<&'static str> {
         "job {id} is {}; only a job waiting for push approval can be amended",
         j.status.label()
     );
-    anyhow::ensure!(
-        !matches!(j.meta.verb, Some(crate::forge::Verb::Triage | crate::forge::Verb::Review | crate::forge::Verb::Reproduce)),
-        "job {id} doesn't push code; edit its replies instead (e)"
-    );
+    anyhow::ensure!(crate::job::pushes_code(j.meta.verb), "job {id} doesn't push code; edit its replies instead (e)");
     anyhow::ensure!(!j.meta.planning && j.mode != crate::improve::LEARN, "job {id} hasn't written code yet; edit it instead (e)");
     anyhow::ensure!(!j.worktree.is_empty() && std::path::Path::new(&j.worktree).exists(), "job {id} has no worktree any more");
     j.meta.amend = true;
@@ -371,7 +367,7 @@ fn push_unique(doc: &mut toml_edit::DocumentMut, scope: Scope, key: &str, user: 
 
 /// Inbox: allow this one event only.
 pub fn allow_once(db: &Db, event_id: &str) -> Result<()> {
-    from_inbox(db, event_id, Disposition::Pending, "allowed once")
+    from_inbox(db, event_id, Disposition::Pending, crate::state::ALLOWED_ONCE)
 }
 
 pub fn ignore(db: &Db, event_id: &str) -> Result<()> {

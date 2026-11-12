@@ -94,7 +94,9 @@ Such a job first runs read-only and writes a plan. It waits in the Queue marked 
 `auto`, and nothing is posted. `a` approves the plan and the build runs with it; `e` edits the
 plan first; `r` rejects the job. After the plan, the job follows the repo's level as usual.
 Plans stay on your machine, so approve them in the TUI or with `nightporter approve`: a
-`/nightporter approve` comment on the forge doesn't approve a plan. `trigger_agent_args` can give the plan step its own model
+`/nightporter approve` comment on the forge doesn't approve a plan. A job that batches several
+kinds of event plans if any of them is listed. Stats count the plan and build runs' cost together.
+`trigger_agent_args` can give the plan step its own model
 (`plan = ["--model", "opus"]`).
 
 ### Learn from your fixes
@@ -104,14 +106,17 @@ wrong. `L` on the Repos tab (or `nightporter learn <owner/name>`) starts a learn
 repo: the agent reads those fixes and proposes a better instructions file for the repo, your
 `prompt` file.
 
-- It reads only fixes since the last learn (the latest 20), and only jobs that started from
-  people you trust: nothing let in from the inbox, nothing on someone else's code or issue.
+- It reads only fixes no approved learn has read yet (the latest 20), and only jobs that started
+  from people you trust: nothing let in from the inbox, nothing on someone else's code or issue,
+  and no CI-failure jobs (CI logs are third-party text).
 - It runs with no repository and no commands, just the fixes and the current file.
 - The proposal waits in the Queue as a diff. `a` writes the file, `e` edits it first, `r` drops
-  it. It writes the repo's own `prompt` file. If the repo has none, it makes one under `prompts/`
-  in the config folder (starting from a shared `defaults.prompt`, which it never changes) and
-  points the repo at it. The secrets
-  and personal-data checks run on it, since it goes into every future prompt.
+  it. It writes the repo's own `prompt` file. If the repo has none, or shares its file with
+  `[defaults]` or another repo, it makes one under `prompts/` in the config folder (starting from
+  the shared text, which it never changes) and points the repo at it. The secrets and
+  personal-data checks run on it, since it goes into every future prompt.
+- If the file or the repo's `prompt` setting changes before you approve, approving fails rather
+  than overwrite your change: learn again for a fresh proposal.
 
 Once a repo has five fixes that haven't been learned from, Night Porter reminds you, at most once
 a week per repo. The repo's view (`Enter` on the Repos tab) shows the count too.
@@ -192,7 +197,7 @@ nightporter show 42              # a job: checks, replies, diff, log
 nightporter approve 42
 nightporter approve 42 --override-blocking
 nightporter reject 42
-nightporter edit 42              # edit the replies (or a waiting plan) in $EDITOR
+nightporter edit 42              # edit the replies (or a waiting plan or learn proposal) in $EDITOR
 nightporter amend 42             # commit and re-check your edits in the job's worktree
 nightporter retry 42
 nightporter dismiss 42 43        # put away, nothing pushed or posted

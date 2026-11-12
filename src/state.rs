@@ -220,6 +220,11 @@ impl Job {
     pub fn unapproved_code(&self) -> bool {
         self.meta.untrusted_code && !(self.meta.run_approved && self.meta.run_approved_head == self.head_before)
     }
+
+    /// The replies as one text, without footers: what `nightporter learn` compares.
+    pub fn reply_text(&self) -> String {
+        self.replies.iter().map(|r| crate::prompts::unsign(&r.body)).collect::<Vec<_>>().join("\n\n---\n\n")
+    }
 }
 
 /// Extra per-job data needed to deliver after approval.
@@ -284,8 +289,8 @@ pub struct JobMeta {
     /// What you changed with `amend` (capped).
     #[serde(default)]
     pub amend_diff: String,
-    /// Someone you don't trust shaped this job: an event let in once from the inbox, or a
-    /// maintainer request on someone else's issue or PR. Never learned from.
+    /// Someone you don't trust shaped this job: an event let in once from the inbox, a
+    /// maintainer request on someone else's issue or PR, or CI output. Never learned from.
     #[serde(default)]
     pub untrusted_input: bool,
     #[serde(default)]
@@ -298,14 +303,26 @@ pub struct JobMeta {
     pub plan: String,
     #[serde(default)]
     pub planning: bool,
-    /// A learn job: the proposed prompt file, where it goes, and the newest job it learned from.
+    /// A learn job: the proposed prompt file and where it goes; `baseline` is what the diff is
+    /// against, `prompt_before` the file as it was (approving refuses if it changed since); and
+    /// the jobs it read.
     #[serde(default)]
     pub proposal: String,
     #[serde(default)]
     pub prompt_path: String,
     #[serde(default)]
-    pub learned_until: i64,
+    pub baseline: String,
+    #[serde(default)]
+    pub prompt_before: Option<String>,
+    #[serde(default)]
+    pub learned_from: Vec<i64>,
+    /// An approved learn job read this fix: it doesn't count again.
+    #[serde(default)]
+    pub learned: bool,
 }
+
+/// The inbox reason of an event you let in once (`nightporter inbox allow-once`).
+pub const ALLOWED_ONCE: &str = "allowed once";
 
 pub fn now() -> i64 {
     jiff::Timestamp::now().as_second()
@@ -459,11 +476,19 @@ impl Db {
         Ok(self.0.execute("UPDATE events SET disposition='pending', job_id=NULL, seen_at=?2 WHERE job_id=?1", params![job_id, now()])?)
     }
 
-    /// Why each of a job's events was let through (`allowed once` for one released from the inbox).
-    pub fn job_event_reasons(&self, job_id: i64) -> Result<Vec<String>> {
-        let mut st = self.0.prepare("SELECT reason FROM events WHERE job_id=?1")?;
-        let rows = st.query_map([job_id], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+    /// One of the job's events was let in once from the inbox.
+    pub fn job_let_in(&self, job_id: i64) -> Result<bool> {
+        Ok(self
+            .0
+            .query_row("SELECT EXISTS(SELECT 1 FROM events WHERE job_id=?1 AND reason=?2)", params![job_id, ALLOWED_ONCE], |r| r.get(0))?)
+    }
+
+    /// Mark fixes as read by an approved learn job (in place: the jobs may be changing meanwhile).
+    pub fn mark_learned(&self, ids: &[i64]) -> Result<()> {
+        for id in ids {
+            self.0.execute("UPDATE jobs SET meta=json_set(meta, '$.learned', json('true')) WHERE id=?1", [id])?;
+        }
+        Ok(())
     }
 
     pub fn job_events(&self, job_id: i64) -> Result<Vec<Event>> {
