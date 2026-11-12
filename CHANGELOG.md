@@ -6,6 +6,11 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `w` in the TUI opens the job's PR/MR or issue in your browser (Queue, History, job view), the
+  comment (Inbox) or the repo (Repos). The job view and `nightporter show` print the link.
+
 ## [0.4.6] - 2026-11-12
 
 ### Added
