@@ -227,6 +227,61 @@ async fn draft_flow_end_to_end() {
 }
 
 #[tokio::test]
+async fn edit_replies_and_amend_files_before_push() {
+    let w = world("").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+    job::run(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
+
+    // Replies: shown without the footer/marker, signed again on save, checks rerun.
+    let file = ctx.db(|d| actions::replies_file(d, id)).unwrap();
+    assert!(file.contains("<!-- reply 1:") && !file.contains("via Night Porter"), "{file}");
+    let (head, body) = file.split_once("-->\n\n").unwrap();
+    let edited = format!("{head}-->\n\n{}", body.replacen('\n', "\nThanks, renamed it everywhere. Card 4539 1488 0343 6467.\n", 1));
+    let msg = ctx.db(|d| actions::set_replies(&ctx.paths, d, id, &edited)).unwrap();
+    assert!(msg.contains("1 reply edited") && msg.contains("checks need you"), "{msg}");
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert!(j.replies[0].body.contains("renamed it everywhere") && j.replies[0].body.ends_with(crate::prompts::FOOTER_MARK));
+    assert!(j.checks.iter().any(|c| c.name == "personal data" && !c.ok));
+    let fixed = edited.replace(" Card 4539 1488 0343 6467.", "");
+    ctx.db(|d| actions::set_replies(&ctx.paths, d, id, &fixed)).unwrap();
+    assert!(crate::checks::all_ok(&ctx.db(|d| d.job(id)).unwrap().unwrap().checks));
+    assert!(ctx.db(|d| actions::set_replies(&ctx.paths, d, id, "no markers")).is_err(), "a lost reply line saves nothing");
+
+    // Files: your edit in the worktree is committed, signed and checked; no agent runs.
+    std::fs::write(std::path::Path::new(&j.worktree).join("mine.txt"), "by hand\n").unwrap();
+    ctx.db(|d| actions::amend(d, id).map(|_| ())).unwrap();
+    job::run(ctx, id).await.unwrap();
+    let j2 = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j2.status, JobStatus::AwaitingApproval, "{}", j2.error);
+    assert!(j2.diff.contains("by hand") && j2.diff.contains("stub change"), "{}", j2.diff);
+    assert_ne!(j2.head_after, j.head_after);
+    assert!(j2.replies[0].body.contains("renamed it everywhere") && j2.replies[0].body.matches("via Night Porter").count() == 1);
+    // A protected file you touch is checked like the agent's.
+    std::fs::create_dir_all(std::path::Path::new(&j.worktree).join(".github/workflows")).unwrap();
+    std::fs::write(std::path::Path::new(&j.worktree).join(".github/workflows/x.yml"), "on: push\n").unwrap();
+    ctx.db(|d| actions::amend(d, id).map(|_| ())).unwrap();
+    job::run(ctx, id).await.unwrap();
+    let j3 = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert!(crate::checks::blocking_failed(&j3.checks), "{:?}", j3.checks);
+    sh(std::path::Path::new(&j.worktree), "git reset -q --hard HEAD~1");
+    ctx.db(|d| actions::amend(d, id).map(|_| ())).unwrap();
+    job::run(ctx, id).await.unwrap();
+
+    ctx.db(|d| actions::approve(d, id, false).map(|_| ())).unwrap();
+    job::deliver(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::Done, "{}", j.error);
+    assert_eq!(sh(&w.bare, "git show feature:mine.txt"), "by hand");
+    let posts: Vec<_> = w.log.lock().unwrap().iter().filter(|(m, _, _)| m == "POST").cloned().collect();
+    assert!(posts[0].2.contains("renamed it everywhere"), "{posts:?}");
+}
+
+#[tokio::test]
 async fn open_threads_of_allowed_bots_join_the_job_and_get_a_new_review() {
     let thread = |id: u64, resolved: bool, login: &str, last: &str| {
         format!(

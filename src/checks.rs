@@ -278,11 +278,7 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
             hits.push(format!("in commits: {}", redact(l)));
         }
     }
-    for t in texts {
-        for l in t.lines().filter(|l| SECRETS.is_match(l)) {
-            hits.push(format!("in a reply: {}", redact(l)));
-        }
-    }
+    hits.extend(reply_secrets(texts));
     if let Some(g) = gitleaks.filter(|g| !g.trim().is_empty()) {
         hits.push(format!("gitleaks: {}", g.lines().take(5).collect::<Vec<_>>().join("; ")));
     }
@@ -290,7 +286,7 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
 
     // Replies go out as you: customer data copied from a log or fixture waits for your OK.
     let pii: Vec<String> = texts.iter().flat_map(|t| personal_data(t)).collect();
-    push("personal data", pii.is_empty(), false, pii.join("\n"));
+    push(PII, pii.is_empty(), false, pii.join("\n"));
 
     let set = globs(cfg);
     let mut prot: Vec<&str> = d.paths().filter(|p| set.is_match(p)).collect();
@@ -319,6 +315,32 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
         push("size", n <= cfg.max_diff_lines, false, format!("{n} lines changed (limit {})", cfg.max_diff_lines));
     }
     out
+}
+
+const PII: &str = "personal data";
+const REPLY_HIT: &str = "in a reply: ";
+
+fn reply_secrets(texts: &[&str]) -> Vec<String> {
+    texts.iter().flat_map(|t| t.lines()).filter(|l| SECRETS.is_match(l)).map(|l| format!("{REPLY_HIT}{}", redact(l))).collect()
+}
+
+/// Redo the reply parts of the checks after you edited the replies: the secrets found in replies
+/// and the personal-data check. Findings in commits stay as they were.
+pub fn recheck_replies(results: &mut Vec<CheckResult>, texts: &[&str]) {
+    let pii: Vec<String> = texts.iter().flat_map(|t| personal_data(t)).collect();
+    let fresh = [("secrets", reply_secrets(texts), true), (PII, pii, false)];
+    for (name, hits, blocking) in fresh {
+        let i = results.iter().position(|c| c.name == name).unwrap_or_else(|| {
+            results.push(CheckResult { name: name.into(), ok: true, blocking, detail: String::new() });
+            results.len() - 1
+        });
+        let c = &mut results[i];
+        let mut lines: Vec<String> =
+            if name == PII { vec![] } else { c.detail.lines().filter(|l| !l.starts_with(REPLY_HIT)).map(String::from).collect() };
+        lines.extend(hits);
+        c.ok = lines.is_empty();
+        c.detail = lines.join("\n");
+    }
 }
 
 /// Keep enough to recognise the line, never the secret itself.
@@ -433,6 +455,19 @@ mod tests {
         let ok = "Tested with 4242 4242 4242 4242, 4000 0000 0000 0002, GB82 WEST 1234 5698 7654 32; order \
                   1234567890123, 0000000000000000, 1700000000000 and ٤٥٣٩١٤٨٨٠٣٤٣٦٤٦٧ or DE٨٩370400440532013000.";
         assert!(all_ok(&run(&cfg(), &d, None, &[ok])), "{ok}");
+    }
+
+    #[test]
+    fn recheck_replaces_only_the_reply_findings() {
+        let d = diff(&[("a.rs", 1)], "+AKIAABCDEFGHIJKLMNOP\n");
+        let mut r = run(&cfg(), &d, None, &["key AKIAQRSTUVWXYZ012345, card 4539 1488 0343 6467"]);
+        assert_eq!(failed(&r), vec!["secrets", "personal data"]);
+        recheck_replies(&mut r, &["all fixed"]);
+        assert_eq!(failed(&r), vec!["secrets"], "the commit's secret stays");
+        assert!(!r[1].detail.contains("in a reply"), "{}", r[1].detail);
+        let mut clean = run(&cfg(), &diff(&[("a.rs", 1)], "+ok\n"), None, &[]);
+        recheck_replies(&mut clean, &["sk-ant-abcdefghijklmnopqrstuvwxyz"]);
+        assert!(blocking_failed(&clean));
     }
 
     #[test]

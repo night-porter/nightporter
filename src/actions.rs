@@ -7,6 +7,7 @@ use crate::forge::{Control, RepoId};
 use crate::paths::Paths;
 use crate::state::{Db, Disposition, JobStatus};
 use anyhow::{Context, Result, bail};
+use std::fmt::Write as _;
 
 #[derive(Clone, Copy)]
 pub enum Scope<'a> {
@@ -84,6 +85,125 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
         Control::Retry => retry(db, id).map(|_| None),
         Control::Status => Ok(Some(format!("Job {id}: {}", j.status.label()))),
     }
+}
+
+const REPLY_SEP: &str = "<!-- reply ";
+
+/// A job's replies as one Markdown file to edit: each after a `<!-- reply N ... -->` line, without
+/// the footer and marker (they're added back on save).
+pub fn replies_file(db: &Db, id: i64) -> Result<String> {
+    let j = editable(db, id)?;
+    let events = db.job_events(id)?;
+    let mut out = format!(
+        "<!-- Job {id}, {}#{}. Edit the replies, save and quit. Keep each \"{REPLY_SEP}N\" line; empty a reply to drop it. -->\n",
+        j.repo, j.number
+    );
+    for (i, r) in j.replies.iter().enumerate() {
+        let to = match r.event.as_deref().and_then(|eid| events.iter().find(|e| e.id == eid)) {
+            Some(e) => format!("answers @{}: {}", e.author, e.body.lines().next().unwrap_or_default().chars().take(60).collect::<String>()),
+            None if i == 0 && j.meta.review.is_some() => "the review".into(),
+            None => "a comment on the PR/issue".into(),
+        };
+        // `--` can't appear inside an HTML comment; their text is only a hint.
+        let _ = write!(out, "\n{REPLY_SEP}{}: {} -->\n{}\n", i + 1, to.replace("--", "-"), crate::prompts::unsign(&r.body));
+    }
+    Ok(out)
+}
+
+/// Save edited replies (from [`replies_file`]): signed again, and the reply checks (secrets,
+/// personal data) run on the new text. Returns what changed.
+pub fn set_replies(paths: &Paths, db: &Db, id: i64, text: &str) -> Result<String> {
+    let mut j = editable(db, id)?;
+    let mut bodies: Vec<(usize, String)> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(REPLY_SEP) {
+            let n: usize = rest.split(':').next().and_then(|n| n.trim().parse().ok()).context("a reply line lost its number")?;
+            anyhow::ensure!(
+                (1..=j.replies.len()).contains(&n) && !bodies.iter().any(|(i, _)| *i == n - 1),
+                "reply {n} doesn't exist or is there twice"
+            );
+            bodies.push((n - 1, String::new()));
+        } else if let Some((_, b)) = bodies.last_mut() {
+            b.push_str(line);
+            b.push('\n');
+        }
+    }
+    anyhow::ensure!(bodies.len() == j.replies.len(), "a \"{REPLY_SEP}N\" line is missing; nothing saved");
+    let s = crate::config::Config::load(paths)?.settings_for(paths, &j.repo)?;
+    let (mut changed, mut dropped) = (0, 0);
+    let mut kept = Vec::new();
+    bodies.sort_by_key(|(i, _)| *i);
+    for (i, body) in bodies {
+        let mut r = j.replies[i].clone();
+        let body = body.trim();
+        if body.is_empty() {
+            anyhow::ensure!(!(i == 0 && j.meta.review.is_some()), "reply 1 is the review; dismiss the job instead (x)");
+            dropped += 1;
+            continue;
+        }
+        if body != crate::prompts::unsign(&r.body) {
+            changed += 1;
+            r.body = crate::prompts::sign(body, s.reply.attribution(), s.agent);
+        }
+        kept.push(r);
+    }
+    if changed + dropped == 0 {
+        return Ok("no changes".into());
+    }
+    anyhow::ensure!(!kept.is_empty() || !j.diff.is_empty(), "every reply is empty; dismiss the job instead (x)");
+    j.replies = kept;
+    let texts: Vec<&str> = j.replies.iter().map(|r| r.body.as_str()).chain([j.summary.as_str()]).collect();
+    crate::checks::recheck_replies(&mut j.checks, &texts);
+    db.update_job(&j)?;
+    let checks = if crate::checks::all_ok(&j.checks) { "checks pass" } else { "checks need you" };
+    Ok(format!("job {id}: {changed} repl{} edited, {dropped} dropped; {checks}", if changed == 1 { "y" } else { "ies" }))
+}
+
+/// Open the replies in `$VISUAL`/`$EDITOR` and save them (TUI `e`, `nightporter edit`).
+pub fn edit_replies(paths: &Paths, db: &Db, id: i64) -> Result<String> {
+    let tmp = std::env::temp_dir().join(format!("nightporter-job-{id}-{}.md", std::process::id()));
+    std::fs::write(&tmp, replies_file(db, id)?)?;
+    let res = match crate::settings::run_editor(&tmp) {
+        Ok(true) => std::fs::read_to_string(&tmp).map_err(Into::into).and_then(|t| set_replies(paths, db, id, &t)),
+        Ok(false) => Ok("editor quit with an error; nothing saved".into()),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+/// Replies can be edited while nothing is posted yet: waiting for approval, or ready to copy.
+fn editable(db: &Db, id: i64) -> Result<crate::state::Job> {
+    let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    anyhow::ensure!(
+        matches!(j.status, JobStatus::AwaitingApproval | JobStatus::Ready),
+        "job {id} is {}; only a job waiting for you can be edited",
+        j.status.label()
+    );
+    anyhow::ensure!(j.meta.posted.is_empty(), "job {id} has already posted some replies");
+    anyhow::ensure!(!j.replies.is_empty(), "job {id} has no replies to edit");
+    Ok(j)
+}
+
+/// Queue a job waiting for push approval to pick up your own edits in its worktree (made by hand
+/// or in a take-over): the daemon commits them, signs and checks everything again, and the job
+/// comes back for approval. No agent runs.
+pub fn amend(db: &Db, id: i64) -> Result<&'static str> {
+    let mut j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    anyhow::ensure!(
+        j.status == JobStatus::AwaitingApproval,
+        "job {id} is {}; only a job waiting for push approval can be amended",
+        j.status.label()
+    );
+    anyhow::ensure!(
+        !matches!(j.meta.verb, Some(crate::forge::Verb::Triage | crate::forge::Verb::Review | crate::forge::Verb::Reproduce)),
+        "job {id} doesn't push code; edit its replies instead (e)"
+    );
+    anyhow::ensure!(!j.worktree.is_empty() && std::path::Path::new(&j.worktree).exists(), "job {id} has no worktree any more");
+    j.meta.amend = true;
+    j.status = JobStatus::Queued;
+    db.update_job(&j)?;
+    Ok("queued: your worktree edits will be committed, signed and checked, then the job waits for you again")
 }
 
 /// Put a job away without acting on it: it leaves the Queue, nothing is pushed or posted, and

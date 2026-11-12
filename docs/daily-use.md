@@ -58,9 +58,24 @@ invalid file from the editor is never written; you can fix it or throw the edit 
 | `x` | dismiss: put the job away without replying or pushing. Its status becomes `dismissed` and it stays in History |
 | `u` | undo the last dismiss, or restore the selected dismissed job |
 | `X` | delete a finished or dismissed job for good, with its logs (asks first) |
+| `e` | edit the replies in your `$EDITOR` before they're posted (see below) |
+| `m` | amend: pick up your own changes in the job's worktree (see below) |
 | `h` | take over in [herdr, Rex, tmux or Zellij](/herdr) |
 | `c` | copy the push command (for `suggest` jobs) |
 | `y` | copy the reply text |
+
+### Fix it up before it goes out
+
+Close but not quite? You don't need to take over to change a word or a line.
+
+- **`e` edits the replies.** All of the job's replies open in one file in `$VISUAL` /
+  `$EDITOR`, each under a `<!-- reply N: ... -->` line. Change the text, empty a reply to drop
+  it, save and quit. The footer and marker go back on, and the secrets and personal-data checks
+  run again on what you wrote. Works on jobs waiting for approval and on `suggest` jobs.
+- **`m` amends the code.** Change files in the job's worktree, by hand or in a take-over
+  (`h`), then press `m`. The daemon commits your changes on top ("Edits before push"), signs
+  the commits, runs every pre-push check and pack gate again, and the job waits for you once
+  more. No agent runs. Then `a` pushes the lot.
 
 ### In the inbox
 
@@ -126,6 +141,8 @@ nightporter show 42              # a job: checks, replies, diff, log
 nightporter approve 42
 nightporter approve 42 --override-blocking
 nightporter reject 42
+nightporter edit 42              # edit the replies in $EDITOR
+nightporter amend 42             # commit and re-check your edits in the job's worktree
 nightporter retry 42
 nightporter dismiss 42 43        # put away, nothing pushed or posted
 nightporter restore 42           # bring a dismissed job back

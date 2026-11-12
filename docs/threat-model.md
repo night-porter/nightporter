@@ -185,7 +185,11 @@ Run on every push, in every mode, including `auto`:
 
 A failed check never pushes. It sends the job back to manual approval in the TUI; approving
 past a blocking failure needs an explicit override. What is pushed is exactly the reviewed
-commit SHA.
+commit SHA. Edits you make before approving go through the same checks: edited replies get the
+secrets and personal-data checks again (and `/nightporter` neutralised), and `amend` commits
+your worktree changes and runs every check and pack gate on the whole range before the job can
+be approved again. `amend` refuses a worktree whose `.git` no longer points into the clone, and
+a git config change during it is put back.
 
 ### B4. Running other people's code
 

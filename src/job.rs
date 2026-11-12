@@ -99,6 +99,18 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     j.status = JobStatus::Running;
+    if j.meta.amend {
+        // A failed amend leaves the job as it was before: still waiting for your approval.
+        if let Err(e) = amend(ctx, &mut j, &s, &events).await {
+            log(ctx, id, &format!("amend failed: {e:#}"));
+            let mut back = ctx.db(|d| d.job(id))?.context("no such job")?;
+            back.meta.amend = false;
+            back.status = JobStatus::AwaitingApproval;
+            ctx.db(|d| d.update_job(&back))?;
+            note(ctx, &back, Kind::Failed, &format!("amend failed: {e:#}"));
+        }
+        return Ok(());
+    }
     let lvl = level(&j);
 
     if lvl == Level::Observe {
@@ -133,6 +145,59 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events).await?;
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
+}
+
+/// `actions::amend`: commit what you changed in the job's worktree, then sign and check the whole
+/// range again exactly as after an agent run, and wait for your approval. No agent runs.
+async fn amend(ctx: &Ctx, j: &mut Job, s: &RepoSettings, events: &[Event]) -> Result<()> {
+    j.meta.amend = false;
+    let (clone, wt) = (PathBuf::from(&j.meta.clone), PathBuf::from(&j.worktree));
+    // A take-over could have repointed .git; only a worktree of this clone is trusted.
+    anyhow::ensure!(git::gitfile_points_into(&clone, &wt).await, "the worktree's .git doesn't point into the clone; not amending");
+    let guard = git::ConfigGuard::take(&wt);
+    if !git(&wt, &["status", "--porcelain"]).await?.is_empty() {
+        git(&wt, &["add", "-A"]).await?;
+        // Signed below with the rest of the range (in the clone, with a passphrase timeout); not
+        // here, where a worktree's own config could pick the signing program.
+        git(&wt, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Edits before push"]).await?;
+    }
+    guard.verify()?;
+    if git::head(&wt).await? == j.head_after {
+        log(ctx, j.id, "amend: nothing changed in the worktree");
+        j.status = JobStatus::AwaitingApproval;
+        return ctx.db(|d| d.update_job(j));
+    }
+    log(ctx, j.id, "amend: checking your edits");
+    let gitfile = std::fs::read_to_string(wt.join(".git"))?;
+    let w = Work {
+        clone,
+        repo_url: String::new(),
+        branch: j.branch.clone(),
+        wt,
+        gitfile,
+        me: String::new(),
+        pr: None,
+        issue: None,
+        step: "amend",
+    };
+    let outcome = agent::Outcome {
+        summary: j.summary.clone(),
+        verdict: j.meta.review.map(|v| crate::state::enum_str(&v)),
+        replies: j.replies.iter().map(|r| crate::forge::Reply { event: r.event.clone(), body: prompts::unsign(&r.body) }).collect(),
+        cost_usd: j.meta.cost_usd,
+    };
+    let job_dir = ctx.paths.job_dir(j.id);
+    std::fs::create_dir_all(&job_dir)?;
+    inspect(ctx, j, s, &w, &job_dir, events, outcome).await?;
+    j.status = JobStatus::AwaitingApproval;
+    ctx.db(|d| d.update_job(j))?;
+    let why = if checks::all_ok(&j.checks) {
+        "your edits are in; approve to push".to_string()
+    } else {
+        format!("your edits are in; checks need you: {}", failed_names(&j.checks))
+    };
+    note(ctx, j, Kind::NeedsApproval, &why);
+    Ok(())
 }
 
 /// On your own PR, add the open review threads of bots in `trust.allow_bots` to the job, read

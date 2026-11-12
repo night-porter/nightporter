@@ -123,6 +123,10 @@ enum Cmd {
     },
     /// Reject a job: nothing is pushed or posted.
     Reject { id: i64 },
+    /// Edit a waiting job's replies in $EDITOR before they're posted (checked again on save).
+    Edit { id: i64 },
+    /// Pick up your own changes in a waiting job's worktree: committed, signed and checked again.
+    Amend { id: i64 },
     /// Put jobs away without acting on them (nothing is pushed or posted). Undo with `restore`.
     Dismiss {
         #[arg(required = true)]
@@ -375,6 +379,8 @@ fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
             writeln!(out, "{}", actions::approve(&db(paths)?, id, override_blocking)?)?;
             Ok(())
         }
+        Cmd::Edit { id } => Ok(writeln!(out, "{}", actions::edit_replies(paths, &db(paths)?, id)?)?),
+        Cmd::Amend { id } => Ok(writeln!(out, "{}", actions::amend(&db(paths)?, id)?)?),
         Cmd::Reject { id } => {
             actions::reject(&db(paths)?, id)?;
             writeln!(out, "job {id} rejected: nothing will be pushed or posted")?;
