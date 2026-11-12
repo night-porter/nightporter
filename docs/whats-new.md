@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.4 and 0.3: edit a job before it posts, real PR reviews, backlog sweeps, a Worktrees tab with undo, more handoff targets and phone notifications."
+description: "What's new in Night Porter 0.4 and 0.3: edit a job before it posts, real PR reviews, backlog sweeps, a Worktrees tab with undo and phone notifications."
 ---
 
 # What's new
