@@ -82,7 +82,7 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
         Control::Approve => approve(db, id, false).map(|_| None),
         Control::Dismiss => dismiss(db, id).map(|()| None),
         Control::Retry => retry(db, id).map(|_| None),
-        Control::Status => Ok(Some(format!("Night Porter job {id}: {}", j.status.label()))),
+        Control::Status => Ok(Some(format!("Job {id}: {}", j.status.label()))),
     }
 }
 

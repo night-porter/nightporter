@@ -67,6 +67,9 @@ sandbox = true              # OS sandbox for agent commands (Claude Code, Codex,
 # [defaults.agent_args]
 # claude = ["--model", "opus"]
 # codex = ["-m", "gpt-5"]
+# Cheaper models for some kinds of job (keys: a trigger, or triage / reproduce / fix / review).
+# [defaults.trigger_agent_args]
+# ci_failure = ["--model", "haiku"]
 
 [defaults.trust]
 roles = ["owner", "maintainer", "member", "collaborator"]
@@ -86,6 +89,8 @@ allow_bots = []             # e.g. "coderabbitai[bot]"
 style = "concise"           # concise | detailed-tech-lead | non-technical | path/to/style.md
 language = "en"
 footer = true               # "— via Night Porter (Claude Code)"
+# attribution = "footer"    # footer (visible line + hidden <!-- nightporter --> marker) | marker (hidden only)
+                            # | none (no trace, e.g. for audited repos). Overrides footer when set.
 resolve_threads = false
 
 [defaults.checks]

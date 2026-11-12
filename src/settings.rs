@@ -92,6 +92,11 @@ pub static SETTINGS: &[Setting] = &[
         List,
         "Extra agent CLI arguments for every agent, e.g. --model, opus (per agent: [defaults.agent_args] in config.toml)",
     ),
+    s(
+        "defaults.trigger_agent_args",
+        Info,
+        "agent_args for one kind of job, e.g. ci_failure = [\"--model\", \"haiku\"]. Keys: triggers, or triage, reproduce, fix, review. Press e to edit the file.",
+    ),
     risky(
         "defaults.level",
         Choice(LEVELS),
@@ -123,6 +128,11 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.reply.style", Text, "concise, detailed-tech-lead, non-technical, a pack style or a .md file."),
     s("defaults.reply.language", Text, "Reply language, e.g. en."),
     s("defaults.reply.footer", Bool, "Add the AI-disclosure footer to replies."),
+    s(
+        "defaults.reply.attribution",
+        Choice(crate::config::Attribution::NAMES),
+        "footer = visible \"via Night Porter\" line + hidden marker, marker = hidden <!-- nightporter --> only, none = neither. Overrides footer.",
+    ),
     s("defaults.reply.resolve_threads", Bool, "Resolve review threads after replying."),
     s("defaults.checks.protected", List, "Extra protected path globs (added to the built-in list)."),
     s("defaults.checks.escalate_on", List, "Changes that always need your approval: deps, size."),
@@ -388,7 +398,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let builtin = crate::prompts::STYLES.iter().any(|(n, _)| *n == s.reply.style);
     let _ = writeln!(o, "  style          {}{}", s.reply.style, if builtin { "  (built in)" } else { "" });
     let _ = writeln!(o, "  language       {}", s.reply.language);
-    let _ = writeln!(o, "  footer         {}   resolve threads {}", on(s.reply.footer), on(s.reply.resolve_threads));
+    let _ = writeln!(o, "  attribution    {:?}   resolve threads {}", s.reply.attribution(), on(s.reply.resolve_threads));
     match crate::prompts::style(paths, &s.reply.style, &s.packs) {
         Ok(text) => {
             let _ = writeln!(o, "  style text:\n{}", indent(&text, 12));

@@ -122,6 +122,63 @@ static SECRETS: LazyLock<RegexSet> = LazyLock::new(|| {
     .expect("secret patterns")
 });
 
+static CARD: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").expect("card"));
+static IBAN: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b").expect("iban"));
+/// Card numbers and IBANs every payment SDK and doc uses as examples.
+const EXAMPLE_PII: &[&str] = &[
+    "4242424242424242",
+    "4111111111111111",
+    "4000056655665556",
+    "5555555555554444",
+    "5105105105105100",
+    "378282246310005",
+    "371449635398431",
+    "6011111111111117",
+    "3566002020360505",
+    "GB82WEST12345698765432",
+    "DE89370400440532013000",
+];
+
+fn luhn(d: &str) -> bool {
+    let sum: u32 = d
+        .bytes()
+        .rev()
+        .enumerate()
+        .map(|(i, b)| {
+            let n = u32::from(b - b'0');
+            if i % 2 == 1 { if n > 4 { n * 2 - 9 } else { n * 2 } } else { n }
+        })
+        .sum();
+    sum.is_multiple_of(10)
+}
+
+fn iban_ok(s: &str) -> bool {
+    let (head, rest) = s.split_at(4);
+    rest.chars().chain(head.chars()).try_fold(0u32, |acc, c| {
+        let v = c.to_digit(36)?;
+        Some(if v < 10 { (acc * 10 + v) % 97 } else { (acc * 100 + v) % 97 })
+    }) == Some(1)
+}
+
+/// Card numbers (Luhn-valid) and IBANs (mod-97-valid) in `text`, redacted.
+/// ponytail: checksums only, two kinds; names, emails and phones would hold every other reply.
+pub fn personal_data(text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for m in CARD.find_iter(text) {
+        let d: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
+        if luhn(&d) && !EXAMPLE_PII.contains(&d.as_str()) {
+            hits.push(format!("card number {}… [redacted]", &d[..4]));
+        }
+    }
+    for m in IBAN.find_iter(text) {
+        let s: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+        if iban_ok(&s) && !EXAMPLE_PII.contains(&s.as_str()) {
+            hits.push(format!("IBAN {}… [redacted]", &s[..4]));
+        }
+    }
+    hits
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FileStat {
     pub path: String,
@@ -209,6 +266,10 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
         hits.push(format!("gitleaks: {}", g.lines().take(5).collect::<Vec<_>>().join("; ")));
     }
     push("secrets", hits.is_empty(), true, hits.join("\n"));
+
+    // Replies go out as you: customer data copied from a log or fixture waits for your OK.
+    let pii: Vec<String> = texts.iter().flat_map(|t| personal_data(t)).collect();
+    push("personal data", pii.is_empty(), false, pii.join("\n"));
 
     let set = globs(cfg);
     let mut prot: Vec<&str> = d.paths().filter(|p| set.is_match(p)).collect();
@@ -336,6 +397,19 @@ mod tests {
     fn clean_diff_passes() {
         let r = run(&cfg(), &diff(&[("src/main.rs", 10)], "+fn main() {}\n"), None, &[]);
         assert!(all_ok(&r), "{r:?}");
+    }
+
+    #[test]
+    fn personal_data_in_replies_needs_approval() {
+        let d = diff(&[("a.rs", 1)], "+// 4000 0000 0000 0002\n");
+        let r = run(&cfg(), &d, None, &["Refund card 4000-0000-0000-0002 and IBAN NL91 ABNA 0417 1643 00."]);
+        assert_eq!(failed(&r), vec!["personal data"]);
+        assert!(!blocking_failed(&r));
+        let detail = &r.iter().find(|c| c.name == "personal data").unwrap().detail;
+        assert!(detail.contains("card") && detail.contains("IBAN") && !detail.contains("0002"), "{detail}");
+        // The diff isn't scanned; example numbers, bad checksums, SHAs and ids don't count.
+        let ok = "Tested with 4242 4242 4242 4242, GB82 WEST 1234 5698 7654 32; order 1234567890123 and 4000000000000001.";
+        assert!(all_ok(&run(&cfg(), &d, None, &[ok])), "{ok}");
     }
 
     #[test]

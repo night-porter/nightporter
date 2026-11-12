@@ -335,6 +335,62 @@ impl AgentArgs {
     }
 }
 
+/// Keys of `trigger_agent_args`: a trigger, or a maintainer verb. `review` is both (a review on
+/// your PR, and reviewing someone else's).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    ReviewComment,
+    Review,
+    Comment,
+    CiFailure,
+    MergeConflict,
+    Triage,
+    Reproduce,
+    Fix,
+}
+
+impl JobKind {
+    /// The one kind a job is: its verb, else the trigger all its events share.
+    pub fn of(verb: Option<crate::forge::Verb>, triggers: impl IntoIterator<Item = crate::forge::Trigger>) -> Option<Self> {
+        use crate::forge::{Trigger as T, Verb as V};
+        if let Some(v) = verb {
+            return Some(match v {
+                V::Triage => Self::Triage,
+                V::Reproduce => Self::Reproduce,
+                V::Fix => Self::Fix,
+                V::Review => Self::Review,
+            });
+        }
+        let mut ts = triggers.into_iter();
+        let first = ts.next()?;
+        if ts.any(|t| t != first) {
+            return None;
+        }
+        Some(match first {
+            T::ReviewComment => Self::ReviewComment,
+            T::Review => Self::Review,
+            T::Comment => Self::Comment,
+            T::CiFailure => Self::CiFailure,
+            T::MergeConflict => Self::MergeConflict,
+        })
+    }
+}
+
+impl RepoSettings {
+    /// Swap in the `trigger_agent_args` entry for a job of `kind`, if it has one for this agent.
+    pub fn for_job(&mut self, kind: Option<JobKind>) {
+        let Some(o) = kind.and_then(|k| self.trigger_agent_args.get(&k)) else { return };
+        let named = match o {
+            AgentArgs::All(_) => true,
+            AgentArgs::Per(m) => m.contains_key(&self.agent),
+        };
+        if named {
+            self.agent_args = AgentArgs::All(o.for_agent(self.agent).to_vec());
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
@@ -390,6 +446,11 @@ pub struct RepoSettings {
     /// own default model and settings.
     #[serde(default)]
     pub agent_args: AgentArgs,
+    /// `agent_args` for one kind of job, e.g. a cheaper model for `ci_failure` or `triage`. Used
+    /// when every event in the job is that kind (a maintainer job goes by its verb); a mixed batch,
+    /// or an agent the per-agent map doesn't name, keeps `agent_args`.
+    #[serde(default)]
+    pub trigger_agent_args: std::collections::BTreeMap<JobKind, AgentArgs>,
     /// Shell commands the agent may run (e.g. `"npm test"`, `"ddev phpunit"`). Prefix match.
     #[serde(default)]
     pub allow_commands: Vec<String>,
@@ -507,10 +568,40 @@ pub struct ReplySettings {
     pub style: String,
     #[serde(default = "en")]
     pub language: String,
+    /// Old switch: `false` means `attribution = "marker"`. `attribution` wins when both are set.
     #[serde(default = "yes")]
     pub footer: bool,
     #[serde(default)]
+    pub attribution: Option<Attribution>,
+    #[serde(default)]
     pub resolve_threads: bool,
+}
+
+/// What marks a reply as Night Porter's.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Attribution {
+    /// Visible "via Night Porter" footer plus the hidden marker.
+    Footer,
+    /// Hidden `<!-- nightporter -->` marker only.
+    Marker,
+    /// Nothing: replies read as if you typed them.
+    None,
+}
+
+impl Attribution {
+    pub const NAMES: &[&str] = &["footer", "marker", "none"];
+
+    /// For short status posts (bot re-review asks, command replies): never the visible footer.
+    pub fn quiet(self) -> Self {
+        if self == Self::Footer { Self::Marker } else { self }
+    }
+}
+
+impl ReplySettings {
+    pub fn attribution(&self) -> Attribution {
+        self.attribution.unwrap_or(if self.footer { Attribution::Footer } else { Attribution::Marker })
+    }
 }
 
 impl Default for ReplySettings {
@@ -925,7 +1016,17 @@ mod tests {
         assert_eq!(s.max_ci_attempts, 5);
         assert_eq!(s.reply.style, "detailed-tech-lead");
         assert!(!s.reply.footer);
+        assert_eq!(s.reply.attribution(), Attribution::Marker);
         assert_eq!(s.trust.allow_users, vec!["alice"]);
+    }
+
+    #[test]
+    fn attribution_wins_over_footer() {
+        let c = Config::parse("[defaults.reply]\nfooter = true").unwrap();
+        assert_eq!(c.resolve(None).unwrap().reply.attribution(), Attribution::Footer);
+        let over: toml::Table = toml::from_str("[reply]\nattribution = \"none\"").unwrap();
+        assert_eq!(c.resolve(Some(&over)).unwrap().reply.attribution(), Attribution::None);
+        assert!(Config::parse("[defaults.reply]\nattribution = \"loud\"").is_err());
     }
 
     #[test]
@@ -956,6 +1057,27 @@ mod tests {
         let over: toml::Table = toml::from_str("agent_args = [\"--x\"]").unwrap();
         assert_eq!(c.resolve(Some(&over)).unwrap().agent_args.for_agent(Gemini), ["--x"]);
         assert!(Config::parse("[defaults.agent_args]\nnope = []").and_then(|c| c.resolve(None)).is_err());
+    }
+
+    #[test]
+    fn trigger_agent_args_pick_by_job_kind() {
+        use crate::forge::{Trigger as T, Verb};
+        let c = Config::parse(
+            "[defaults]\nagent_args = [\"--model\", \"opus\"]\n[defaults.trigger_agent_args]\nci_failure = [\"--model\", \"haiku\"]\ntriage = { codex = [\"-m\", \"mini\"] }",
+        )
+        .unwrap();
+        let over: toml::Table = toml::from_str("[trigger_agent_args]\nmerge_conflict = [\"--model\", \"sonnet\"]").unwrap();
+        let base = c.resolve(Some(&over)).unwrap();
+        let args = |kind| {
+            let mut s = base.clone();
+            s.for_job(kind);
+            s.agent_args.for_agent(AgentKind::Claude).join(" ")
+        };
+        assert_eq!(args(JobKind::of(None, [T::CiFailure, T::CiFailure])), "--model haiku");
+        assert_eq!(args(JobKind::of(None, [T::MergeConflict])), "--model sonnet", "repo and global maps merge");
+        assert_eq!(args(JobKind::of(None, [T::CiFailure, T::Comment])), "--model opus", "mixed batch");
+        assert_eq!(args(JobKind::of(Some(Verb::Triage), [T::Comment])), "--model opus", "no claude entry: keep agent_args");
+        assert!(Config::parse("[defaults.trigger_agent_args]\nnope = []").and_then(|c| c.resolve(None)).is_err());
     }
 
     #[test]

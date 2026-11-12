@@ -44,8 +44,9 @@ security boundary is, and which protections cannot be turned off.
   waiting items.
 - Global `allow_users` match a username on every configured host. Put host-specific trust in
   repo files if you use several forges.
-- Night Porter's own replies carry a hidden marker and are never read back as requests, and
-  `/nightporter` in agent-written replies is neutralised.
+- Night Porter's own replies carry a hidden marker (unless `reply.attribution = "none"`) and are
+  never read back as requests, and `/nightporter` in everything it posts is neutralised, so
+  without the marker its posts still can't read as commands.
 - When the context for a job is built, comments from untrusted authors are **removed**, not
   quoted.
 - Maintainer mode: the *request* must come from a trusted user (a label or a
@@ -70,8 +71,9 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
 - Anyone who can post as you already holds your forge account (or a token Night Porter itself
   could use), and could push to your branch directly; a comment gives them nothing more.
 - Agent-written replies are posted as you, so they are the one way text could come back with
-  your user ID: they have `/nightporter` neutralised and carry the hidden marker, and comments
-  with the marker are never read as commands.
+  your user ID: they have `/nightporter` neutralised (command and error replies too) and carry
+  the hidden marker unless `reply.attribution = "none"`; comments with the marker are never read
+  as commands, and without it the neutralising alone keeps them from being one.
 - The comment must be newer than the job, and each comment ID is recorded before it is acted
   on, so an old or repeated comment never acts again (or on a later job).
 - `approve` only releases a job waiting for push approval, with no override for blocking checks;
@@ -175,6 +177,7 @@ Run on every push, in every mode, including `auto`:
 |---|---|
 | secrets in any commit's patch or message, what a merge commit itself adds, and replies and the PR summary (built-in patterns, plus gitleaks if installed) | **no** |
 | protected paths touched by any commit, not only the net diff, matched case-insensitively (CI configs for GitHub, GitLab, Forgejo/Gitea Actions, Woodpecker and others, `.git`, `.gitattributes`, agent instruction files for Claude, OpenCode, Codex, Cursor, Copilot and Gemini, git/editor hooks, `.envrc`, `.ddev`, `.devcontainer`, compose files, plus your globs) | **no** (you can only add to the list; the one opt-out, `checks.allow_env_variants`, frees `.env.*` templates and keeps `.env` protected and the secrets scan on) |
+| card numbers (Luhn-valid) and IBANs (mod-97-valid) in replies and the PR summary, minus the well-known test numbers | **no**; sends the job to approval instead of blocking it |
 | force-push or history rewrite | **no** |
 | Night Porter files in a commit | **no** |
 | dependency manifest or lockfile changes | yes (`escalate_on`), with a warning |

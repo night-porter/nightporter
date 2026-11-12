@@ -94,6 +94,8 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
     let mut s = cfg.settings_for(&ctx.paths, &j.repo)?;
+    let kind = crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger));
+    s.for_job(kind);
     // Only start if still queued (the TUI may have rejected it a moment ago).
     if !ctx.db(|d| d.transition(id, JobStatus::Queued, JobStatus::Running))? {
         return Ok(());
@@ -474,13 +476,7 @@ async fn inspect(
     j.summary = resha(&j.summary, &signed);
     for reply in &mut j.replies {
         reply.body = resha(&reply.body, &signed);
-        // A reply must never read as a command to Night Porter (it would come back as ours).
-        reply.body = reply.body.replace("/nightporter", "/\u{200b}nightporter");
-        if s.reply.footer {
-            reply.body.push_str(&prompts::footer(s.agent));
-        }
-        reply.body.push('\n');
-        reply.body.push_str(prompts::FOOTER_MARK);
+        reply.body = prompts::sign(&reply.body, s.reply.attribution(), s.agent);
     }
     Ok(commits)
 }
@@ -572,7 +568,10 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let f = forge.lock().await;
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
         let pr_body = j.replies.iter().find(|r| r.event.is_none()).map_or_else(|| j.summary.clone(), |r| r.body.clone());
-        let title = format!("Fix #{}: {}", j.number, first_line(&j.summary));
+        let title = match first_line(&j.summary) {
+            l if l.trim().is_empty() => format!("Fix #{}", j.number),
+            l => format!("Fix #{}: {l}", j.number),
+        };
         let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
         log(ctx, id, &format!("opened draft {url}"));
         j.meta.pr_url = url;
@@ -611,7 +610,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         for cmd in events.iter().filter(|e| e.is_bot).filter_map(|e| retrigger(&e.author)) {
             if !asked.contains(&cmd) {
                 asked.push(cmd);
-                match f.reply(&j.repo, j.target, j.number, None, &format!("{cmd}\n{}", prompts::FOOTER_MARK)).await {
+                match f.reply(&j.repo, j.target, j.number, None, &prompts::sign(cmd, s.reply.attribution().quiet(), s.agent)).await {
                     Ok(()) => log(ctx, id, &format!("asked for a new review: {cmd}")),
                     Err(e) => log(ctx, id, &format!("could not ask for a new review ({cmd}): {e:#}")),
                 }
@@ -957,7 +956,7 @@ fn truncate(s: &str, n: usize) -> &str {
 }
 
 fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("Night Porter fix").chars().take(72).collect()
+    s.lines().next().unwrap_or_default().chars().take(72).collect()
 }
 
 #[cfg(test)]

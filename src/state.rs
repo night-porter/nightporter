@@ -585,7 +585,17 @@ impl Db {
         Ok(self.get(&format!("ci:{}#{number}", repo.key()))?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
     pub fn set_ci_attempts(&self, repo: &RepoId, number: u64, n: u32) -> Result<()> {
+        if n == 0 {
+            self.set_ci_failure(repo, number, "")?;
+        }
         self.set(&format!("ci:{}#{number}", repo.key()), &n.to_string())
+    }
+    /// The last CI failure a fix was tried on (see `daemon::ci_failure_key`); cleared on green.
+    pub fn ci_failure(&self, repo: &RepoId, number: u64) -> Result<String> {
+        Ok(self.get(&format!("cifail:{}#{number}", repo.key()))?.unwrap_or_default())
+    }
+    pub fn set_ci_failure(&self, repo: &RepoId, number: u64, key: &str) -> Result<()> {
+        self.set(&format!("cifail:{}#{number}", repo.key()), key)
     }
 
     /// Jobs started by a review bot's comments on a PR. Never reset: a cap per PR.
