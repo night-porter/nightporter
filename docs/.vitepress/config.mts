@@ -74,7 +74,7 @@ function writeLlms(srcDir: string, outDir: string) {
 
 export default defineConfig({
   title: 'Night Porter',
-  description: 'Docs for Night Porter: handles your PRs while you’re away.',
+  description: 'Docs for Night Porter: answers review comments, fixes failing CI and resolves merge conflicts on your PRs while you’re away.',
   cleanUrls: true,
   srcExclude: ['README.md'],
   lastUpdated: true,

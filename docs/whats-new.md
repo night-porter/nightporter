@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.4: every ready PR in the inbox and real reviews (approve, request changes), reviews prepared when someone requests yours, backlog sweeps, a Worktrees tab with undo for maintainers, handoffs to pi, Cursor, Copilot and more, per-agent models; and in 0.3: notifications on your phone, day and night shifts, PR-comment commands, Forgejo/Gitea, Gemini CLI (experimental) and more handoff targets."
+description: "What's new in Night Porter 0.4 and 0.3: real PR reviews, backlog sweeps, a Worktrees tab with undo, more handoff targets and phone notifications."
 ---
 
 # What's new

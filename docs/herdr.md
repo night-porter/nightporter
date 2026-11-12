@@ -1,5 +1,5 @@
 ---
-description: "Take over a Night Porter job interactively in herdr, Rex, tmux, Zellij or a new terminal, open the queue as a herdr popup, and script Night Porter with events and wait."
+description: "Take over a Night Porter job in herdr, Rex, tmux, Zellij or a new terminal, open the queue as a herdr popup, and script it with events and wait."
 ---
 
 # Working with herdr, Rex, tmux and Zellij

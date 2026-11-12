@@ -1,5 +1,6 @@
 ---
 layout: home
+description: "Docs for Night Porter, the daemon and terminal UI that answer review comments, fix failing CI and resolve merge conflicts on your PRs."
 hero:
   name: Night Porter
   text: Handles your PRs while you’re away.
