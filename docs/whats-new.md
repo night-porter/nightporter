@@ -8,6 +8,43 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.4
 
+### No-trace replies, cheaper models per job (next release)
+
+<!-- Rename the heading to the version when it ships. -->
+
+**Footer, marker, or neither.** Every reply carries a hidden `<!-- nightporter -->` marker, and
+by default a visible "via Night Porter" line too. Where a team doesn't want either in the page
+source (auditors read the PRs, say), set it per repo:
+
+```toml
+# repos/github/acme/billing.toml
+[reply]
+attribution = "none"   # or "marker" (hidden only), "footer" (the default)
+```
+
+Comments posted before the change keep their marker. If a project asks for AI help to be
+disclosed, keep the footer there.
+
+**A model per kind of job.** A lint failure rarely needs the biggest model:
+
+```toml
+[defaults.trigger_agent_args]
+ci_failure = ["--model", "haiku"]
+triage = ["--model", "haiku"]
+```
+
+It applies when the whole job is that kind; a mixed batch keeps `agent_args`. See
+[Models per kind of job](/configuration#models-per-kind-of-job).
+
+**CI that fails the same way stops sooner.** If CI fails with exactly the same check output as
+before the last fix, Night Porter stops retrying and tells you, instead of using up
+`max_ci_attempts`. It needs checks that report output (GitHub check runs with a summary, such as
+most linters); when the forge only gives job names, `max_ci_attempts` decides as before.
+
+**Card numbers and IBANs in replies wait for you.** Replies are posted as you, so a real card
+number (Luhn-valid) or IBAN copied from a log or fixture holds the job for approval. The usual
+test numbers are fine.
+
 ### Every ready PR, real reviews (0.4.5)
 
 **Watch every ready PR.** `watch_prs = true` under `[maintainer]` puts each ready (not draft)

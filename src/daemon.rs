@@ -286,8 +286,10 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
             ctx.db(|d| d.set(&done_key, "1"))?;
             let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
             tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
-            let s = ctx.cfg().settings_for(&ctx.paths, &j.repo)?;
-            let a = s.reply.attribution().quiet();
+            // The command already ran: a broken repo file must not cost it its reply.
+            let s = ctx.cfg().settings_for(&ctx.paths, &j.repo).ok();
+            let a = s.as_ref().map_or(crate::config::Attribution::Marker, |s| s.reply.attribution().quiet());
+            let agent = s.map_or(crate::config::AgentKind::Claude, |s| s.agent);
             let msg = match res {
                 Ok(None) => None,
                 Ok(Some(msg)) => Some(msg),
@@ -296,7 +298,7 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
             };
             let sent = match msg {
                 None => forge.ack(&j.repo, j.target, j.number, &c.id).await,
-                Some(m) => forge.reply(&j.repo, j.target, j.number, None, &crate::prompts::sign(&m, a, s.agent)).await,
+                Some(m) => forge.reply(&j.repo, j.target, j.number, None, &crate::prompts::sign(&m, a, agent)).await,
             };
             if let Err(e) = sent {
                 tracing::warn!("job {}: acknowledge command: {e:#}", j.id);
@@ -306,12 +308,15 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
     Ok(())
 }
 
-/// What a CI failure looks like with the per-run noise (links to the run) left out, so two runs
-/// that fail the same checks with the same output compare equal.
-/// ponytail: exact text match; a summary with timings or ids in it never matches (just no early stop).
+/// The output of a CI failure: the check summaries, without the "CI failed:" line, the per-check
+/// header lines (name and run link) and any link. Empty when the forge gave only check names
+/// (GitLab jobs, most plain GitHub Actions): names alone can't tell a new error from the old one.
+/// ponytail: exact text match; a summary with timings or ids in it never matches (just no early
+/// stop). Comparing failing log tails would catch more; add when users hit the cap on repeats.
 fn ci_failure_key<'a>(evs: impl Iterator<Item = &'a Event>) -> String {
     let mut lines: Vec<String> = evs
-        .flat_map(|e| e.body.lines())
+        .flat_map(|e| e.body.lines().skip(1))
+        .filter(|l| !(l.starts_with("- ") && l.contains("://")))
         .map(|l| l.split_whitespace().filter(|w| !w.contains("://")).collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
         .collect();
@@ -469,7 +474,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             let tries = ctx.db(|d| d.ci_attempts(&repo, n))?;
             let failure = ci_failure_key(evs.iter().map(|(e, _)| e).filter(|e| e.trigger == Trigger::CiFailure));
             // The last fix changed nothing CI can see: another run would burn the same tokens.
-            let same = tries > 0 && ctx.db(|d| d.ci_failure(&repo, n))? == failure;
+            let same = tries > 0 && !failure.is_empty() && ctx.db(|d| d.ci_failure(&repo, n))? == failure;
             if tries >= s.max_ci_attempts || same {
                 let (reason, msg) = if same {
                     ("same CI failure as last attempt", "CI fails the same way after the last fix; stopped retrying".to_string())
@@ -691,6 +696,14 @@ mod tests {
         assert!(!run(ci("3", 3, "assert 3 == 4")).await, "the same failure (other run link) stops");
         let dropped = ctx.db(|d| d.events_with(Disposition::Dropped)).unwrap();
         assert!(dropped.iter().any(|(e, _)| e.id == "3"), "{dropped:?}");
+        // Names only (GitLab jobs, bare Actions): no output to compare, so the cap decides.
+        let names = |id: &str, run: u32| Event {
+            body: format!("CI pipeline failed:\n- test (stage test) https://gl/jobs/{run}"),
+            ..ev(&repo, id, "me", Role::Owner, Trigger::CiFailure)
+        };
+        assert!(run(names("5", 5)).await);
+        assert!(run(names("6", 6)).await, "same names, unknown output: retried");
+        ctx.db(|d| d.set_ci_attempts(&repo, 7, 0)).unwrap();
         // Green resets it.
         ctx.db(|d| d.set_ci_attempts(&repo, 7, 0)).unwrap();
         assert!(run(ci("4", 4, "assert 3 == 4")).await);

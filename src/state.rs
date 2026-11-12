@@ -410,6 +410,8 @@ impl Db {
         if let Some(e) = evs.iter().find(|e| e.trigger == crate::forge::Trigger::CiFailure) {
             let n = self.ci_attempts(&e.repo, e.number)?;
             self.set_ci_attempts(&e.repo, e.number, n.saturating_sub(1))?;
+            // The attempt didn't happen: don't let its own failure stop it as "the same again".
+            self.set_ci_failure(&e.repo, e.number, "")?;
         }
         Ok(self.0.execute("UPDATE events SET disposition='pending', job_id=NULL, seen_at=?2 WHERE job_id=?1", params![job_id, now()])?)
     }

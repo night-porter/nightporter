@@ -381,11 +381,7 @@ impl RepoSettings {
     /// Swap in the `trigger_agent_args` entry for a job of `kind`, if it has one for this agent.
     pub fn for_job(&mut self, kind: Option<JobKind>) {
         let Some(o) = kind.and_then(|k| self.trigger_agent_args.get(&k)) else { return };
-        let named = match o {
-            AgentArgs::All(_) => true,
-            AgentArgs::Per(m) => m.contains_key(&self.agent),
-        };
-        if named {
+        if matches!(o, AgentArgs::All(_)) || matches!(o, AgentArgs::Per(m) if m.contains_key(&self.agent)) {
             self.agent_args = AgentArgs::All(o.for_agent(self.agent).to_vec());
         }
     }

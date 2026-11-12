@@ -94,8 +94,6 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
     let mut s = cfg.settings_for(&ctx.paths, &j.repo)?;
-    let kind = crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger));
-    s.for_job(kind);
     // Only start if still queued (the TUI may have rejected it a moment ago).
     if !ctx.db(|d| d.transition(id, JobStatus::Queued, JobStatus::Running))? {
         return Ok(());
@@ -129,7 +127,10 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     setup_env(ctx, &j, &s, &w, &job_dir).await?;
-    let outcome = run_agent(ctx, &mut j, &s, &w, &job_dir, &events).await?;
+    // Per-kind args (a cheaper model) for the main run only; filter and pre-push gates keep the repo's.
+    let mut main = s.clone();
+    main.for_job(crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger)));
+    let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events).await?;
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
 }
@@ -567,7 +568,11 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
 
     let f = forge.lock().await;
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
-        let pr_body = j.replies.iter().find(|r| r.event.is_none()).map_or_else(|| j.summary.clone(), |r| r.body.clone());
+        let pr_body = j
+            .replies
+            .iter()
+            .find(|r| r.event.is_none())
+            .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
         let title = match first_line(&j.summary) {
             l if l.trim().is_empty() => format!("Fix #{}", j.number),
             l => format!("Fix #{}: {l}", j.number),

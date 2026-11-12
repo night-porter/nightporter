@@ -122,15 +122,20 @@ static SECRETS: LazyLock<RegexSet> = LazyLock::new(|| {
     .expect("secret patterns")
 });
 
-static CARD: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").expect("card"));
-static IBAN: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b").expect("iban"));
-/// Card numbers and IBANs every payment SDK and doc uses as examples.
+// ASCII only (`\d` is Unicode in `regex`): the checksums below slice bytes.
+static CARD: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b[0-9]+(?:[ -][0-9]+)*\b").expect("card"));
+static IBAN: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]*(?: [A-Z0-9]+)*\b").expect("iban"));
+/// Card numbers and IBANs payment SDKs and docs use as examples.
 const EXAMPLE_PII: &[&str] = &[
     "4242424242424242",
     "4111111111111111",
     "4000056655665556",
+    "4000000000000002",
+    "4000000000009995",
+    "4000000000000077",
     "5555555555554444",
     "5105105105105100",
+    "5200828282828210",
     "378282246310005",
     "371449635398431",
     "6011111111111117",
@@ -152,7 +157,15 @@ fn luhn(d: &str) -> bool {
     sum.is_multiple_of(10)
 }
 
+/// A real-looking card number: 13-19 digits, a card network's first digit, not one digit repeated.
+fn card_ok(d: &str) -> bool {
+    (13..=19).contains(&d.len()) && matches!(d.as_bytes()[0], b'2'..=b'6') && d.bytes().any(|b| b != d.as_bytes()[0]) && luhn(d)
+}
+
 fn iban_ok(s: &str) -> bool {
+    if !(15..=34).contains(&s.len()) {
+        return false;
+    }
     let (head, rest) = s.split_at(4);
     rest.chars().chain(head.chars()).try_fold(0u32, |acc, c| {
         let v = c.to_digit(36)?;
@@ -160,19 +173,27 @@ fn iban_ok(s: &str) -> bool {
     }) == Some(1)
 }
 
+/// Every run of consecutive space/dash-separated groups in `m`, joined, that `ok` accepts. A
+/// number is written as one run or as groups, so this finds it next to an expiry date, a CVV or
+/// a following word without matching inside a longer number.
+/// ponytail: O(groups²) per match; matches are short.
+fn group_runs(m: &str, from_start: bool, ok: impl Fn(&str) -> bool) -> Option<String> {
+    let g: Vec<&str> = m.split([' ', '-']).collect();
+    let starts = if from_start { 0..1 } else { 0..g.len() };
+    starts.flat_map(|a| (a + 1..=g.len()).map(move |b| (a, b))).map(|(a, b)| g[a..b].concat()).find(|c| ok(c))
+}
+
 /// Card numbers (Luhn-valid) and IBANs (mod-97-valid) in `text`, redacted.
 /// ponytail: checksums only, two kinds; names, emails and phones would hold every other reply.
 pub fn personal_data(text: &str) -> Vec<String> {
     let mut hits = Vec::new();
     for m in CARD.find_iter(text) {
-        let d: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
-        if luhn(&d) && !EXAMPLE_PII.contains(&d.as_str()) {
+        if let Some(d) = group_runs(m.as_str(), false, |c| card_ok(c) && !EXAMPLE_PII.contains(&c)) {
             hits.push(format!("card number {}… [redacted]", &d[..4]));
         }
     }
     for m in IBAN.find_iter(text) {
-        let s: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
-        if iban_ok(&s) && !EXAMPLE_PII.contains(&s.as_str()) {
+        if let Some(s) = group_runs(m.as_str(), true, |c| iban_ok(c) && !EXAMPLE_PII.contains(&c)) {
             hits.push(format!("IBAN {}… [redacted]", &s[..4]));
         }
     }
@@ -401,14 +422,16 @@ mod tests {
 
     #[test]
     fn personal_data_in_replies_needs_approval() {
-        let d = diff(&[("a.rs", 1)], "+// 4000 0000 0000 0002\n");
-        let r = run(&cfg(), &d, None, &["Refund card 4000-0000-0000-0002 and IBAN NL91 ABNA 0417 1643 00."]);
+        let d = diff(&[("a.rs", 1)], "+// 4539 1488 0343 6467\n");
+        let r = run(&cfg(), &d, None, &["Refund card 4539-1488-0343-6467 12/27 and IBAN NL91 ABNA 0417 1643 00 BIC ABNANL2A."]);
         assert_eq!(failed(&r), vec!["personal data"]);
         assert!(!blocking_failed(&r));
         let detail = &r.iter().find(|c| c.name == "personal data").unwrap().detail;
-        assert!(detail.contains("card") && detail.contains("IBAN") && !detail.contains("0002"), "{detail}");
-        // The diff isn't scanned; example numbers, bad checksums, SHAs and ids don't count.
-        let ok = "Tested with 4242 4242 4242 4242, GB82 WEST 1234 5698 7654 32; order 1234567890123 and 4000000000000001.";
+        assert!(detail.contains("card") && detail.contains("IBAN") && !detail.contains("6467"), "{detail}");
+        assert_eq!(personal_data("paid with 12 4539 1488 0343 6467 today").len(), 1, "a group before it");
+        // The diff isn't scanned; example numbers, bad checksums, zeros, ids and non-ASCII digits don't count.
+        let ok = "Tested with 4242 4242 4242 4242, 4000 0000 0000 0002, GB82 WEST 1234 5698 7654 32; order \
+                  1234567890123, 0000000000000000, 1700000000000 and ٤٥٣٩١٤٨٨٠٣٤٣٦٤٦٧ or DE٨٩370400440532013000.";
         assert!(all_ok(&run(&cfg(), &d, None, &[ok])), "{ok}");
     }
 

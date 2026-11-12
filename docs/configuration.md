@@ -206,7 +206,8 @@ triage = { claude = ["--model", "haiku"], codex = ["-m", "gpt-5-mini"] }
 It applies when every event in the job is that kind; a maintainer job goes by its verb. A job
 that batches, say, a review comment and a CI failure uses plain `agent_args`, and so does an
 agent a per-agent table doesn't name. `review` covers both a review on your PR and reviewing
-someone else's.
+someone else's. Only the main agent run uses it: pack `filter` and `pre_push` gates keep
+`agent_args`, so a cheap CI model never downgrades a review gate.
 
 ## Forgejo and Gitea
 

@@ -14,14 +14,16 @@ All notable changes to Night Porter. The format follows
   For repos where auditors read the page source. New posts only.
 - **Models per kind of job**: `trigger_agent_args` sets `agent_args` per trigger
   (`ci_failure`, `merge_conflict`, ...) or maintainer verb (`triage`, ...), e.g. a cheaper model
-  for CI fixes. Used when the whole job is that kind.
+  for CI fixes. Used when the whole job is that kind, for the main agent run only (pack gates
+  keep `agent_args`).
 - **Personal-data check**: Luhn-valid card numbers and mod-97-valid IBANs in replies or the PR
   body send the job to approval. Well-known test numbers are allowed. Always on.
 
 ### Changed
 
 - CI-fix retries stop early when CI fails exactly the same way as before the last fix (same
-  checks, same output), instead of using up `max_ci_attempts`.
+  checks, same reported output), instead of using up `max_ci_attempts`. Failures that report
+  only job names (GitLab, bare GitHub Actions) still go by `max_ci_attempts`.
 - `/nightporter` is neutralised in command status and error replies too, not only agent replies.
 - `/nightporter status` replies `Job 12: ...` (was `Night Porter job 12: ...`); an issue fix's
   draft PR with an empty summary is titled `Fix #N` (was `Fix #N: Night Porter fix`).
