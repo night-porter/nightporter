@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.4 and 0.3: real PR reviews, backlog sweeps, a Worktrees tab with undo, more handoff targets and phone notifications."
+description: "What's new in Night Porter 0.4 and 0.3: edit a job before it posts, real PR reviews, backlog sweeps, a Worktrees tab with undo and phone notifications."
 ---
 
 # What's new
@@ -8,9 +8,7 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.4
 
-### Edit before it goes out, no-trace replies, cheaper models (next release)
-
-<!-- Rename the heading to the version when it ships. -->
+### Edit before it goes out, no-trace replies, cheaper models (0.4.6)
 
 **Fix it up before it goes out.** Press `e` on a job waiting for you and its replies open in
 your editor: change a word, drop one, save. Press `m` after changing files in the job's

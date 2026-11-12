@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-12
+
 ### Added
 
 - **Edit before it goes out**: `e` in the TUI (or `nightporter edit <id>`) opens a waiting job's
@@ -277,7 +279,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/night-porter/nightporter/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/night-porter/nightporter/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/night-porter/nightporter/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/night-porter/nightporter/compare/v0.4.2...v0.4.3
