@@ -56,7 +56,7 @@ Night Porter **never** merges, force-pushes or closes, and approves a PR only as
 - Desktop notifications, plus webhooks (Slack, Discord, ntfy, JSON) and commands for your phone
   or chat; `nightporter notify test` checks them
 - Reply styles (`concise`, `detailed-tech-lead`, `non-technical`, or your own), with an optional
-  AI-disclosure footer
+  AI-disclosure footer (or no trace at all, per repo)
 - Environment hooks for projects that need a running stack (DDEV, Docker, …)
 - Maintainer mode: triage, reproduce, fix or review issues and MRs from others, on request, or
   sweep a whole backlog (`nightporter sweep`) by label and age; triage flags issues that are

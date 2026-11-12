@@ -127,7 +127,10 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     setup_env(ctx, &j, &s, &w, &job_dir).await?;
-    let outcome = run_agent(ctx, &mut j, &s, &w, &job_dir, &events).await?;
+    // Per-kind args (a cheaper model) for the main run only; filter and pre-push gates keep the repo's.
+    let mut main = s.clone();
+    main.for_job(crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger)));
+    let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events).await?;
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
 }
@@ -474,13 +477,7 @@ async fn inspect(
     j.summary = resha(&j.summary, &signed);
     for reply in &mut j.replies {
         reply.body = resha(&reply.body, &signed);
-        // A reply must never read as a command to Night Porter (it would come back as ours).
-        reply.body = reply.body.replace("/nightporter", "/\u{200b}nightporter");
-        if s.reply.footer {
-            reply.body.push_str(&prompts::footer(s.agent));
-        }
-        reply.body.push('\n');
-        reply.body.push_str(prompts::FOOTER_MARK);
+        reply.body = prompts::sign(&reply.body, s.reply.attribution(), s.agent);
     }
     Ok(commits)
 }
@@ -571,8 +568,15 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
 
     let f = forge.lock().await;
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
-        let pr_body = j.replies.iter().find(|r| r.event.is_none()).map_or_else(|| j.summary.clone(), |r| r.body.clone());
-        let title = format!("Fix #{}: {}", j.number, first_line(&j.summary));
+        let pr_body = j
+            .replies
+            .iter()
+            .find(|r| r.event.is_none())
+            .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
+        let title = match first_line(&j.summary) {
+            l if l.trim().is_empty() => format!("Fix #{}", j.number),
+            l => format!("Fix #{}: {l}", j.number),
+        };
         let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
         log(ctx, id, &format!("opened draft {url}"));
         j.meta.pr_url = url;
@@ -611,7 +615,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         for cmd in events.iter().filter(|e| e.is_bot).filter_map(|e| retrigger(&e.author)) {
             if !asked.contains(&cmd) {
                 asked.push(cmd);
-                match f.reply(&j.repo, j.target, j.number, None, &format!("{cmd}\n{}", prompts::FOOTER_MARK)).await {
+                match f.reply(&j.repo, j.target, j.number, None, &prompts::sign(cmd, s.reply.attribution().quiet(), s.agent)).await {
                     Ok(()) => log(ctx, id, &format!("asked for a new review: {cmd}")),
                     Err(e) => log(ctx, id, &format!("could not ask for a new review ({cmd}): {e:#}")),
                 }
@@ -957,7 +961,7 @@ fn truncate(s: &str, n: usize) -> &str {
 }
 
 fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("Night Porter fix").chars().take(72).collect()
+    s.lines().next().unwrap_or_default().chars().take(72).collect()
 }
 
 #[cfg(test)]

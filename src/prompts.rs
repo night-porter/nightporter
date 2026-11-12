@@ -1,6 +1,6 @@
 //! Assemble the agent prompt from built-in prompt files, the user's own files, packs and events.
 
-use crate::config::RepoSettings;
+use crate::config::{Attribution, RepoSettings};
 use crate::forge::{Event, PrInfo, Trigger, Verb};
 use crate::paths::{Paths, expand_tilde};
 use anyhow::{Context, Result};
@@ -182,8 +182,9 @@ pub fn read_user_file(paths: &Paths, p: &str) -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
 }
 
-/// Invisible marker in every reply (even with the footer off) so the daemon can recognise its
-/// own posts when they come back from the forge.
+/// Invisible marker in replies (unless `reply.attribution = "none"`) so the daemon can recognise
+/// its own posts when they come back from the forge. Without it, [`sign`]'s command neutralising
+/// and the author checks keep its posts from reading as your requests.
 pub const FOOTER_MARK: &str = "<!-- nightporter -->";
 
 /// Footer appended to every reply when enabled.
@@ -191,9 +192,35 @@ pub fn footer(agent: crate::config::AgentKind) -> String {
     format!("\n\n<sub>— via Night Porter ({})</sub>", agent.label())
 }
 
+/// Make `body` safe to post as you: it can never read as a `/nightporter` command (with no marker
+/// it would come back as yours), then the footer and/or marker `attribution` asks for.
+pub fn sign(body: &str, attribution: Attribution, agent: crate::config::AgentKind) -> String {
+    let mut out = body.replace("/nightporter", "/\u{200b}nightporter");
+    if attribution == Attribution::Footer {
+        out.push_str(&footer(agent));
+    }
+    if attribution != Attribution::None {
+        out.push('\n');
+        out.push_str(FOOTER_MARK);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_follows_attribution() {
+        use crate::config::AgentKind::Claude;
+        let b = "fixed; see /nightporter retry";
+        let f = sign(b, Attribution::Footer, Claude);
+        assert!(f.contains("via Night Porter") && f.ends_with(FOOTER_MARK) && !f.contains("/nightporter"));
+        let m = sign(b, Attribution::Marker, Claude);
+        assert!(!m.contains("via Night Porter") && m.ends_with(FOOTER_MARK));
+        let n = sign(b, Attribution::None, Claude);
+        assert!(!n.contains("Night Porter") && !n.contains("<!--") && crate::forge::parse_control(&n).is_none());
+    }
     use crate::forge::{ForgeKind, RepoId, Role, Target};
 
     fn ev(trigger: Trigger, body: &str) -> Event {

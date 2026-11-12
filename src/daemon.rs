@@ -286,13 +286,19 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
             ctx.db(|d| d.set(&done_key, "1"))?;
             let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
             tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
-            let sent = match res {
-                Ok(None) => forge.ack(&j.repo, j.target, j.number, &c.id).await,
-                Ok(Some(msg)) => forge.reply(&j.repo, j.target, j.number, None, &format!("{msg}\n{}", crate::prompts::FOOTER_MARK)).await,
-                Err(e) => {
-                    let msg = format!("Night Porter: {e:#}\n{}", crate::prompts::FOOTER_MARK);
-                    forge.reply(&j.repo, j.target, j.number, None, &msg).await
-                }
+            // The command already ran: a broken repo file must not cost it its reply.
+            let s = ctx.cfg().settings_for(&ctx.paths, &j.repo).ok();
+            let a = s.as_ref().map_or(crate::config::Attribution::Marker, |s| s.reply.attribution().quiet());
+            let agent = s.map_or(crate::config::AgentKind::Claude, |s| s.agent);
+            let msg = match res {
+                Ok(None) => None,
+                Ok(Some(msg)) => Some(msg),
+                Err(e) if a == crate::config::Attribution::None => Some(format!("{e:#}")),
+                Err(e) => Some(format!("Night Porter: {e:#}")),
+            };
+            let sent = match msg {
+                None => forge.ack(&j.repo, j.target, j.number, &c.id).await,
+                Some(m) => forge.reply(&j.repo, j.target, j.number, None, &crate::prompts::sign(&m, a, agent)).await,
             };
             if let Err(e) = sent {
                 tracing::warn!("job {}: acknowledge command: {e:#}", j.id);
@@ -300,6 +306,22 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
         }
     }
     Ok(())
+}
+
+/// The output of a CI failure: the check summaries, without the "CI failed:" line, the per-check
+/// header lines (name and run link) and any link. Empty when the forge gave only check names
+/// (GitLab jobs, most plain GitHub Actions): names alone can't tell a new error from the old one.
+/// ponytail: exact text match; a summary with timings or ids in it never matches (just no early
+/// stop). Comparing failing log tails would catch more; add when users hit the cap on repeats.
+fn ci_failure_key<'a>(evs: impl Iterator<Item = &'a Event>) -> String {
+    let mut lines: Vec<String> = evs
+        .flat_map(|e| e.body.lines().skip(1))
+        .filter(|l| !(l.starts_with("- ") && l.contains("://")))
+        .map(|l| l.split_whitespace().filter(|w| !w.contains("://")).collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.sort();
+    lines.join("\n")
 }
 
 /// Classify one event: pending (trusted), inbox (unknown author) or dropped.
@@ -450,24 +472,23 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         // CI-fix loop guard.
         if evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure) {
             let tries = ctx.db(|d| d.ci_attempts(&repo, n))?;
-            if tries >= s.max_ci_attempts {
+            let failure = ci_failure_key(evs.iter().map(|(e, _)| e).filter(|e| e.trigger == Trigger::CiFailure));
+            // The last fix changed nothing CI can see: another run would burn the same tokens.
+            let same = tries > 0 && !failure.is_empty() && ctx.db(|d| d.ci_failure(&repo, n))? == failure;
+            if tries >= s.max_ci_attempts || same {
+                let (reason, msg) = if same {
+                    ("same CI failure as last attempt", "CI fails the same way after the last fix; stopped retrying".to_string())
+                } else {
+                    ("CI-fix attempts exhausted", format!("CI still failing after {tries} attempts; stopped retrying"))
+                };
                 for id in &ids {
-                    ctx.db(|d| d.move_event(id, Disposition::Pending, Disposition::Dropped, "CI-fix attempts exhausted"))?;
+                    ctx.db(|d| d.move_event(id, Disposition::Pending, Disposition::Dropped, reason))?;
                 }
-                let target = evs[0].0.target;
-                ctx.notify(
-                    &repo,
-                    &notify::Event::about(
-                        Kind::Failed,
-                        &repo,
-                        target,
-                        n,
-                        &format!("CI still failing after {tries} attempts; stopped retrying"),
-                    ),
-                );
+                ctx.notify(&repo, &notify::Event::about(Kind::Failed, &repo, evs[0].0.target, n, &msg));
                 continue;
             }
             ctx.db(|d| d.set_ci_attempts(&repo, n, tries + 1))?;
+            ctx.db(|d| d.set_ci_failure(&repo, n, &failure))?;
         }
         let level: Level = match mode {
             Mode::MyPrs => s.level,
@@ -651,6 +672,41 @@ mod tests {
         intake(&ctx, &cfg, "me", ev(&repo, "5", "me", Role::Owner, Trigger::CiFailure)).await.unwrap();
         dispatch(&ctx).unwrap();
         assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn identical_ci_failure_stops_early() {
+        let (_d, ctx, repo) = setup("subscribed = true\nmax_ci_attempts = 5");
+        let cfg = ctx.cfg();
+        let ci = |id: &str, run: u32, out: &str| Event {
+            body: format!("CI failed:\n- test (https://ci/runs/{run}) failed\n  {out}"),
+            ..ev(&repo, id, "me", Role::Owner, Trigger::CiFailure)
+        };
+        let run = |e: Event| async {
+            intake(&ctx, &cfg, "me", e).await.unwrap();
+            dispatch(&ctx).unwrap();
+            let q = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+            for j in &q {
+                ctx.db(|d| d.set_status(j.id, JobStatus::Done)).unwrap();
+            }
+            !q.is_empty()
+        };
+        assert!(run(ci("1", 1, "assert 1 == 2")).await);
+        assert!(run(ci("2", 2, "assert 3 == 4")).await, "a different failure gets another try");
+        assert!(!run(ci("3", 3, "assert 3 == 4")).await, "the same failure (other run link) stops");
+        let dropped = ctx.db(|d| d.events_with(Disposition::Dropped)).unwrap();
+        assert!(dropped.iter().any(|(e, _)| e.id == "3"), "{dropped:?}");
+        // Names only (GitLab jobs, bare Actions): no output to compare, so the cap decides.
+        let names = |id: &str, run: u32| Event {
+            body: format!("CI pipeline failed:\n- test (stage test) https://gl/jobs/{run}"),
+            ..ev(&repo, id, "me", Role::Owner, Trigger::CiFailure)
+        };
+        assert!(run(names("5", 5)).await);
+        assert!(run(names("6", 6)).await, "same names, unknown output: retried");
+        ctx.db(|d| d.set_ci_attempts(&repo, 7, 0)).unwrap();
+        // Green resets it.
+        ctx.db(|d| d.set_ci_attempts(&repo, 7, 0)).unwrap();
+        assert!(run(ci("4", 4, "assert 3 == 4")).await);
     }
 
     #[tokio::test]

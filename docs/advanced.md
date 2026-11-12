@@ -397,8 +397,17 @@ show up in the TUI as copy-paste text and nothing is posted.
 style = "concise"          # detailed-tech-lead, non-technical, or one from an enabled pack
 language = "German"
 footer = true              # "via Night Porter (Claude Code)"
+# attribution = "none"     # footer (default) | marker (hidden <!-- nightporter --> only) | none
 resolve_threads = false
 ```
+
+Some teams don't want a hidden `<!-- nightporter -->` in the page source of every reply, for
+example when auditors read the PRs. Set `attribution = "none"` in that repo's file: no footer, no
+marker, and command replies drop the "Night Porter:" prefix. Night Porter still tells its posts
+apart (only your PRs' non-command comments are read, and `/nightporter` is neutralised in
+everything it posts). Comments posted before the change keep their marker; editing them would
+leave it in the edit history anyway. The `nightporter/issue-N` branch name and the 👍 on your
+commands stay.
 
 ## Packs
 
