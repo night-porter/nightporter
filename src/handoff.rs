@@ -31,6 +31,10 @@ pub fn can_take_over(j: &Job) -> Result<()> {
 
 pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
     can_take_over(j)?;
+    // For `nightporter stats`; a failed write only costs the count.
+    let mut m = j.meta.clone();
+    m.took_over = true;
+    let _ = db.set_meta(j.id, &m);
     let cfg = crate::config::Config::load(paths).ok();
     let choice = cfg.as_ref().map(|c| c.handoff).unwrap_or_default();
     let agent = cfg.map(|c| c.handoff_agent).unwrap_or_default().or_job(crate::agent_for(paths, &j.repo));

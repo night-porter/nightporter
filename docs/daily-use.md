@@ -78,6 +78,55 @@ Close but not quite? You don't need to take over to change a word or a line.
   the commits, runs every pre-push check and pack gate again, and the job waits for you once
   more. No agent runs. Then `a` pushes the lot.
 
+Night Porter keeps what the agent first wrote and what you changed. That's what
+[learning from your fixes](#learn-from-your-fixes) reads.
+
+### Plan first
+
+For bigger work, have the agent say what it will do before it does it. List the kinds of job in
+the repo's file (or `[defaults]`):
+
+```toml
+plan_first = ["fix"]          # issue fixes; also review_comment, ci_failure, triage, …
+```
+
+Such a job first runs read-only and writes a plan. It waits in the Queue marked `PLAN:`, even at
+`auto`, and nothing is posted. `a` approves the plan and the build runs with it; `e` edits the
+plan first; `r` rejects the job. After the plan, the job follows the repo's level as usual.
+Plans stay on your machine, so approve them in the TUI or with `nightporter approve`: a
+`/nightporter approve` comment on the forge doesn't approve a plan. `trigger_agent_args` can give the plan step its own model
+(`plan = ["--model", "opus"]`).
+
+### Learn from your fixes
+
+Each edit (`e`), amend (`m`), rejection and dismissal tells Night Porter something the agent got
+wrong. `L` on the Repos tab (or `nightporter learn <owner/name>`) starts a learn job for that
+repo: the agent reads those fixes and proposes a better instructions file for the repo, your
+`prompt` file.
+
+- It reads only fixes since the last learn (the latest 20), and only jobs that started from
+  people you trust: nothing let in from the inbox, nothing on someone else's code or issue.
+- It runs with no repository and no commands, just the fixes and the current file.
+- The proposal waits in the Queue as a diff. `a` writes the file, `e` edits it first, `r` drops
+  it. It writes the repo's own `prompt` file. If the repo has none, it makes one under `prompts/`
+  in the config folder (starting from a shared `defaults.prompt`, which it never changes) and
+  points the repo at it. The secrets
+  and personal-data checks run on it, since it goes into every future prompt.
+
+Once a repo has five fixes that haven't been learned from, Night Porter reminds you, at most once
+a week per repo. The repo's view (`Enter` on the Repos tab) shows the count too.
+
+### What it costs, and how often you fix it
+
+```sh
+nightporter stats                    # last 30 days, every repo
+nightporter stats --repo acme/api --days 90
+```
+
+Jobs, cost, cost per pushed job, and how often you rejected, dismissed, edited, amended, took
+over or retried, by repo, by kind of job and by agent and model. Use it to pick a cheaper model
+for a kind of job (`trigger_agent_args`), or to spot a repo that needs better instructions.
+
 ### In the inbox
 
 Comments from people who aren’t trusted never reach the agent. They wait here.
@@ -104,7 +153,8 @@ where it was. `X` deletes a job and its logs for good; it asks first and can't b
 on that repo: which keys its repo file sets, the level, agent and its arguments, triggers, reply
 style (with the style text), language and footer, the repo's own `CLAUDE.md` / `AGENTS.md`, your
 `prompt` and `env.prompt` files (with their contents), packs, hours, limits, trust lists, sandbox
-and checks. `e` there edits the repo's file.
+and checks, plus its last 30 days (jobs, fixes, cost). `e` there edits the repo's file, and `L`
+learns from your fixes.
 
 ## From your phone
 
@@ -142,7 +192,7 @@ nightporter show 42              # a job: checks, replies, diff, log
 nightporter approve 42
 nightporter approve 42 --override-blocking
 nightporter reject 42
-nightporter edit 42              # edit the replies in $EDITOR
+nightporter edit 42              # edit the replies (or a waiting plan) in $EDITOR
 nightporter amend 42             # commit and re-check your edits in the job's worktree
 nightporter retry 42
 nightporter dismiss 42 43        # put away, nothing pushed or posted
@@ -151,6 +201,8 @@ nightporter purge 42 43          # delete for good, with logs (asks; --yes to sk
 nightporter handoff 42           # take over in herdr, Rex, tmux or Zellij
 nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
 nightporter events --json        # follow every job and inbox change
+nightporter stats                # cost and how often you fixed jobs (--repo, --days)
+nightporter learn acme/api       # propose better instructions from your fixes
 
 nightporter inbox list
 nightporter inbox allow-once <event>

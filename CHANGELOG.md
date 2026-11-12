@@ -8,6 +8,17 @@ All notable changes to Night Porter. The format follows
 
 ### Added
 
+- **Plan first**: `plan_first = ["fix", …]` per repo. Those jobs first write a plan in a
+  read-only run and wait for you (even at `auto`); `a` builds it, `e` edits the plan first. The
+  build follows the approved plan. Plans stay local.
+- **Learn from your fixes**: `L` on the Repos tab or `nightporter learn <repo>` starts a job that
+  reads your edits, amends, rejections and dismissals on that repo (trusted jobs only) and
+  proposes a better `prompt` instructions file, shown as a diff for you to approve. A reminder
+  comes once a repo has five unlearned fixes, at most weekly.
+- **`nightporter stats`**: jobs, cost, cost per pushed job, and how often you rejected, edited,
+  amended, took over or retried, by repo, kind of job and agent/model (`--repo`, `--days`). The
+  repo view shows the last 30 days.
+- `trigger_agent_args` takes `plan` and `learn` keys, for a model per step.
 - `w` in the TUI opens the job's PR/MR or issue in your browser (Queue, History, job view), the
   comment (Inbox) or the repo (Repos). The job view and `nightporter show` print the link.
 

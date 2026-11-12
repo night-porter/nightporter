@@ -99,6 +99,9 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     j.status = JobStatus::Running;
+    if j.mode == crate::improve::LEARN {
+        return crate::improve::run_learn(ctx, &mut j, &s).await;
+    }
     if j.meta.amend {
         // A failed amend leaves the job as it was before: still waiting for your approval.
         if let Err(e) = amend(ctx, &mut j, &s, &events).await {
@@ -139,10 +142,17 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     setup_env(ctx, &j, &s, &w, &job_dir).await?;
+    let kind = crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger));
+    j.meta.kind = kind;
+    // `plan_first`: a read-only run writes the plan, and the job waits for you before building.
+    let planning = kind.is_some_and(|k| s.plan_first.contains(&k)) && j.meta.plan.is_empty();
     // Per-kind args (a cheaper model) for the main run only; filter and pre-push gates keep the repo's.
     let mut main = s.clone();
-    main.for_job(crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger)));
-    let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events).await?;
+    main.for_job(if planning { Some(crate::config::JobKind::Plan) } else { kind });
+    let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events, planning).await?;
+    if planning {
+        return await_plan(ctx, &mut j, &w, outcome).await;
+    }
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
 }
@@ -162,11 +172,15 @@ async fn amend(ctx: &Ctx, j: &mut Job, s: &RepoSettings, events: &[Event]) -> Re
         git(&wt, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Edits before push"]).await?;
     }
     guard.verify()?;
-    if git::head(&wt).await? == j.head_after {
+    let new_head = git::head(&wt).await?;
+    if new_head == j.head_after {
         log(ctx, j.id, "amend: nothing changed in the worktree");
         j.status = JobStatus::AwaitingApproval;
         return ctx.db(|d| d.update_job(j));
     }
+    // Kept for `nightporter learn`: what you changed by hand. Read in the clone, by SHA.
+    let mine = git(&clone, &[&["diff"][..], &RAW_DIFF, &[&j.head_after, &new_head]].concat()).await.unwrap_or_default();
+    j.meta.amend_diff = truncate(&format!("{}{mine}", j.meta.amend_diff), 20_000).to_string();
     log(ctx, j.id, "amend: checking your edits");
     let gitfile = std::fs::read_to_string(wt.join(".git"))?;
     let w = Work {
@@ -282,6 +296,8 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             j.meta.base.clone_from(&base);
             let i = forge.lock().await.issue(&j.repo, j.number).await?;
             j.meta.title.clone_from(&i.title);
+            // A request on someone else's issue: their text shaped the job.
+            j.meta.untrusted_input |= verb.is_some() && !i.author.eq_ignore_ascii_case(&me);
             issue = Some(i);
             // A later request on the same issue continues the branch from earlier work.
             let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
@@ -407,7 +423,16 @@ fn env_guarded(s: &RepoSettings) -> bool {
 
 /// Build the prompt, run the agent, then (even if it failed) verify the worktree's `.git`,
 /// restore env files and run teardown, in that order.
-async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: &Path, events: &[Event]) -> Result<agent::Outcome> {
+#[allow(clippy::too_many_arguments)]
+async fn run_agent(
+    ctx: &Ctx,
+    j: &mut Job,
+    s: &RepoSettings,
+    w: &Work,
+    job_dir: &Path,
+    events: &[Event],
+    planning: bool,
+) -> Result<agent::Outcome> {
     let verb = j.meta.verb;
     let mut pack_prompts: Vec<String> = Vec::new();
     for hook in [Hook::PreFix, Hook::PostFix] {
@@ -428,14 +453,18 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
         is_issue: j.target == Target::Issue,
         me: &w.me,
         pack_prompts: &pack_prompts,
+        planning,
+        plan: &j.meta.plan,
     })?;
     let snapshot = job_dir.join("env-snapshot");
     let guard_env = env_guarded(s);
     if guard_env {
         snapshot_env(&w.wt, &snapshot)?;
     }
-    log(ctx, j.id, &format!("running {} ({})", s.agent.label(), w.step));
-    let outcome = agent::run(s.agent, s, &w.wt, job_dir, &prompt, read_only_verb(verb)).await;
+    log(ctx, j.id, &format!("running {} ({})", s.agent.label(), if planning { "plan" } else { w.step }));
+    j.meta.agent = s.agent.label().into();
+    j.meta.model = crate::improve::model_of(s.agent_args.for_agent(s.agent));
+    let outcome = agent::run(s.agent, s, &w.wt, job_dir, &prompt, read_only_verb(verb) || planning).await;
     // Before anything runs in the worktree again, even on failure: did the agent repoint .git?
     if let Err(e) = git::verify_gitfile(&w.wt, &w.gitfile) {
         let _ = std::fs::remove_dir_all(&w.wt);
@@ -454,6 +483,21 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
     j.meta.cost_usd = outcome.cost_usd;
     j.summary.clone_from(&outcome.summary);
     Ok(outcome)
+}
+
+/// The plan step is done: keep the plan and wait for you. Nothing is checked or posted; approving
+/// queues the build, which follows the plan.
+async fn await_plan(ctx: &Ctx, j: &mut Job, w: &Work, outcome: agent::Outcome) -> Result<()> {
+    anyhow::ensure!(git::head(&w.wt).await? == j.head_before, "the plan step changed the branch; not continuing");
+    let plan = outcome.replies.into_iter().map(|r| r.body).find(|b| !b.trim().is_empty()).unwrap_or_else(|| outcome.summary.clone());
+    anyhow::ensure!(!plan.trim().is_empty(), "the agent wrote no plan");
+    j.meta.plan = plan;
+    j.meta.planning = true;
+    j.summary = format!("PLAN: {}", first_line(&outcome.summary));
+    j.status = JobStatus::AwaitingApproval;
+    ctx.db(|d| d.update_job(j))?;
+    note(ctx, j, Kind::NeedsApproval, "plan ready: approve to build it, or edit it first (e)");
+    Ok(())
 }
 
 /// Inspect what the agent did: diff, built-in checks and pack pre-push gates (all before any
@@ -597,6 +641,9 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if j.status != JobStatus::Approved {
         bail!("job {id} is {:?}, not approved", j.status);
     }
+    if j.mode == crate::improve::LEARN {
+        return deliver_learn(ctx, &mut j);
+    }
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
     let s = cfg.settings_for(&ctx.paths, &j.repo)?;
@@ -692,6 +739,16 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     ctx.db(|d| d.update_job(&j))?;
     let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
     note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
+    Ok(())
+}
+
+/// An approved learn job: write the instructions file.
+fn deliver_learn(ctx: &Ctx, j: &mut Job) -> Result<()> {
+    let msg = ctx.db(|d| crate::improve::apply_learn(&ctx.paths, d, j))?;
+    log(ctx, j.id, &msg);
+    let mut ev = notify::Event::new(Kind::Done, &format!("{} (learn)", j.repo), &msg);
+    ev.job = Some(j.id);
+    ctx.notify(&j.repo, &ev);
     Ok(())
 }
 

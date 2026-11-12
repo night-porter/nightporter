@@ -336,7 +336,8 @@ impl AgentArgs {
 }
 
 /// Keys of `trigger_agent_args`: a trigger, or a maintainer verb. `review` is both (a review on
-/// your PR, and reviewing someone else's).
+/// your PR, and reviewing someone else's). `plan` (the plan step of `plan_first`) and `learn`
+/// (`nightporter learn`) are steps, not triggers.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -348,6 +349,8 @@ pub enum JobKind {
     Triage,
     Reproduce,
     Fix,
+    Plan,
+    Learn,
 }
 
 impl JobKind {
@@ -447,6 +450,10 @@ pub struct RepoSettings {
     /// or an agent the per-agent map doesn't name, keeps `agent_args`.
     #[serde(default)]
     pub trigger_agent_args: std::collections::BTreeMap<JobKind, AgentArgs>,
+    /// Kinds of job that write a plan first and wait for you to approve it (even at `auto`)
+    /// before they change any code, e.g. `["fix"]`.
+    #[serde(default)]
+    pub plan_first: Vec<JobKind>,
     /// Shell commands the agent may run (e.g. `"npm test"`, `"ddev phpunit"`). Prefix match.
     #[serde(default)]
     pub allow_commands: Vec<String>,

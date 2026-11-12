@@ -64,6 +64,9 @@ Night Porter **never** merges, force-pushes or closes, and approves a PR only as
 - Packs and marketplaces: shareable review steps, reply styles and environment presets
 - Fix a job up before it goes out: edit its replies in your editor (`e`), or change files in its
   worktree and `amend` (`m`): checked again, no take-over needed
+- Plan first (`plan_first`): chosen kinds of job write a plan and wait for your OK before any code
+- Gets better with use: `nightporter learn` turns your fixes into better per-repo instructions
+  (you approve the diff), and `nightporter stats` shows cost and how often you had to step in
 - Dismiss a job without replying or pushing, undo it, or delete it for good; search History for
   done and dismissed jobs
 - One view per repo (`nightporter repo <owner/name>`) of everything that shapes its jobs: level,

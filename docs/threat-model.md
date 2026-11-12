@@ -230,6 +230,23 @@ Packs contain only TOML, markdown and plain text: no executable code, pinned to 
 block a job or require approval; it can never relax B1–B4. Updating a pack shows the prompt diff
 before it is applied. A step that needs write access shows a warning at install time.
 
+### B5a. Plans and learned instructions
+
+A `plan_first` plan is written by a read-only run (no commits, no write tools) and never posted.
+The build only starts once you approve it, in the TUI or CLI: a `/nightporter approve` comment
+can't approve a plan, since the plan is never shown on the forge. The approved plan goes into the
+build prompt fenced like a request. Approving a plan doesn't approve the build's push: that
+follows the repo's level.
+
+A learn job writes your per-repo `prompt` file, which every later job reads. So its input is
+limited to jobs that started from trusted people: jobs on someone else's code or issue, and jobs
+that took an event you let in once from the inbox, are left out. Those facts are recorded on the
+job when it starts, so a retry can't wash them out. Learn never writes a shared
+`defaults.prompt`: it writes the repo's own file. The corrections it reads are fenced
+as untrusted data. It runs with no repository, no allowed commands and read-only tools. Nothing
+is written until you approve the diff, and the secrets and personal-data checks run on the
+proposed file first.
+
 ### B6. Credentials at rest
 
 Tokens come from `gh`/`glab`/`tea` or from the OS keychain. They are never stored in config, logs, job

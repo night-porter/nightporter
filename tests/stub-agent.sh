@@ -4,6 +4,15 @@
 set -e
 # The prompt arrives on stdin (like `claude -p` reading standard input).
 prompt="$(cat)"
+# The plan step (plan_first) and learn jobs change nothing: they answer with text.
+case "$prompt" in *"## Plan first"*)
+  printf '{"result":"```nightporter\\n{\\"summary\\":\\"rename it\\",\\"replies\\":[{\\"event\\":null,\\"body\\":\\"1. Rename it in a.txt\\"}]}\\n```","total_cost_usd":0.01}\n'
+  exit 0;;
+esac
+case "$prompt" in *"You improve the instructions"*)
+  printf '{"result":"```nightporter\\n{\\"summary\\":\\"plans are numbered\\",\\"replies\\":[{\\"event\\":null,\\"body\\":\\"- Number every plan step.\\"}]}\\n```","total_cost_usd":0.02}\n'
+  exit 0;;
+esac
 echo "stub change" >> stub.txt
 case " $* " in *" --leak "*) leak=1;; esac
 if [ -n "$leak" ]; then echo 'token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"' >> stub.txt; fi

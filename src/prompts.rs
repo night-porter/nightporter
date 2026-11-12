@@ -8,6 +8,8 @@ use std::fmt::Write as _;
 
 pub const SYSTEM: &str = include_str!("../prompts/system.md");
 pub const OUTPUT: &str = include_str!("../prompts/output.md");
+pub const PLAN: &str = include_str!("../prompts/steps/plan_first.md");
+pub const LEARN: &str = include_str!("../prompts/learn.md");
 
 pub fn step(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -69,6 +71,9 @@ pub struct Input<'a> {
     pub me: &'a str,
     /// Extra instructions from enabled packs for this step (already resolved).
     pub pack_prompts: &'a [String],
+    /// `plan_first`: write a plan only (`planning`), or build following an approved `plan`.
+    pub planning: bool,
+    pub plan: &'a str,
 }
 
 pub fn build(i: &Input) -> Result<String> {
@@ -101,6 +106,14 @@ pub fn build(i: &Input) -> Result<String> {
     for extra in i.pack_prompts {
         p.push('\n');
         p.push_str(extra);
+    }
+    if !i.planning && !i.plan.is_empty() {
+        // Written by the agent from the requests, then approved (maybe edited) by the maintainer.
+        let _ = writeln!(
+            p,
+            "\n### Approved plan\nThe maintainer approved this plan. Follow it; if part of it turns out wrong, say so in your reply.\n<plan>\n{}\n</plan>",
+            defang(i.plan, "plan")
+        );
     }
 
     let _ = writeln!(p, "\n## Context\nRepository: {}", i.repo);
@@ -157,6 +170,9 @@ pub fn build(i: &Input) -> Result<String> {
     let style = style(i.paths, &s.reply.style, &s.packs)?;
     let _ = writeln!(p, "\n## Reply style\n{style}\nWrite replies in language: {}.\n", s.reply.language);
     p.push_str(OUTPUT);
+    if i.planning {
+        p.push_str(PLAN);
+    }
     Ok(p)
 }
 
@@ -291,6 +307,8 @@ mod tests {
             is_issue: false,
             me: "me",
             pack_prompts: &[],
+            planning: false,
+            plan: "",
         })
         .unwrap();
         assert!(p.contains("event `e1`") && p.contains("src/a.rs:3") && p.contains("rename this"));

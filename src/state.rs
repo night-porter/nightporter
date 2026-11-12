@@ -50,6 +50,7 @@ impl Disposition {
 ///   ▲                  ├──▶ awaiting_run_approval ──approve──▶ queued
 ///   │                  ├──▶ awaiting_approval ──approve──▶ approved ──▶ done | failed
 ///   └──────────── awaiting_approval ──amend──▶ queued (your worktree edits, checked again)
+///   └──────────── awaiting_approval ──approve a plan──▶ queued (builds with the plan)
 ///   │                  ├──▶ approved (auto, clean checks)
 ///   │                  └──▶ ready (suggest) ──approve──▶ done
 ///   └─ a daemon error before running ──▶ failed
@@ -223,6 +224,7 @@ impl Job {
 
 /// Extra per-job data needed to deliver after approval.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // stored JSON, one flag per fact
 pub struct JobMeta {
     #[serde(default)]
     pub push_url: String,
@@ -266,6 +268,43 @@ pub struct JobMeta {
     /// The status a dismissed job had, so restore can put it back.
     #[serde(default)]
     pub dismissed_from: Option<JobStatus>,
+    /// What kind of job ran, with which agent and model (for `nightporter stats`).
+    #[serde(default)]
+    pub kind: Option<crate::config::JobKind>,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub model: String,
+    /// What the agent first wrote (its replies, its plan), kept the first time you edit it: what
+    /// `nightporter learn` compares your edit with.
+    #[serde(default)]
+    pub drafted: String,
+    #[serde(default)]
+    pub drafted_plan: String,
+    /// What you changed with `amend` (capped).
+    #[serde(default)]
+    pub amend_diff: String,
+    /// Someone you don't trust shaped this job: an event let in once from the inbox, or a
+    /// maintainer request on someone else's issue or PR. Never learned from.
+    #[serde(default)]
+    pub untrusted_input: bool,
+    #[serde(default)]
+    pub took_over: bool,
+    #[serde(default)]
+    pub retried: bool,
+    /// `plan_first`: the plan, written by the agent and maybe edited by you. While `planning`, the
+    /// job waits for you to approve it; after that, the build follows it.
+    #[serde(default)]
+    pub plan: String,
+    #[serde(default)]
+    pub planning: bool,
+    /// A learn job: the proposed prompt file, where it goes, and the newest job it learned from.
+    #[serde(default)]
+    pub proposal: String,
+    #[serde(default)]
+    pub prompt_path: String,
+    #[serde(default)]
+    pub learned_until: i64,
 }
 
 pub fn now() -> i64 {
@@ -420,6 +459,13 @@ impl Db {
         Ok(self.0.execute("UPDATE events SET disposition='pending', job_id=NULL, seen_at=?2 WHERE job_id=?1", params![job_id, now()])?)
     }
 
+    /// Why each of a job's events was let through (`allowed once` for one released from the inbox).
+    pub fn job_event_reasons(&self, job_id: i64) -> Result<Vec<String>> {
+        let mut st = self.0.prepare("SELECT reason FROM events WHERE job_id=?1")?;
+        let rows = st.query_map([job_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn job_events(&self, job_id: i64) -> Result<Vec<Event>> {
         let mut st = self.0.prepare("SELECT json FROM events WHERE job_id=?1 ORDER BY seen_at")?;
         let rows = st.query_map([job_id], |r| r.get::<_, String>(0))?;
@@ -562,12 +608,20 @@ impl Db {
     /// waiting for you, or updated since `since` (bounds the API calls per poll).
     pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!(
-            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY repo, target, number)
+            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs WHERE mode != 'learn' GROUP BY repo, target, number)
                AND (status IN ({}) OR updated_at >= ?1) ORDER BY id",
             JobStatus::sql(JobStatus::needs_user)
         ))?;
         let rows = st.query_map([since], row_job)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Save a job only if it is still exactly in `j.status` (an edit made while it waited must not
+    /// land on a job that moved on meanwhile).
+    pub fn update_waiting(&self, j: &Job) -> Result<()> {
+        let now = self.job(j.id)?.with_context(|| format!("no job {}", j.id))?;
+        anyhow::ensure!(now.status == j.status && now.meta.planning == j.meta.planning, "job {} changed meanwhile; nothing saved", j.id);
+        self.update_job(j)
     }
 
     /// Any job on this PR that isn't finished (one job per PR at a time).

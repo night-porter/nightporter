@@ -19,6 +19,12 @@ pub enum Scope<'a> {
 pub fn approve(db: &Db, id: i64, override_blocking: bool) -> Result<&'static str> {
     let mut j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     match j.status {
+        JobStatus::AwaitingApproval if j.meta.planning => {
+            j.meta.planning = false;
+            j.status = JobStatus::Queued;
+            db.update_job(&j)?;
+            Ok("plan approved: the build is queued and follows it")
+        }
         JobStatus::AwaitingApproval => {
             if checks_blocking(&j.checks) && !override_blocking {
                 bail!("job {id} has blocking check failures; review them and approve with override");
@@ -26,7 +32,11 @@ pub fn approve(db: &Db, id: i64, override_blocking: bool) -> Result<&'static str
             if !db.transition(id, JobStatus::AwaitingApproval, JobStatus::Approved)? {
                 bail!("job {id} changed state; reload");
             }
-            Ok("approved: the daemon will push and post")
+            Ok(if j.mode == crate::improve::LEARN {
+                "approved: the daemon writes the new instructions file"
+            } else {
+                "approved: the daemon will push and post"
+            })
         }
         JobStatus::AwaitingRunApproval => {
             j.meta.run_approved = true;
@@ -69,6 +79,10 @@ pub fn retry(db: &Db, id: i64) -> Result<usize> {
     if j.status.is_active() || j.status.needs_user() {
         bail!("job {id} is still {}", j.status.label());
     }
+    anyhow::ensure!(j.mode != crate::improve::LEARN, "a learn job has no requests to retry; start a new one (L on the Repos tab)");
+    let mut m = j.meta.clone();
+    m.retried = true;
+    db.set_meta(id, &m)?;
     db.requeue_events(id)
 }
 
@@ -80,6 +94,10 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     match c {
         Control::Approve if j.status != JobStatus::AwaitingApproval => bail!("job {id} is {}, nothing to approve here", j.status.label()),
+        // The plan is never posted: approve it where you can read it.
+        Control::Approve if j.meta.planning => {
+            bail!("job {id} waits for its plan: approve it in the TUI or with `nightporter approve {id}`, where you can read it")
+        }
         Control::Approve => approve(db, id, false).map(|_| None),
         Control::Dismiss => dismiss(db, id).map(|()| None),
         Control::Retry => retry(db, id).map(|_| None),
@@ -93,6 +111,9 @@ const REPLY_SEP: &str = "<!-- reply ";
 /// the footer and marker (they're added back on save).
 pub fn replies_file(db: &Db, id: i64) -> Result<String> {
     let j = editable(db, id)?;
+    if let Some((what, text)) = single_text(&j) {
+        return Ok(format!("{SINGLE}{id}, {}: edit {what}, save and quit. -->\n{text}", j.repo));
+    }
     let events = db.job_events(id)?;
     let mut out = format!(
         "<!-- Job {id}, {}#{}. Edit the replies, save and quit. Keep each \"{REPLY_SEP}N\" line; empty a reply to drop it. -->\n",
@@ -114,6 +135,9 @@ pub fn replies_file(db: &Db, id: i64) -> Result<String> {
 /// personal data) run on the new text. Returns what changed.
 pub fn set_replies(paths: &Paths, db: &Db, id: i64, text: &str) -> Result<String> {
     let mut j = editable(db, id)?;
+    if single_text(&j).is_some() {
+        return set_single(paths, db, j, text);
+    }
     let mut bodies: Vec<(usize, String)> = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(REPLY_SEP) {
@@ -150,6 +174,10 @@ pub fn set_replies(paths: &Paths, db: &Db, id: i64, text: &str) -> Result<String
     if changed + dropped == 0 {
         return Ok("no changes".into());
     }
+    // What the agent wrote, kept the first time: `nightporter learn` compares it with your edit.
+    if j.meta.drafted.is_empty() {
+        j.meta.drafted = j.replies.iter().map(|r| crate::prompts::unsign(&r.body)).collect::<Vec<_>>().join("\n\n---\n\n");
+    }
     anyhow::ensure!(!kept.is_empty() || !j.diff.is_empty(), "every reply is empty; dismiss the job instead (x)");
     j.replies = kept;
     let texts: Vec<&str> = j.replies.iter().map(|r| r.body.as_str()).chain([j.summary.as_str()]).collect();
@@ -181,8 +209,48 @@ fn editable(db: &Db, id: i64) -> Result<crate::state::Job> {
         j.status.label()
     );
     anyhow::ensure!(j.meta.posted.is_empty(), "job {id} has already posted some replies");
-    anyhow::ensure!(!j.replies.is_empty(), "job {id} has no replies to edit");
+    anyhow::ensure!(!j.replies.is_empty() || single_text(&j).is_some(), "job {id} has no replies to edit");
     Ok(j)
+}
+
+const SINGLE: &str = "<!-- Job ";
+
+/// A waiting plan, or a learn job's proposed file: one text to edit instead of replies.
+fn single_text(j: &crate::state::Job) -> Option<(&'static str, &str)> {
+    if j.meta.planning {
+        Some(("the plan the build will follow", &j.meta.plan))
+    } else if j.mode == crate::improve::LEARN {
+        Some(("the proposed instructions file", &j.meta.proposal))
+    } else {
+        None
+    }
+}
+
+fn set_single(paths: &Paths, db: &Db, mut j: crate::state::Job, text: &str) -> Result<String> {
+    let body = text.strip_prefix(SINGLE).map_or(text, |t| t.split_once('\n').map_or("", |(_, rest)| rest)).trim();
+    anyhow::ensure!(!body.is_empty(), "it's empty; nothing saved (reject or dismiss the job instead)");
+    let id = j.id;
+    if j.meta.planning {
+        if body == j.meta.plan.trim() {
+            return Ok("no changes".into());
+        }
+        if j.meta.drafted_plan.is_empty() {
+            j.meta.drafted_plan.clone_from(&j.meta.plan);
+        }
+        j.meta.plan = body.to_string();
+        db.update_waiting(&j)?;
+        return Ok(format!("job {id}: plan edited; approve to build it"));
+    }
+    if body == j.meta.proposal.trim() {
+        return Ok("no changes".into());
+    }
+    j.meta.proposal = format!("{body}\n");
+    let current = std::fs::read_to_string(&j.meta.prompt_path).unwrap_or_default();
+    j.diff = crate::improve::file_diff(&paths.job_dir(id), &current, &j.meta.proposal);
+    j.checks = crate::improve::text_checks(&j.meta.proposal);
+    db.update_waiting(&j)?;
+    let checks = if crate::checks::all_ok(&j.checks) { "checks pass" } else { "checks need you" };
+    Ok(format!("job {id}: proposal edited; {checks}"))
 }
 
 /// Queue a job waiting for push approval to pick up your own edits in its worktree (made by hand
@@ -199,6 +267,7 @@ pub fn amend(db: &Db, id: i64) -> Result<&'static str> {
         !matches!(j.meta.verb, Some(crate::forge::Verb::Triage | crate::forge::Verb::Review | crate::forge::Verb::Reproduce)),
         "job {id} doesn't push code; edit its replies instead (e)"
     );
+    anyhow::ensure!(!j.meta.planning && j.mode != crate::improve::LEARN, "job {id} hasn't written code yet; edit it instead (e)");
     anyhow::ensure!(!j.worktree.is_empty() && std::path::Path::new(&j.worktree).exists(), "job {id} has no worktree any more");
     j.meta.amend = true;
     j.status = JobStatus::Queued;

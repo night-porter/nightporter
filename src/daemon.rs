@@ -178,6 +178,9 @@ pub async fn run(paths: Paths) -> Result<()> {
                 if let Err(e) = job::housekeeping(&c).await {
                     tracing::warn!("housekeeping: {e:#}");
                 }
+                if let Err(e) = crate::improve::nudge(&c) {
+                    tracing::warn!("learn reminder: {e:#}");
+                }
                 if c.cfg().check_updates {
                     crate::update::daily_check(&c.db).await;
                 }
@@ -186,7 +189,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     }
 }
 
-fn reload(ctx: &Ctx) {
+pub(crate) fn reload(ctx: &Ctx) {
     match Config::load(&ctx.paths) {
         Ok(c) => {
             let clones = repos::scan(&c.code_dir(), c.scan_depth, &c.accounts);
@@ -499,7 +502,8 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
-        ctx.db(|d| d.set_meta(id, &JobMeta { verb, ..Default::default() }))?;
+        let let_in = ctx.db(|d| d.job_event_reasons(id))?.iter().any(|r| r == "allowed once");
+        ctx.db(|d| d.set_meta(id, &JobMeta { verb, untrusted_input: let_in, ..Default::default() }))?;
         tracing::info!("job {id}: {repo}#{n} ({} event(s), {})", ids.len(), level.as_str());
     }
     Ok(())
@@ -544,7 +548,12 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             if let Err(e) = res {
                 tracing::error!("job {id}: {e:#}");
                 let _ = c.db(|d| d.fail(id, &format!("{e:#}")));
-                let mut ev = notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &format!("job {id} failed: {e:#}"));
+                let msg = format!("job {id} failed: {e:#}");
+                let mut ev = if j.mode == crate::improve::LEARN {
+                    notify::Event::new(Kind::Failed, &format!("{} (learn)", j.repo), &msg)
+                } else {
+                    notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &msg)
+                };
                 ev.job = Some(id);
                 c.notify(&j.repo, &ev);
             }
