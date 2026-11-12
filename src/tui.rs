@@ -570,6 +570,10 @@ impl App {
                 let cmd = self.db.job(id).ok().flatten().map(|j| crate::job::manual_commands(&j)).unwrap_or_default();
                 if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|()| format!("copied: {cmd}")) }
             }
+            KeyCode::Char('w') => match self.db.job(id) {
+                Ok(Some(j)) => open_url(&crate::notify::web_url(&j.repo, j.target, j.number)),
+                _ => Ok("job not found".into()),
+            },
             KeyCode::Char('y') => {
                 let text = self
                     .db
@@ -598,6 +602,10 @@ impl App {
         let Some(e) = self.sel.selected().and_then(|i| self.inbox.get(i)).cloned() else { return };
         let r = match k.code {
             KeyCode::Char('o') => actions::allow_once(&self.db, &e.id).map(|()| "allowed once".into()),
+            // The comment itself when the forge gave its link, else the PR/MR or issue.
+            // Only a link on the repo's own forge: inbox events come from strangers.
+            KeyCode::Char('w') if e.url.starts_with(&format!("https://{}/", e.repo.host)) => open_url(&e.url),
+            KeyCode::Char('w') => open_url(&crate::notify::web_url(&e.repo, e.target, e.number)),
             KeyCode::Char('i') => actions::ignore(&self.db, &e.id).map(|()| {
                 self.undo_events.push(e.id.clone());
                 "ignored (u undoes)".into()
@@ -639,6 +647,7 @@ impl App {
             crate::config::edit_file(&path, |d| d[key] = toml_edit::value(val)).map(|()| format!("{} {key} = {val}", id.path))
         };
         let r = match k.code {
+            KeyCode::Char('w') => open_url(&format!("https://{}/{}", r.id.host, r.id.path)),
             KeyCode::Char(' ' | 's') => {
                 let on = !r.subscribed;
                 actions::set_subscribed(&self.paths, &r.id, on)
@@ -871,11 +880,11 @@ impl App {
             // Kept under 80 columns.
             _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file Esc back",
             (false, Tab::Repos | Tab::Settings | Tab::History) if self.filtering => "type to search, Enter keep results, Esc clear search",
-            (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over y copy Esc",
-            (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over q quit",
-            (_, Tab::History) => "Enter open x dismiss u restore X delete t retry / search ? q quit",
-            (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny ? help q quit",
-            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit / search ? q",
+            (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over w web Esc",
+            (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over w web q quit",
+            (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search ? q quit",
+            (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
+            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
             (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
             (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
@@ -1052,6 +1061,7 @@ pub fn job_text(db: &Db, j: &Job) -> String {
         j.attempt
     );
     let _ = writeln!(s, "Created {}, updated {}", when(j.created_at), when(j.updated_at));
+    let _ = writeln!(s, "{}", crate::notify::web_url(&j.repo, j.target, j.number));
     if !j.summary.is_empty() {
         let _ = writeln!(s, "\nSummary: {}", j.summary);
     }
@@ -1118,6 +1128,20 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     s
 }
 
+/// Open a link in the default browser. The URL is one argument, never parsed by a shell.
+fn open_url(url: &str) -> Result<String> {
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    let quiet = std::process::Stdio::null;
+    std::process::Command::new(cmd).args(args).arg(url).stdout(quiet()).stderr(quiet()).spawn()?;
+    Ok(format!("opened {url}"))
+}
+
 /// Copy to the system clipboard via the platform tool.
 fn copy(text: &str) -> Result<()> {
     use std::io::Write;
@@ -1153,6 +1177,7 @@ Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ 
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
 Repos: Enter details   space subscribe/unsubscribe   l next level (observe → suggest → draft → auto)
+       w  open the repo in the browser
        a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental)   e edit the repo's file   R rescan
        l, a set the repo's own value; (now auto, from window) on a row: a schedule window overrides it
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
@@ -1161,14 +1186,14 @@ Settings: Enter change (switches on/off and choices, otherwise type a value)   d
 Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t retry
        x dismiss: put it away without replying or pushing (it stays in History)
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
-       c copy the push command (suggest level)   y copy replies
+       c copy the push command (suggest level)   y copy replies   w open the PR/MR or issue in the browser
        h take over in herdr, Rex, tmux, Zellij or a terminal: the job's worktree with a briefed agent
        e edit the replies in $EDITOR before they're posted (checked again on save)
        m amend: after you change files in the job's worktree (by hand or in a take-over), the
           daemon commits them, signs and checks everything again, and asks you once more
 Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
        changes; ignored files like node_modules aren't kept)   h take over   Enter the job
-Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny
+Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny   w open the comment in the browser
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
 Checks: [ok] passed, [ASK] needs your approval, [BLOCK] blocking (secrets, protected paths, history).
@@ -1476,6 +1501,7 @@ mod tests {
         let t = job_text(&db, &j);
         for want in [
             "\nError: agent crashed",
+            "\nhttps://github.com/o/r/pull/4\n",
             "Cost: $1.23",
             "Draft PR: https://github.com/o/r/pull/9",
             "Build files changed vs base:\n  (none)\nWorktree to inspect: /tmp/wt",

@@ -63,6 +63,7 @@ invalid file from the editor is never written; you can fix it or throw the edit 
 | `h` | take over in [herdr, Rex, tmux or Zellij](/herdr) |
 | `c` | copy the push command (for `suggest` jobs) |
 | `y` | copy the reply text |
+| `w` | open the PR/MR or issue in your browser (the job view shows the link too) |
 
 ### Fix it up before it goes out
 
