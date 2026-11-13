@@ -424,9 +424,11 @@ impl App {
             KeyCode::Char('e') if self.repo_view.is_some() => {
                 self.suspend = self.repo_view.as_ref().map(|r| Suspend::Editor(self.paths.repo_file(r)));
             }
-            KeyCode::Char('L') if let Some(r) = self.repo_view.clone() => {
-                self.msg = learn(&mut self.db, &r).unwrap_or_else(|e| format!("error: {e:#}"));
-                self.refresh(false);
+            KeyCode::Char('L') if self.repo_view.is_some() => {
+                if let Some(r) = self.repo_view.clone() {
+                    self.msg = learn(&mut self.db, &r).unwrap_or_else(|e| format!("error: {e:#}"));
+                    self.refresh(false);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
             KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
