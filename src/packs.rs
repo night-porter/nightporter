@@ -237,7 +237,8 @@ pub fn remove(paths: &Paths, name: &str) -> Result<()> {
 
 /// Unified diff of prompt files between the installed pack and a staged update.
 pub fn diff_dirs(old: &Path, new: &Path) -> String {
-    let out = std::process::Command::new("git").args(["diff", "--no-index", "--no-color", "--"]).arg(old).arg(new).output();
+    let out =
+        std::process::Command::new("git").args(["diff", "--no-index", "--no-color", "--no-ext-diff", "--"]).arg(old).arg(new).output();
     out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
 }
 

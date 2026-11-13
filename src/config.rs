@@ -336,7 +336,8 @@ impl AgentArgs {
 }
 
 /// Keys of `trigger_agent_args`: a trigger, or a maintainer verb. `review` is both (a review on
-/// your PR, and reviewing someone else's).
+/// your PR, and reviewing someone else's). `plan` (the plan step of `plan_first`) and `learn`
+/// (`nightporter learn`) are steps, not triggers.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -348,6 +349,8 @@ pub enum JobKind {
     Triage,
     Reproduce,
     Fix,
+    Plan,
+    Learn,
 }
 
 impl JobKind {
@@ -447,6 +450,10 @@ pub struct RepoSettings {
     /// or an agent the per-agent map doesn't name, keeps `agent_args`.
     #[serde(default)]
     pub trigger_agent_args: std::collections::BTreeMap<JobKind, AgentArgs>,
+    /// Kinds of job that write a plan first and wait for you to approve it (even at `auto`)
+    /// before they change any code, e.g. `["fix"]`.
+    #[serde(default)]
+    pub plan_first: Vec<JobKind>,
     /// Shell commands the agent may run (e.g. `"npm test"`, `"ddev phpunit"`). Prefix match.
     #[serde(default)]
     pub allow_commands: Vec<String>,
@@ -731,6 +738,9 @@ impl Config {
         }
         let s: RepoSettings = merged.try_into()?;
         crate::schedule::validate(&s.schedule)?;
+        if let Some(k) = s.plan_first.iter().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
+            bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
+        }
         let known = |n: &String| n == "desktop" || self.notifications.targets.iter().any(|t| &t.name == n);
         if let Some(n) = s.notify.iter().chain(s.schedule.iter().filter_map(|w| w.notify.as_ref())).flatten().find(|n| !known(n)) {
             bail!("unknown notification target {n:?} in notify (use desktop or a [[notifications.targets]] name)");
@@ -1074,6 +1084,8 @@ mod tests {
         assert_eq!(args(JobKind::of(None, [T::CiFailure, T::Comment])), "--model opus", "mixed batch");
         assert_eq!(args(JobKind::of(Some(Verb::Triage), [T::Comment])), "--model opus", "no claude entry: keep agent_args");
         assert!(Config::parse("[defaults.trigger_agent_args]\nnope = []").and_then(|c| c.resolve(None)).is_err());
+        assert!(Config::parse("[defaults]\nplan_first = [\"plan\"]").is_err(), "plan is a step, not a kind of job");
+        assert!(Config::parse("[defaults]\nplan_first = [\"fix\", \"ci_failure\"]").is_ok());
     }
 
     #[test]

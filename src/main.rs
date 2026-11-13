@@ -11,6 +11,7 @@ mod git;
 mod handoff;
 mod herdr;
 mod http;
+mod improve;
 mod job;
 mod notify;
 mod packs;
@@ -147,6 +148,17 @@ enum Cmd {
     Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
     Show { id: i64 },
+    /// What jobs cost and how often you fixed them, by repo, kind of job and agent/model.
+    Stats {
+        /// One repo only (`owner/name`).
+        #[arg(long)]
+        repo: Option<String>,
+        /// How many days back.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+        days: u32,
+    },
+    /// Learn from your fixes on a repo: a job proposes better instructions for it, for you to approve.
+    Learn { repo: String },
     /// Inbox decision for an untrusted author's event.
     Inbox {
         #[command(subcommand)]
@@ -396,6 +408,7 @@ fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
             writeln!(out, "{}", handoff::take_over(paths, &db, &j)?)?;
             Ok(())
         }
+        c @ (Cmd::Stats { .. } | Cmd::Learn { .. }) => cmd_improve(paths, c, out),
         Cmd::Show { id } => {
             let db = db(paths)?;
             let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
@@ -629,7 +642,26 @@ fn cmd_repo(paths: &Paths, repo: &str, out: &mut dyn Write, tty: bool) -> Result
     let cfg = config::Config::load(paths)?;
     let r = resolve_repo(paths, repo)?;
     let clone = repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts).remove(&r);
-    page(&printable(&settings::repo_text(paths, &cfg, &r, clone.as_deref())?), out, tty)
+    let mut text = settings::repo_text(paths, &cfg, &r, clone.as_deref())?;
+    if let Ok(s) = improve::repo_summary(&db(paths)?, &r) {
+        text = format!("{text}\n{s}\n");
+    }
+    page(&printable(&text), out, tty)
+}
+
+fn cmd_improve(paths: &Paths, cmd: Cmd, out: &mut dyn Write) -> Result<()> {
+    match cmd {
+        Cmd::Stats { repo, days } => {
+            let r = repo.map(|r| resolve_repo(paths, &r)).transpose()?;
+            write!(out, "{}", improve::stats(&db(paths)?, r.as_ref(), days)?)?;
+        }
+        Cmd::Learn { repo } => {
+            let id = improve::start_learn(&mut db(paths)?, &resolve_repo(paths, &repo)?)?;
+            writeln!(out, "learn job {id} queued: it proposes new instructions and waits for you (`nightporter show {id}`)")?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn cmd_update(db: &Db, out: &mut dyn Write) -> Result<()> {
@@ -683,6 +715,7 @@ fn read_only(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Status
             | Cmd::Show { .. }
+            | Cmd::Stats { .. }
             | Cmd::Repos { .. }
             | Cmd::Repo { .. }
             | Cmd::Doctor

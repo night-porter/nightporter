@@ -67,9 +67,13 @@ sandbox = true              # OS sandbox for agent commands (Claude Code, Codex,
 # [defaults.agent_args]
 # claude = ["--model", "opus"]
 # codex = ["-m", "gpt-5"]
-# Cheaper models for some kinds of job (keys: a trigger, or triage / reproduce / fix / review).
+# Kinds of job that write a plan and wait for your OK before changing code (even at auto).
+# plan_first = ["fix"]
+# Cheaper models for some kinds of job (keys: a trigger, triage / reproduce / fix / review,
+# or the plan / learn steps).
 # [defaults.trigger_agent_args]
 # ci_failure = ["--model", "haiku"]
+# plan = ["--model", "opus"]
 
 [defaults.trust]
 roles = ["owner", "maintainer", "member", "collaborator"]

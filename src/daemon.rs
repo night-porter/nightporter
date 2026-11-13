@@ -178,6 +178,9 @@ pub async fn run(paths: Paths) -> Result<()> {
                 if let Err(e) = job::housekeeping(&c).await {
                     tracing::warn!("housekeeping: {e:#}");
                 }
+                if let Err(e) = crate::improve::nudge(&c) {
+                    tracing::warn!("learn reminder: {e:#}");
+                }
                 if c.cfg().check_updates {
                     crate::update::daily_check(&c.db).await;
                 }
@@ -186,7 +189,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     }
 }
 
-fn reload(ctx: &Ctx) {
+pub(crate) fn reload(ctx: &Ctx) {
     match Config::load(&ctx.paths) {
         Ok(c) => {
             let clones = repos::scan(&c.code_dir(), c.scan_depth, &c.accounts);
@@ -544,9 +547,7 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             if let Err(e) = res {
                 tracing::error!("job {id}: {e:#}");
                 let _ = c.db(|d| d.fail(id, &format!("{e:#}")));
-                let mut ev = notify::Event::about(Kind::Failed, &j.repo, j.target, j.number, &format!("job {id} failed: {e:#}"));
-                ev.job = Some(id);
-                c.notify(&j.repo, &ev);
+                job::note(&c, &j, Kind::Failed, &format!("job {id} failed: {e:#}"));
             }
             c.running.lock().unwrap().remove(&id);
         });

@@ -282,6 +282,72 @@ async fn edit_replies_and_amend_files_before_push() {
 }
 
 #[tokio::test]
+async fn plan_first_then_learn_from_the_edit() {
+    let w = world("plan_first = [\"review_comment\"]").await;
+    let ctx = &w.ctx;
+    daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+    daemon::dispatch(ctx).unwrap();
+    let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+
+    // The plan step changes nothing and waits for you, with nothing to post.
+    job::run(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
+    assert!(j.meta.planning && j.meta.plan.contains("Rename it") && j.replies.is_empty() && j.summary.starts_with("PLAN:"), "{j:?}");
+    assert_eq!(j.head_before, sh(&w.bare, "git rev-parse feature"));
+    assert!(ctx.db(|d| actions::amend(d, id)).is_err(), "nothing to amend before the build");
+    let blind = ctx.db(|d| actions::pr_command(d, id, crate::forge::Control::Approve));
+    assert!(blind.is_err_and(|e| e.to_string().contains("plan")), "a forge comment can't approve a plan it never showed");
+
+    // Edit the plan; the agent's version is kept for learning.
+    let file = ctx.db(|d| actions::replies_file(d, id)).unwrap();
+    assert!(file.contains("edit the plan") && file.contains("Rename it"), "{file}");
+    let msg = ctx
+        .db(|d| actions::set_replies(&ctx.paths, d, id, &file.replace("Rename it in a.txt", "Rename it in a.txt and the docs")))
+        .unwrap();
+    assert!(msg.contains("plan edited"), "{msg}");
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.meta.drafted_plan, "1. Rename it in a.txt");
+
+    // Approving the plan queues the build, which gets the edited plan.
+    assert!(ctx.db(|d| actions::approve(d, id, false)).unwrap().contains("plan approved"));
+    job::run(ctx, id).await.unwrap();
+    let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::AwaitingApproval, "{}", j.error);
+    assert!(!j.meta.planning && j.diff.contains("stub change") && j.replies.len() == 1);
+    let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
+    assert!(prompt.contains("Approved plan") && prompt.contains("and the docs") && !prompt.contains("## Plan first"));
+    ctx.db(|d| actions::approve(d, id, false).map(|_| ())).unwrap();
+    job::deliver(ctx, id).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Done);
+    assert!(ctx.db(|d| crate::improve::stats(d, None, 30)).unwrap().contains("Claude Code (default model)"));
+
+    // Learn: a job proposes instructions from the edit; approving writes them to the repo's own
+    // file (starting from the shared `defaults.prompt`, which stays as it was) and sets `prompt`.
+    std::fs::write(ctx.paths.config_dir.join("shared.md"), "- Be brief.\n").unwrap();
+    let cfg_text = std::fs::read_to_string(ctx.paths.config_file()).unwrap();
+    std::fs::write(ctx.paths.config_file(), format!("{cfg_text}prompt = \"shared.md\"\n")).unwrap();
+    daemon::reload(ctx); // as the daemon does when a config file changes
+    let lid = ctx.db(|d| crate::improve::start_learn(d, &w.repo)).unwrap();
+    job::run(ctx, lid).await.unwrap();
+    let l = ctx.db(|d| d.job(lid)).unwrap().unwrap();
+    assert_eq!(l.status, JobStatus::AwaitingApproval, "{}", l.error);
+    assert!(l.diff.contains("+- Number every plan step.") && l.summary.starts_with("LEARN:"), "{}", l.diff);
+    let prompt = std::fs::read_to_string(ctx.paths.job_dir(lid).join("agent/prompt.md")).unwrap();
+    assert!(prompt.contains("<untrusted>") && prompt.contains("and the docs") && prompt.contains("1. Rename it in a.txt"));
+    assert!(prompt.contains("<current>\n- Be brief."), "a new repo file starts from the shared one");
+    ctx.db(|d| actions::approve(d, lid, false).map(|_| ())).unwrap();
+    job::deliver(ctx, lid).await.unwrap();
+    assert_eq!(ctx.db(|d| d.job(lid)).unwrap().unwrap().status, JobStatus::Done);
+    let s = Config::load(&ctx.paths).unwrap().settings_for(&ctx.paths, &w.repo).unwrap();
+    let file = std::fs::read_to_string(s.prompt.unwrap()).unwrap();
+    assert_eq!(file, "- Number every plan step.\n");
+    assert_eq!(std::fs::read_to_string(ctx.paths.config_dir.join("shared.md")).unwrap(), "- Be brief.\n");
+    assert!(ctx.db(|d| crate::improve::fixes(d, &w.repo)).unwrap().is_empty(), "learned fixes don't count again");
+    assert!(ctx.db(|d| crate::improve::start_learn(d, &w.repo)).is_err());
+}
+
+#[tokio::test]
 async fn open_threads_of_allowed_bots_join_the_job_and_get_a_new_review() {
     let thread = |id: u64, resolved: bool, login: &str, last: &str| {
         format!(

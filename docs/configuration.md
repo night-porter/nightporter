@@ -59,6 +59,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `agent` | `claude` | `claude` (Claude Code), `opencode`, `codex` or `gemini` (Gemini CLI 0.67+, experimental) |
 | `agent_args` | `[]` | extra CLI args. A list goes to whichever agent runs (`["--model", "opus"]`); a table sets them per agent (see [Models per agent](#models-per-agent)). Empty: each agent uses its own default model and settings |
 | `trigger_agent_args` | `{}` | `agent_args` for one kind of job, e.g. `ci_failure = ["--model", "haiku"]` (see [Models per kind of job](#models-per-kind-of-job)) |
+| `plan_first` | `[]` | kinds of job that write a plan and wait for you before changing any code, even at `auto`, e.g. `["fix"]` (see [Plan first](/daily-use#plan-first)) |
 | `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list. `["*"]` (Claude Code) allows any command; the deny list and the sandbox still apply |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
@@ -208,6 +209,13 @@ that batches, say, a review comment and a CI failure uses plain `agent_args`, an
 agent a per-agent table doesn't name. `review` covers both a review on your PR and reviewing
 someone else's. Only the main agent run uses it: pack `filter` and `pre_push` gates keep
 `agent_args`, so a cheap CI model never downgrades a review gate.
+
+Two more keys are steps rather than triggers: `plan` (the plan step of `plan_first`, where a
+stronger model often pays off) and `learn` (the job that learns from your fixes). Without them,
+those steps use plain `agent_args`.
+
+`nightporter stats` shows what each model cost and how often you had to fix its work, so you can
+tell whether a cheaper model is good enough for a kind of job.
 
 ## Forgejo and Gitea
 

@@ -71,8 +71,17 @@ fn log(ctx: &Ctx, id: i64, msg: &str) {
 fn read_only_verb(v: Option<Verb>) -> bool {
     matches!(v, Some(Verb::Triage | Verb::Review))
 }
-fn pushes_code(v: Option<Verb>) -> bool {
+pub(crate) fn pushes_code(v: Option<Verb>) -> bool {
     !matches!(v, Some(Verb::Triage | Verb::Review | Verb::Reproduce))
+}
+
+/// `plan_first` lists this job's kind. A job that batches several kinds of event plans if any is listed.
+fn plans_first(plan_first: &[crate::config::JobKind], verb: Option<Verb>, triggers: &[crate::forge::Trigger]) -> bool {
+    use crate::config::JobKind;
+    JobKind::of(verb, triggers.iter().copied())
+        .into_iter()
+        .chain(triggers.iter().filter_map(|t| JobKind::of(None, [*t])))
+        .any(|k| plan_first.contains(&k))
 }
 
 /// What `prepare` sets up for the later phases of `run`.
@@ -99,6 +108,9 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     j.status = JobStatus::Running;
+    if j.mode == crate::improve::LEARN {
+        return crate::improve::run_learn(ctx, &mut j, &s).await;
+    }
     if j.meta.amend {
         // A failed amend leaves the job as it was before: still waiting for your approval.
         if let Err(e) = amend(ctx, &mut j, &s, &events).await {
@@ -119,7 +131,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
     }
 
     let events = with_bot_threads(ctx, &j, &s, events).await?;
-    let Some(w) = prepare(ctx, &mut j, &cfg.accounts, &s, &events).await? else {
+    let Some(mut w) = prepare(ctx, &mut j, &cfg.accounts, &s, &events).await? else {
         return Ok(());
     };
     if reads_only(&j, &s) {
@@ -139,10 +151,23 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     setup_env(ctx, &j, &s, &w, &job_dir).await?;
+    let kind = crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger));
+    j.meta.kind = kind;
+    // Set here, where every path into a run passes with its events attached: never learned from.
+    j.meta.untrusted_input |= events.iter().any(|e| e.trigger == crate::forge::Trigger::CiFailure) || ctx.db(|d| d.job_let_in(id))?;
+    // `plan_first`: a read-only run writes the plan, and the job waits for you before building.
+    let triggers: Vec<_> = events.iter().map(|e| e.trigger).collect();
+    let planning = j.meta.plan.is_empty() && plans_first(&s.plan_first, j.meta.verb, &triggers);
     // Per-kind args (a cheaper model) for the main run only; filter and pre-push gates keep the repo's.
     let mut main = s.clone();
-    main.for_job(crate::config::JobKind::of(j.meta.verb, events.iter().map(|e| e.trigger)));
+    main.for_job(if planning { Some(crate::config::JobKind::Plan) } else { kind });
+    if planning {
+        w.step = "plan";
+    }
     let outcome = run_agent(ctx, &mut j, &main, &w, &job_dir, &events).await?;
+    if planning {
+        return await_plan(ctx, &mut j, &w, outcome).await;
+    }
     let commits = inspect(ctx, &mut j, &s, &w, &job_dir, &events, outcome).await?;
     conclude(ctx, &mut j, commits, lvl).await
 }
@@ -162,11 +187,15 @@ async fn amend(ctx: &Ctx, j: &mut Job, s: &RepoSettings, events: &[Event]) -> Re
         git(&wt, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Edits before push"]).await?;
     }
     guard.verify()?;
-    if git::head(&wt).await? == j.head_after {
+    let new_head = git::head(&wt).await?;
+    if new_head == j.head_after {
         log(ctx, j.id, "amend: nothing changed in the worktree");
         j.status = JobStatus::AwaitingApproval;
         return ctx.db(|d| d.update_job(j));
     }
+    // Kept for `nightporter learn`: what you changed by hand. Read in the clone, by SHA.
+    let mine = git(&clone, &[&["diff"][..], &RAW_DIFF, &[&j.head_after, &new_head]].concat()).await.unwrap_or_default();
+    j.meta.amend_diff = truncate(&format!("{}{mine}", j.meta.amend_diff), 20_000).to_string();
     log(ctx, j.id, "amend: checking your edits");
     let gitfile = std::fs::read_to_string(wt.join(".git"))?;
     let w = Work {
@@ -282,6 +311,8 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             j.meta.base.clone_from(&base);
             let i = forge.lock().await.issue(&j.repo, j.number).await?;
             j.meta.title.clone_from(&i.title);
+            // A request on someone else's issue: their text shaped the job.
+            j.meta.untrusted_input |= verb.is_some() && !i.author.eq_ignore_ascii_case(&me);
             issue = Some(i);
             // A later request on the same issue continues the branch from earlier work.
             let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
@@ -409,6 +440,7 @@ fn env_guarded(s: &RepoSettings) -> bool {
 /// restore env files and run teardown, in that order.
 async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: &Path, events: &[Event]) -> Result<agent::Outcome> {
     let verb = j.meta.verb;
+    let planning = w.step == "plan";
     let mut pack_prompts: Vec<String> = Vec::new();
     for hook in [Hook::PreFix, Hook::PostFix] {
         for (name, text, _) in packs::steps(&ctx.paths, &s.packs, hook) {
@@ -428,6 +460,8 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
         is_issue: j.target == Target::Issue,
         me: &w.me,
         pack_prompts: &pack_prompts,
+        planning,
+        plan: &j.meta.plan,
     })?;
     let snapshot = job_dir.join("env-snapshot");
     let guard_env = env_guarded(s);
@@ -435,7 +469,9 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
         snapshot_env(&w.wt, &snapshot)?;
     }
     log(ctx, j.id, &format!("running {} ({})", s.agent.label(), w.step));
-    let outcome = agent::run(s.agent, s, &w.wt, job_dir, &prompt, read_only_verb(verb)).await;
+    j.meta.agent = s.agent.label().into();
+    j.meta.model = crate::improve::model_of(s.agent_args.for_agent(s.agent));
+    let outcome = agent::run(s.agent, s, &w.wt, job_dir, &prompt, read_only_verb(verb) || planning).await;
     // Before anything runs in the worktree again, even on failure: did the agent repoint .git?
     if let Err(e) = git::verify_gitfile(&w.wt, &w.gitfile) {
         let _ = std::fs::remove_dir_all(&w.wt);
@@ -451,9 +487,28 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
         }
     }
     let outcome = outcome?;
-    j.meta.cost_usd = outcome.cost_usd;
+    // Plus the plan step's, for a `plan_first` build.
+    j.meta.cost_usd = match (j.meta.cost_usd, outcome.cost_usd) {
+        (Some(plan), Some(build)) => Some(plan + build),
+        (plan, build) => plan.or(build),
+    };
     j.summary.clone_from(&outcome.summary);
     Ok(outcome)
+}
+
+/// The plan step is done: keep the plan and wait for you. Nothing is checked or posted; approving
+/// queues the build, which follows the plan.
+async fn await_plan(ctx: &Ctx, j: &mut Job, w: &Work, outcome: agent::Outcome) -> Result<()> {
+    anyhow::ensure!(git::head(&w.wt).await? == j.head_before, "the plan step changed the branch; not continuing");
+    let plan = outcome.replies.into_iter().map(|r| r.body).find(|b| !b.trim().is_empty()).unwrap_or_else(|| outcome.summary.clone());
+    anyhow::ensure!(!plan.trim().is_empty(), "the agent wrote no plan");
+    j.meta.plan = plan;
+    j.meta.planning = true;
+    j.summary = format!("PLAN: {}", first_line(&outcome.summary));
+    j.status = JobStatus::AwaitingApproval;
+    ctx.db(|d| d.update_job(j))?;
+    note(ctx, j, Kind::NeedsApproval, "plan ready: approve to build it, or edit it first (e)");
+    Ok(())
 }
 
 /// Inspect what the agent did: diff, built-in checks and pack pre-push gates (all before any
@@ -597,6 +652,9 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if j.status != JobStatus::Approved {
         bail!("job {id} is {:?}, not approved", j.status);
     }
+    if j.mode == crate::improve::LEARN {
+        return deliver_learn(ctx, &mut j);
+    }
     let events = ctx.db(|d| d.job_events(id))?;
     let cfg = ctx.cfg();
     let s = cfg.settings_for(&ctx.paths, &j.repo)?;
@@ -695,9 +753,21 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Notify about this job, linking its PR (or the draft PR it opened).
-fn note(ctx: &Ctx, j: &Job, kind: Kind, summary: &str) {
-    let mut ev = notify::Event::about(kind, &j.repo, j.target, j.number, summary);
+/// An approved learn job: write the instructions file.
+fn deliver_learn(ctx: &Ctx, j: &mut Job) -> Result<()> {
+    let msg = ctx.db(|d| crate::improve::apply_learn(&ctx.paths, d, j))?;
+    log(ctx, j.id, &msg);
+    note(ctx, j, Kind::Done, &msg);
+    Ok(())
+}
+
+/// Notify about this job, linking its PR (or the draft PR it opened). A learn job has none.
+pub(crate) fn note(ctx: &Ctx, j: &Job, kind: Kind, summary: &str) {
+    let mut ev = if j.mode == crate::improve::LEARN {
+        notify::Event::new(kind, &format!("{} (learn)", j.repo), summary)
+    } else {
+        notify::Event::about(kind, &j.repo, j.target, j.number, summary)
+    };
     ev.job = Some(j.id);
     ev.pr_title = Some(j.meta.title.clone()).filter(|t| !t.is_empty());
     if !j.meta.pr_url.is_empty() {
@@ -1014,7 +1084,7 @@ fn failed_names(c: &[CheckResult]) -> String {
     c.iter().filter(|c| !c.ok).map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
-fn truncate(s: &str, n: usize) -> &str {
+pub(crate) fn truncate(s: &str, n: usize) -> &str {
     if s.len() <= n {
         return s;
     }
@@ -1025,13 +1095,25 @@ fn truncate(s: &str, n: usize) -> &str {
     &s[..i]
 }
 
-fn first_line(s: &str) -> String {
+pub(crate) fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().chars().take(72).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_first_covers_mixed_jobs() {
+        use crate::config::JobKind as K;
+        use crate::forge::Trigger as T;
+        let only_comments = [K::ReviewComment];
+        assert!(plans_first(&only_comments, None, &[T::ReviewComment]));
+        assert!(plans_first(&only_comments, None, &[T::CiFailure, T::ReviewComment]), "mixed: any listed kind plans");
+        assert!(!plans_first(&only_comments, None, &[T::CiFailure]));
+        assert!(plans_first(&[K::Fix], Some(Verb::Fix), &[T::Comment]));
+        assert!(!plans_first(&[], None, &[T::ReviewComment]));
+    }
 
     #[test]
     fn review_verdict_only_when_allowed_and_not_yours() {

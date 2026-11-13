@@ -95,7 +95,12 @@ pub static SETTINGS: &[Setting] = &[
     s(
         "defaults.trigger_agent_args",
         Info,
-        "agent_args for one kind of job, e.g. ci_failure = [\"--model\", \"haiku\"]. Keys: triggers, or triage, reproduce, fix, review. Press e to edit the file.",
+        "agent_args for one kind of job, e.g. ci_failure = [\"--model\", \"haiku\"]. Keys: triggers, triage, reproduce, fix, review, or the plan and learn steps. Press e to edit the file.",
+    ),
+    s(
+        "defaults.plan_first",
+        List,
+        "Kinds of job that write a plan and wait for your approval before changing any code (even at auto), e.g. fix",
     ),
     risky(
         "defaults.level",

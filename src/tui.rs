@@ -209,7 +209,10 @@ impl App {
             self.detail_text = Config::load(&self.paths)
                 .and_then(|cfg| {
                     let clone = crate::repos::scan(&cfg.code_dir(), cfg.scan_depth, &cfg.accounts).remove(r);
-                    crate::settings::repo_text(&self.paths, &cfg, r, clone.as_deref())
+                    let mut t = crate::settings::repo_text(&self.paths, &cfg, r, clone.as_deref())?;
+                    t.push('\n');
+                    t.push_str(&crate::improve::repo_summary(&self.db, r)?);
+                    Ok(t)
                 })
                 .unwrap_or_else(|e| format!("error: {e:#}"));
         }
@@ -421,6 +424,12 @@ impl App {
             KeyCode::Char('e') if self.repo_view.is_some() => {
                 self.suspend = self.repo_view.as_ref().map(|r| Suspend::Editor(self.paths.repo_file(r)));
             }
+            KeyCode::Char('L') if self.repo_view.is_some() => {
+                if let Some(r) = self.repo_view.clone() {
+                    self.msg = learn(&mut self.db, &r).unwrap_or_else(|e| format!("error: {e:#}"));
+                    self.refresh(false);
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
             KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(20).min(self.max_scroll()),
@@ -571,6 +580,7 @@ impl App {
                 if cmd.is_empty() { Ok("nothing to push for this job".into()) } else { copy(&cmd).map(|()| format!("copied: {cmd}")) }
             }
             KeyCode::Char('w') => match self.db.job(id) {
+                Ok(Some(j)) if j.mode == crate::improve::LEARN => open_url(&crate::notify::repo_url(&j.repo)),
                 Ok(Some(j)) => open_url(&crate::notify::web_url(&j.repo, j.target, j.number)),
                 _ => Ok("job not found".into()),
             },
@@ -647,7 +657,8 @@ impl App {
             crate::config::edit_file(&path, |d| d[key] = toml_edit::value(val)).map(|()| format!("{} {key} = {val}", id.path))
         };
         let r = match k.code {
-            KeyCode::Char('w') => open_url(&format!("https://{}/{}", r.id.host, r.id.path)),
+            KeyCode::Char('w') => open_url(&crate::notify::repo_url(&r.id)),
+            KeyCode::Char('L') => learn(&mut self.db, &r.id.clone()),
             KeyCode::Char(' ' | 's') => {
                 let on = !r.subscribed;
                 actions::set_subscribed(&self.paths, &r.id, on)
@@ -878,13 +889,13 @@ impl App {
     fn footer(&self) -> (&'static str, String) {
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
-            _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file Esc back",
+            _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file L learn from your fixes Esc back",
             (false, Tab::Repos | Tab::Settings | Tab::History) if self.filtering => "type to search, Enter keep results, Esc clear search",
             (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over w web Esc",
             (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over w web q quit",
             (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
-            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web / search ? q",
+            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
             (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
             (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
@@ -1032,16 +1043,8 @@ fn status_style(s: JobStatus) -> Style {
 
 fn job_line(j: &Job) -> String {
     let when = jiff::Timestamp::from_second(j.updated_at).map(|t| t.strftime("%m-%d %H:%M").to_string()).unwrap_or_default();
-    format!(
-        "#{:<4} {:<20} {} {}#{:<5} {:<8} {}",
-        j.id,
-        j.status.label(),
-        when,
-        j.repo,
-        j.number,
-        j.level,
-        j.summary.lines().next().unwrap_or_default()
-    )
+    let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { format!("{}#{:<5}", j.repo, j.number) };
+    format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
 }
 
 /// Full text of a job, used by the TUI detail view and `nightporter show`.
@@ -1061,7 +1064,12 @@ pub fn job_text(db: &Db, j: &Job) -> String {
         j.attempt
     );
     let _ = writeln!(s, "Created {}, updated {}", when(j.created_at), when(j.updated_at));
-    let _ = writeln!(s, "{}", crate::notify::web_url(&j.repo, j.target, j.number));
+    if j.mode == crate::improve::LEARN {
+        let _ = writeln!(s, "Proposed instructions for {}: {}", j.repo, j.meta.prompt_path);
+        let _ = writeln!(s, "a writes it (jobs on this repo use it from then on), e edits it first, r rejects.");
+    } else {
+        let _ = writeln!(s, "{}", crate::notify::web_url(&j.repo, j.target, j.number));
+    }
     if !j.summary.is_empty() {
         let _ = writeln!(s, "\nSummary: {}", j.summary);
     }
@@ -1073,6 +1081,10 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     }
     if !j.meta.pr_url.is_empty() {
         let _ = writeln!(s, "Draft PR: {}", j.meta.pr_url);
+    }
+    if !j.meta.plan.is_empty() {
+        let head = if j.meta.planning { "Plan (waiting for you: a builds it, e edits it, r rejects)" } else { "Plan (approved)" };
+        let _ = writeln!(s, "\n{head}:\n  {}", j.meta.plan.replace('\n', "\n  "));
     }
     if j.status == JobStatus::AwaitingRunApproval {
         let _ = writeln!(s, "\nThis job runs code from someone you don't trust. Build files changed vs base:");
@@ -1128,6 +1140,11 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     s
 }
 
+/// `L`: queue a learn job for the repo.
+fn learn(db: &mut Db, r: &crate::forge::RepoId) -> Result<String> {
+    crate::improve::start_learn(db, r).map(|id| format!("learn job {id} queued: it proposes new instructions and waits in the Queue"))
+}
+
 /// Open a link in the default browser. The URL is one argument, never parsed by a shell.
 fn open_url(url: &str) -> Result<String> {
     let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
@@ -1177,7 +1194,8 @@ Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ 
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
 Repos: Enter details   space subscribe/unsubscribe   l next level (observe → suggest → draft → auto)
-       w  open the repo in the browser
+       w  open the repo in the browser   L learn from your fixes: a job proposes better instructions
+          for the repo (from your edits, amends and rejections) and waits for your approval
        a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental)   e edit the repo's file   R rescan
        l, a set the repo's own value; (now auto, from window) on a row: a schedule window overrides it
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
@@ -1191,6 +1209,7 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t
        e edit the replies in $EDITOR before they're posted (checked again on save)
        m amend: after you change files in the job's worktree (by hand or in a take-over), the
           daemon commits them, signs and checks everything again, and asks you once more
+       A PLAN job (plan_first) waits with its plan: a builds it, e edits the plan, r rejects
 Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
        changes; ignored files like node_modules aren't kept)   h take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny   w open the comment in the browser

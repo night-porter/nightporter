@@ -48,6 +48,11 @@ impl Event {
     }
 }
 
+/// The browser URL of a repo.
+pub fn repo_url(repo: &RepoId) -> String {
+    format!("https://{}/{}", repo.host, repo.path)
+}
+
 /// The browser URL of a PR/MR or issue.
 pub fn web_url(repo: &RepoId, target: Target, n: u64) -> String {
     let what = match (repo.forge, target) {
@@ -57,7 +62,7 @@ pub fn web_url(repo: &RepoId, target: Target, n: u64) -> String {
         (ForgeKind::Forgejo, Target::Pr) => "pulls",
         (ForgeKind::GitHub | ForgeKind::Forgejo, Target::Issue) => "issues",
     };
-    format!("https://{}/{}/{what}/{n}", repo.host, repo.path)
+    format!("{}/{what}/{n}", repo_url(repo))
 }
 
 fn desktop_on(n: &Notifications, kind: Kind) -> bool {
