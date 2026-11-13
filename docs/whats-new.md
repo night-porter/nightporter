@@ -1,10 +1,37 @@
 ---
-description: "What's new in Night Porter 0.4 and 0.3: edit a job before it posts, real PR reviews, backlog sweeps, a Worktrees tab with undo and phone notifications."
+description: "What's new in Night Porter 0.5, 0.4 and 0.3: plan first, learn from your fixes, stats, edit before it posts, real PR reviews and backlog sweeps."
 ---
 
 # What's new
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
+
+## 0.5
+
+### Plan first, learn from your fixes, stats (0.5.0)
+
+**Plan first.** For bigger work, have the agent say what it will do before it does it:
+
+```toml
+plan_first = ["fix"]          # issue fixes; also review_comment, ci_failure, triage, …
+```
+
+Such a job first runs read-only and writes a plan. It waits in the Queue marked `PLAN:`, even at
+`auto`, and nothing is posted. `a` builds it, `e` edits the plan first, `r` rejects the job.
+Plans stay on your machine. See [Plan first](/daily-use#plan-first).
+
+**Learn from your fixes.** Every edit, amend, rejection and dismissal says something the agent
+got wrong. Press `L` on the Repos tab (or run `nightporter learn <owner/name>`) and a job reads
+those fixes and proposes a better instructions file for that repo, as a diff you approve. It
+reads only jobs that started from people you trust, runs with no repository and no commands,
+and changes nothing until you approve. Once a repo has five fixes to learn from, Night Porter
+reminds you, at most weekly. See [Learn from your fixes](/daily-use#learn-from-your-fixes).
+
+**What it costs, and how often you fix it.** `nightporter stats` shows jobs, cost, cost per
+pushed job, and how often you rejected, edited, amended, took over or retried, by repo, kind of
+job and agent/model. The repo view shows the last 30 days.
+
+**Open it in the browser.** `w` opens the job's PR/MR or issue, the inbox comment, or the repo.
 
 ## 0.4
 

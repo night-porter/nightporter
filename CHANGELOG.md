@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
 ### Added
 
 - **Plan first**: `plan_first = ["fix", …]` per repo. Those jobs first write a plan in a
@@ -295,7 +297,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/night-porter/nightporter/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/night-porter/nightporter/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/night-porter/nightporter/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/night-porter/nightporter/compare/v0.4.3...v0.4.4
