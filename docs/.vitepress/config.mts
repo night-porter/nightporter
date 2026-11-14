@@ -14,7 +14,7 @@ const SIDEBAR = [
   {
     text: 'Guide',
     items: [
-      { text: "What's new in 0.4", link: '/whats-new' },
+      { text: "What's new", link: '/whats-new' },
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Daily use', link: '/daily-use' },
       { text: 'herdr, Rex, tmux, Zellij', link: '/herdr' },
@@ -96,7 +96,8 @@ export default defineConfig({
     ]
   },
   head: [
-    ['meta', { name: 'theme-color', content: '#07080d' }],
+    ['meta', { name: 'theme-color', media: '(prefers-color-scheme: light)', content: '#ffffff' }],
+    ['meta', { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#07080d' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Night Porter docs' }],
     ['meta', { property: 'og:image', content: OG_IMAGE }],

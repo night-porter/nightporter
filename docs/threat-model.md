@@ -280,7 +280,7 @@ Discord messages can't ping anyone.
 What each agent gets, as Night Porter configures it (`sandbox = true`, the default). Environment
 scrubbing, the empty `gh`/`glab` config, the git overrides and the B3 checks apply to all of them.
 
-| | Claude Code | Codex | Gemini CLI | OpenCode |
+| Control | Claude Code | Codex | Gemini CLI | OpenCode |
 |---|---|---|---|---|
 | OS sandbox for commands | yes (Seatbelt / bubblewrap), fails closed | yes (Seatbelt / Landlock) | yes (Seatbelt / bubblewrap); version-gated | **no** |
 | Command allow list | yes | **no** (sandbox only) | yes (admin policy) | yes |

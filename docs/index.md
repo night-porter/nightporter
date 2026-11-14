@@ -1,5 +1,7 @@
 ---
 layout: home
+title: Night Porter docs
+titleTemplate: false
 description: "Docs for Night Porter, the daemon and terminal UI that answer review comments, fix failing CI and resolve merge conflicts on your PRs."
 hero:
   name: Night Porter
@@ -13,8 +15,8 @@ hero:
       text: Configuration
       link: /configuration
 features:
-  - title: What's new in 0.4
-    details: Sweep an issue backlog, a Worktrees tab with undo, hand off to pi, Cursor, Copilot and more, a model per agent.
+  - title: What's new in 0.5
+    details: Plan first, learn from your fixes, stats; plus 0.4's backlog sweeps, Worktrees tab and agent handoffs.
     link: /whats-new
   - title: Getting started
     details: Install, run the setup wizard, subscribe to a repo and see your first job.
