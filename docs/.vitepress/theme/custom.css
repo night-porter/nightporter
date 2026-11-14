@@ -13,7 +13,15 @@
   --vp-button-brand-hover-text: #000;
   --vp-button-brand-active-text: #000;
 }
-.dark .vp-doc [class*='language-'] > span.lang { color: var(--vp-c-text-2); }
+/* Code-block language label and Shiki comments: upstream greys are under 4.5:1 (WCAG 1.4.3). */
+:root { --vp-code-lang-color: var(--vp-c-text-2); }
+html:not(.dark) .vp-code span[style*="--shiki-light:#6A737D"] { color: #57606a; }
+.dark .vp-code span[style*="--shiki-dark:#6A737D"] { color: #8b949e; }
+/* ponytail: upstream VitePress bug: the closed mobile sidebar is only transparent, so Tab lands
+   on invisible links (WCAG 2.4.7). Drop when VPSidebar hides itself. */
+@media (max-width: 959px) {
+  .VPSidebar:not(.open) { visibility: hidden; transition: opacity .5s, transform .25s, visibility 0s .25s; }
+}
 /* the logo is a wide wordmark, not a square icon */
 .VPNavBarTitle .logo { height: 32px; width: auto; }
 /* Social icons (official logos, built into VitePress) tinted with the site's neon red. */
