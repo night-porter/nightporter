@@ -298,6 +298,10 @@ pub enum Level {
     Suggest,
     Draft,
     Auto,
+    /// `auto`, and the PR is set to merge by itself once the forge's own rules allow it
+    /// (required checks green, an approval from someone else). Only on a repo whose rules
+    /// Night Porter can read and that require both; otherwise it acts as `auto`.
+    Merge,
 }
 
 impl Level {
@@ -307,6 +311,7 @@ impl Level {
             Level::Suggest => "suggest",
             Level::Draft => "draft",
             Level::Auto => "auto",
+            Level::Merge => "merge",
         }
     }
 }
@@ -848,7 +853,7 @@ impl RepoSettings {
     pub fn level_for(&self, maintainer: bool, kinds: &[JobKind], ci: bool) -> Level {
         let (base, map) = if maintainer { (self.maintainer.level, &self.maintainer.levels) } else { (self.level, &self.levels) };
         // A window's level is the most any kind gets while it's active.
-        let ceiling = self.window_level.unwrap_or(Level::Auto);
+        let ceiling = self.window_level.unwrap_or(Level::Merge);
         let mut l = kinds.iter().map(|k| map.get(k).copied().unwrap_or(base)).min().unwrap_or(base).min(ceiling);
         if self.trust.open {
             l = l.min(Level::Suggest);

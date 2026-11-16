@@ -32,7 +32,7 @@ pub struct Setting {
     pub confirm: Option<&'static str>,
 }
 
-const LEVELS: &[&str] = &["observe", "suggest", "draft", "auto"];
+const LEVELS: &[&str] = &["observe", "suggest", "draft", "auto", "merge"];
 
 const fn s(key: &'static str, kind: Kind, help: &'static str) -> Setting {
     Setting { key, kind, help, confirm: None }
@@ -599,7 +599,8 @@ mod tests {
     #[test]
     fn cycles_choices() {
         assert_eq!(next(setting("defaults.level"), "draft"), Some("auto"));
-        assert_eq!(next(setting("defaults.level"), "auto"), Some("observe"));
+        assert_eq!(next(setting("defaults.level"), "auto"), Some("merge"));
+        assert_eq!(next(setting("defaults.level"), "merge"), Some("observe"));
         assert_eq!(next(setting("defaults.sandbox"), "true"), Some("false"));
         assert_eq!(next(setting("code_dir"), "x"), None);
     }

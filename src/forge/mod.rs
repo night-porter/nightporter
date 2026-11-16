@@ -638,9 +638,21 @@ impl Forge {
         each!(self, g => g.review(repo, n, verdict, body).await)
     }
 
-    /// Open a draft PR/MR (maintainer `fix`). Returns its URL.
-    pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
-        each!(self, g => g.open_draft(repo, head, base, title, body).await)
+    /// Open a PR/MR; `draft` unless it's meant to merge. Returns its URL.
+    pub async fn open_pr(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str, draft: bool) -> Result<String> {
+        each!(self, g => g.open_pr(repo, head, base, title, body, draft).await)
+    }
+
+    /// Why Night Porter won't set PRs into `base` to merge by themselves, or `None` when the
+    /// forge's rules for it (that this token can read) require passing checks and an approval
+    /// of the latest push.
+    pub async fn merge_gate(&self, repo: &RepoId, base: &str) -> Result<Option<String>> {
+        each!(self, g => g.merge_gate(repo, base).await)
+    }
+
+    /// The forge's own auto-merge, for `sha` only: it merges when its rules are met, never before.
+    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64, sha: &str) -> Result<()> {
+        each!(self, g => g.enable_auto_merge(repo, n, sha).await)
     }
 
     /// Team (`org/team`) or GitLab group membership, cached for an hour.

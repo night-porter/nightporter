@@ -15,6 +15,7 @@ setting that decides how far a job goes on its own, and what your token must all
 | `suggest` | does the work and leaves the result for you to copy (`c` copies the push command) |
 | `draft` | does the work and waits in the Queue for you to approve it (default) |
 | `auto` | pushes and posts by itself when every check is clean; otherwise it waits like `draft` |
+| `merge` | `auto`, then turns on the forge's own auto-merge for the PR, where the branch's rules allow it ([below](#merge)) |
 
 Set `level` in `[defaults]` or in a repo's file (`l` on the Repos tab cycles it).
 
@@ -69,7 +70,49 @@ No setting lifts these:
 - `trust.open = true` caps everything at `suggest`.
 - The secrets, personal-data, protected-path and history checks always run; a failed check makes
   an `auto` job wait for you.
-- Night Porter never merges, force-pushes someone else's work, or closes anything.
+- Night Porter never merges by default, never force-pushes someone else's work, and never closes
+  anything. `merge` (below) hands merging to the forge, behind its rules.
+
+## Merge
+
+`merge` is `auto` plus one step: after pushing, Night Porter turns on the forge's own auto-merge
+(GitHub auto-merge, GitLab "merge when pipeline succeeds", Forgejo "merge when checks succeed").
+The forge merges later, when its own rules are met, never before, and only the commit Night
+Porter pushed: a later push needs a new go. It uses the first merge method the repo allows. An
+issue fix at `merge` opens its PR ready for review instead of as a draft, once the rules check
+out (otherwise as a draft, as at `auto`).
+
+It does this only on a branch whose rules, readable with your token, require all of:
+
+- status checks that must pass,
+- at least one approving review,
+- a new approval after the latest push (GitHub "require approval of the most recent push",
+  GitLab "reset approvals on push" with neither authors nor committers able to approve, Forgejo
+  "dismiss stale approvals"),
+- and on GitHub's classic branch protection, that it applies to admins too.
+
+Night Porter never approves its own PR, so the approval comes from someone else. If the rules
+don't prove all of that, or can't be read, the job stays at `auto`: pushed, left open, and the job
+log says why.
+
+```toml
+# repos/github/acme/api.toml
+level = "draft"
+levels = { ci_failure = "merge", review_comment = "auto" }
+```
+
+- GitHub: rulesets are read with normal access. Classic branch protection needs admin access to
+  read, so with it alone, add a ruleset or the job stays at `auto`. Turn on "Allow auto-merge" in
+  the repo settings. Rulesets don't show who may bypass them: keep yourself off a ruleset's bypass
+  list on branches you use `merge` for.
+- GitLab: approval rules are a paid feature; on GitLab Free a job at `merge` stays at `auto`. The
+  rule must cover the target branch (all branches, or that one).
+- Forgejo/Gitea: branch protection is readable by repo admins only, and must name the required
+  status checks.
+
+`merge` works per kind with `levels`, and for maintainer jobs only where the repo
+[opts in](#maintainer-mode). `trust.open` still caps everything at `suggest`, and CI-failure jobs
+reach it only with `ci_failure` set above `draft`.
 
 ## Token scopes
 
@@ -82,6 +125,7 @@ cover. A missing optional scope turns off only that feature.
 | notifications (new activity) | `notifications` or `repo` | Notifications aren't available to fine-grained tokens: use `gh auth login` | `api` |
 | team trust (`trust.allow_teams`) | `read:org` | Members: read (organization) | `api` |
 | sprint pickup (assign, comment) | `repo` | Issues: read and write | `api`, and the Reporter role |
+| `merge` (read rules, enable auto-merge) | `repo` | Contents, Pull requests: read and write; Administration: read for classic protection | `api`, and the Developer role |
 
 GitHub fine-grained tokens and GitLab OAuth logins don't list their scopes, so `doctor` names what
 they need instead of checking. Forgejo/Gitea tokens need `read:user, read:notification,

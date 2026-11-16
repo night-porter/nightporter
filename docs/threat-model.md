@@ -79,9 +79,30 @@ on it (`pr_commands = true` by default; `false` turns it off). Why this is safe 
 - `approve` only releases a job waiting for push approval, with no override for blocking checks;
   approving a run of someone else's code (B4) still needs the TUI, which shows the changed build
   files. B3 checks still run before the push. It never touches the PR itself: there is no merge,
-  close or forge approval.
+  close or forge approval. (The `merge` level, below, is set in config, never from a comment.)
 - Command comments, from anyone, are dropped at intake: never a request, never review feedback
   for the agent.
+
+### B1b. The `merge` level
+
+`merge` (opt-in, per repo or per kind of job) lets a pushed PR merge without you. The merge is
+the forge's: Night Porter only turns on its auto-merge after the push, so the forge's own branch
+rules decide, and they're checked first. Night Porter turns it on only when, read with your
+token, the target branch requires passing status checks, at least one approval, and a fresh
+approval after any new push; otherwise the job stays at `auto`. The approval must come from
+someone else: Night Porter never approves its own PRs, and on GitHub the author can't approve
+their own PR anyway. A push after someone's approval needs approving again, so an approval can't
+be reused for code it didn't see. `merge` never applies to maintainer jobs unless the repo's own
+file opts in, never under `trust.open`, and CI output reaches it only through an explicit
+`levels.ci_failure`. The agent still holds no credentials (B2) and never sees the merge step.
+
+Auto-merge is pinned to the SHA Night Porter pushed, so a later push (anyone's) isn't merged on
+that request. On GitHub classic branch protection must also apply to admins; on GitLab neither
+authors nor committers may approve.
+
+Residual risk: whoever approves is the last check. Branch rules that a repo admin weakens after
+the check (between the push and the merge) are the forge's to enforce, and GitHub doesn't show
+ruleset bypass lists to non-admins, so a token user on such a list isn't detected.
 
 ### B2. The agent holds no forge credentials
 

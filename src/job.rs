@@ -53,6 +53,7 @@ fn level(j: &Job) -> Level {
         "observe" => Level::Observe,
         "suggest" => Level::Suggest,
         "auto" => Level::Auto,
+        "merge" => Level::Merge,
         _ => Level::Draft,
     }
 }
@@ -669,7 +670,7 @@ async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level) -> Result<
     j.status = match lvl {
         Level::Suggest => JobStatus::Ready,
         // A formal review (approve above all) always waits for you.
-        Level::Auto if clean && j.meta.review.is_none() => JobStatus::Approved,
+        Level::Auto | Level::Merge if clean && j.meta.review.is_none() => JobStatus::Approved,
         _ => JobStatus::AwaitingApproval,
     };
     ctx.db(|d| d.update_job(j))?;
@@ -731,20 +732,19 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     }
 
     let f = forge.lock().await;
+    // `merge`: the branch's rules are checked before anything is opened, so a PR that won't be
+    // set to merge opens as a draft, as at `auto`.
+    let gate = if level(&j) == Level::Merge && has_code { Some(merge_gate(&j, &f).await) } else { None };
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
-        let pr_body = j
-            .replies
-            .iter()
-            .find(|r| r.event.is_none())
-            .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
-        let title = match first_line(&j.summary) {
-            l if l.trim().is_empty() => format!("Fix #{}", j.number),
-            l => format!("Fix #{}: {l}", j.number),
-        };
-        let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
-        log(ctx, id, &format!("opened draft {url}"));
-        j.meta.pr_url = url;
-        ctx.db(|d| d.update_job(&j))?;
+        open_fix_pr(ctx, &mut j, &s, &f, gate != Some(None)).await?;
+    }
+    let merge_note = match gate {
+        Some(None) => auto_merge(&j, &f).await,
+        Some(Some(why)) => format!("; not set to merge: {why}"),
+        None => String::new(),
+    };
+    if !merge_note.is_empty() {
+        log(ctx, id, &format!("merge{merge_note}"));
     }
     for (i, r) in j.replies.clone().iter().enumerate() {
         if j.meta.posted.contains(&i) {
@@ -790,8 +790,46 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     j.status = JobStatus::Done;
     ctx.db(|d| d.update_job(&j))?;
     let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
-    note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
+    let replies = format!("posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
+    note(ctx, &j, Kind::Done, &format!("{pushed}{replies}{merge_note}"));
     Ok(())
+}
+
+/// An issue fix's PR, with the general reply as its body. A draft, unless it's set to merge.
+async fn open_fix_pr(ctx: &Ctx, j: &mut Job, s: &RepoSettings, f: &crate::forge::Forge, draft: bool) -> Result<()> {
+    let id = j.id;
+    let pr_body = j
+        .replies
+        .iter()
+        .find(|r| r.event.is_none())
+        .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
+    let title = match first_line(&j.summary) {
+        l if l.trim().is_empty() => format!("Fix #{}", j.number),
+        l => format!("Fix #{}: {l}", j.number),
+    };
+    let url = f.open_pr(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number), draft).await?;
+    log(ctx, id, &format!("opened {}{url}", if draft { "draft " } else { "" }));
+    j.meta.pr_url = url;
+    ctx.db(|d| d.update_job(j))
+}
+
+/// Why `j`'s PR won't be set to merge (`None`: the branch's rules allow it).
+async fn merge_gate(j: &Job, f: &crate::forge::Forge) -> Option<String> {
+    f.merge_gate(&j.repo, &j.meta.base).await.unwrap_or_else(|e| Some(format!("its rules couldn't be read: {e:#}")))
+}
+
+/// `merge` level, once the branch's rules passed: turn on the forge's auto-merge for this push.
+/// Returns what happened, for the log and the notification; an error leaves it as at `auto`.
+async fn auto_merge(j: &Job, f: &crate::forge::Forge) -> String {
+    let n = match j.target {
+        Target::Pr => Some(j.number),
+        Target::Issue => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
+    };
+    let Some(n) = n else { return "; couldn't tell the PR's number, left open".into() };
+    match f.enable_auto_merge(&j.repo, n, &j.head_after).await {
+        Ok(()) => "; set to merge once checks pass and someone else approves".into(),
+        Err(e) => format!("; couldn't set it to merge ({e:#}), left open"),
+    }
 }
 
 /// An approved learn job: write the instructions file.

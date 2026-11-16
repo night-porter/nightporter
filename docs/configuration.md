@@ -61,7 +61,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `trigger_agent_args` | `{}` | `agent_args` for one kind of job, e.g. `ci_failure = ["--model", "haiku"]` (see [Models per kind of job](#models-per-kind-of-job)) |
 | `plan_first` | `[]` | kinds of job that write a plan and wait for you before changing any code, even at `auto`, e.g. `["fix"]` (see [Plan first](/daily-use#plan-first)) |
 | `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list. `["*"]` (Claude Code) allows any command; the deny list and the sandbox still apply |
-| `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
+| `level` | `draft` | `observe`, `suggest`, `draft`, `auto`, `merge` (see [Merge](/autonomy#merge)) |
 | `levels` | `{}` | a level per kind of job on your own PRs, over `level`: `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict`. E.g. `levels = { ci_failure = "auto", review_comment = "auto", comment = "draft" }`. A job of several kinds gets the lowest. While a schedule window sets a `level`, that level is the default and the most any kind gets |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
@@ -104,7 +104,7 @@ All of these, with levels per kind of job and the token scopes each feature need
 - The secrets, personal-data (card numbers and IBANs in replies; holds for approval), protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*` (`checks.allow_env_variants = true` frees `.env.*` for one repo; `.env` stays), keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `GEMINI.md`, `.claude/`, `.opencode/`, `.codex/`, `.gemini/`, `.cursor/`.
-- Night Porter never merges, force-pushes or closes. It approves a PR only when you opt in with `review_verdicts` and approve that review job yourself.
+- Night Porter never merges by default, never force-pushes someone else's work and never closes. At `level = "merge"` it only turns on the forge's own auto-merge, and only where the branch's rules require green checks and an approval of the latest push ([Merge](/autonomy#merge)). It approves a PR only when you opt in with `review_verdicts` and approve that review job yourself.
 
 ## Notification targets
 

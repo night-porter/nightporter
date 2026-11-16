@@ -480,6 +480,42 @@ async fn maintainer_fix_on_issue_opens_draft_pr() {
     assert!(log.iter().any(|(m, p, _)| m == "POST" && p == "/repos/o/r/issues/2/comments"));
 }
 
+/// `merge`: pushed and replied as at `auto`, then set to auto-merge only when the branch's rules
+/// require checks and an approval of the latest push; otherwise left open, with the reason logged.
+#[tokio::test]
+async fn merge_level_sets_auto_merge_only_behind_the_forges_rules() {
+    let strict = r#"[{"type":"pull_request","parameters":{"required_approving_review_count":1,"require_last_push_approval":true}},
+                     {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]"#;
+    let loose = r#"[{"type":"pull_request","parameters":{"required_approving_review_count":1,"require_last_push_approval":false}}]"#;
+    for (rules, merges) in [(strict, true), (loose, false)] {
+        let w = world_with(
+            "level = \"merge\"",
+            vec![
+                ("GET", "/repos/o/r/rules/branches/main", rules.into()),
+                ("GET", "/repos/o/r", r#"{"allow_merge_commit":false,"allow_squash_merge":true}"#.into()),
+                ("POST", "/graphql", r#"{"data":{}}"#.into()),
+            ],
+        )
+        .await;
+        let ctx = &w.ctx;
+        daemon::poll(ctx, &(ForgeKind::GitHub, "github.com".into())).await.unwrap();
+        daemon::dispatch(ctx).unwrap();
+        let id = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+        assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().level, "merge");
+        job::run(ctx, id).await.unwrap();
+        let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
+        assert_eq!(j.status, JobStatus::Done, "{}", j.error);
+        let sent = w.log.lock().unwrap().clone();
+        let mutation = sent.iter().find(|(m, p, b)| m == "POST" && p == "/graphql" && b.contains("enablePullRequestAutoMerge"));
+        assert_eq!(mutation.is_some(), merges, "rules: {rules}");
+        if let Some((_, _, body)) = mutation {
+            assert!(body.contains("SQUASH") && body.contains(&j.head_after), "the repo's method, pinned to the push: {body}");
+        }
+        let log = ctx.db(|d| d.job_log(id)).unwrap().into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n");
+        assert!(log.contains(if merges { "set to merge once" } else { "approval of the latest push" }), "{log}");
+    }
+}
+
 #[tokio::test]
 async fn gitlab_poll_reply_and_resolve() {
     use crate::forge::{Target, Trigger, gitlab::GitLab};

@@ -41,7 +41,7 @@ when that something was written by a stranger.
 | `draft` | agent commits; Night Porter pushes and replies after you approve |
 | `auto` | Night Porter pushes and replies on its own (pre-push checks still apply) |
 
-Night Porter **never** merges, force-pushes or closes, and approves a PR only as a review you opted into (`review_verdicts`) and approved yourself.
+Night Porter **never** merges by default, never force-pushes someone else's work and never closes anything. At the opt-in `merge` level it turns on your forge's own auto-merge, and only on a branch whose rules require green checks and an approval of the latest push from someone else. It approves a PR only as a review you opted into (`review_verdicts`) and approved yourself.
 
 ## Features
 
