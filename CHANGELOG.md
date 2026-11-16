@@ -6,6 +6,10 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The Queue shows what each running job is doing: a spinner, the stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added
