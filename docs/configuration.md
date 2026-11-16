@@ -90,6 +90,9 @@ global deny.
 
 ## Limits that config cannot change
 
+All of these, with levels per kind of job and the token scopes each feature needs, are on
+[Autonomy and permissions](/autonomy).
+
 - `trust.open = true` caps the level at `suggest`.
 - Maintainer mode is capped at `draft`, unless the repo's own file sets
   `maintainer.allow_above_draft = true` (it can't be set in `[defaults]`). A formal review and
