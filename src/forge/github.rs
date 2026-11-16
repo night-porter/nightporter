@@ -531,7 +531,7 @@ impl GitHub {
             let mut page = serde_json::Value::Null;
             for kind in ["organization", "user"] {
                 let q = json!({
-                    "query": format!("query($o:String!,$n:Int!,$a:String){{ {kind}(login:$o){{ projectV2(number:$n){{ items(first:100,after:$a){{ pageInfo{{ hasNextPage endCursor }} nodes{{ content{{ ... on Issue{{ number repository{{ nameWithOwner }} }} }} fieldValues(first:20){{ nodes{{ ... on ProjectV2ItemFieldIterationValue{{ title startDate duration }} }} }} }} }} }} }} }}"),
+                    "query": format!("query($o:String!,$n:Int!,$a:String){{ {kind}(login:$o){{ projectV2(number:$n){{ items(first:100,after:$a){{ pageInfo{{ hasNextPage endCursor }} nodes{{ content{{ ... on Issue{{ number repository{{ nameWithOwner }} }} }} fieldValues(first:100){{ nodes{{ ... on ProjectV2ItemFieldIterationValue{{ title startDate duration }} }} }} }} }} }} }} }}"),
                     "variables": { "o": owner, "n": number, "a": after }
                 });
                 let v = self.api.send(Method::POST, &gql, &q).await?;
@@ -543,10 +543,11 @@ impl GitHub {
             anyhow::ensure!(!page.is_null(), "can't read project {project} (does the token have read:project?)");
             out.extend(iteration_matches(&page, &repo.path, iteration, today));
             if page.pointer("/pageInfo/hasNextPage") != Some(&json!(true)) {
-                break;
+                return Ok(out);
             }
             after = page.pointer("/pageInfo/endCursor").cloned().unwrap_or_default();
         }
+        tracing::warn!("project {project}: read the first 2000 items only; issues past them aren't picked up");
         Ok(out)
     }
 

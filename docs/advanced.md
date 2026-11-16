@@ -397,8 +397,9 @@ triage_new = true   # a triage comment on every new issue
 review_new = true   # a review of every new ready PR/MR by someone else
 ```
 
-From the moment you turn them on (the backlog is left to `nightporter sweep`), every
-`sweep_interval`. Each issue or PR is handled once. Your own are skipped, and so are drafts.
+From the moment you turn each on (the backlog is left to `nightporter sweep`; off and on again
+starts afresh), every `sweep_interval`. Each issue or PR is handled once. Your own are skipped,
+and so are drafts and authors on `trust.deny_users` or `deny_teams`.
 Both run at the maintainer level, so they wait for you unless the repo
 [opts in](/autonomy#maintainer-mode). `review_new` replaces `watch_prs`'s inbox step for the
 PRs it reviews.
