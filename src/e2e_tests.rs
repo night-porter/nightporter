@@ -1020,6 +1020,52 @@ async fn sweep_queues_triage_jobs_for_the_backlog() {
     assert_eq!(crate::sweep::run(&off.ctx, &off.repo, Target::Issue, Verb::Triage, Pick::default(), true).await.unwrap().picked.len(), 3);
 }
 
+#[tokio::test]
+async fn pickup_claims_sprint_issues_up_to_the_limit_and_releases_failures() {
+    let sprint = r#"{"title":"Sprint 42","due_on":"2999-01-01T00:00:00Z"}"#;
+    let later = r#"{"title":"Sprint 43","due_on":"2999-02-01T00:00:00Z"}"#;
+    let issues = format!(
+        r#"[{{"number":20,"title":"a","user":{{"login":"ann"}},"created_at":"2026-01-01T00:00:00Z","milestone":{sprint}}},
+           {{"number":21,"title":"b","user":{{"login":"ann"}},"created_at":"2026-01-02T00:00:00Z","milestone":{sprint},"assignees":[{{"login":"bob"}}]}},
+           {{"number":22,"title":"c","user":{{"login":"ann"}},"created_at":"2026-01-03T00:00:00Z","milestone":{sprint}}},
+           {{"number":23,"title":"d","user":{{"login":"ann"}},"created_at":"2026-01-04T00:00:00Z","milestone":{sprint}}},
+           {{"number":24,"title":"e","user":{{"login":"ann"}},"created_at":"2026-01-01T00:00:00Z","milestone":{later}}}]"#
+    );
+    let issues: &'static str = Box::leak(issues.into_boxed_str());
+    let mut routes = vec![("GET", "/repos/o/r/issues", issues.to_string())];
+    for n in ["20", "22", "23"] {
+        let a: &'static str = Box::leak(format!("/repos/o/r/issues/{n}/assignees").into_boxed_str());
+        let c: &'static str = Box::leak(format!("/repos/o/r/issues/{n}/comments").into_boxed_str());
+        routes.extend([("POST", a, "{}".to_string()), ("DELETE", a, "{}".to_string()), ("POST", c, "{}".to_string())]);
+    }
+    let w = world_with("[maintainer]\nenabled = true\npickup = { milestone = \"@current\", max_claimed = 2 }", routes).await;
+    let cfg = w.ctx.cfg();
+    let key = (ForgeKind::GitHub, "github.com".to_string());
+    let calls = |m: &str, suffix: &str| {
+        w.log.lock().unwrap().iter().filter(|(mm, p, _)| mm == m && p.ends_with(suffix)).map(|(_, p, _)| p.clone()).collect::<Vec<_>>()
+    };
+    crate::sweep::pickup(&w.ctx, &cfg, &key).await.unwrap();
+    // The current sprint's unassigned issues, oldest first, two at a time; #21 is bob's, #24 is next sprint.
+    assert_eq!(calls("POST", "/assignees"), ["/repos/o/r/issues/20/assignees", "/repos/o/r/issues/22/assignees"]);
+    assert_eq!(calls("POST", "/comments").len(), 2);
+    daemon::dispatch(&w.ctx).unwrap();
+    let jobs = w.ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+    assert_eq!(jobs.iter().map(|j| (j.number, j.level.as_str())).collect::<Vec<_>>(), [(20, "draft"), (22, "draft")]);
+    // Holding two: nothing more, even past the interval.
+    w.ctx.db(|d| d.del("pickup:github:github.com/o/r")).unwrap();
+    crate::sweep::pickup(&w.ctx, &cfg, &key).await.unwrap();
+    assert_eq!(calls("POST", "/assignees").len(), 2);
+    // #20 fails: it's released (unassigned, said so) and #23 is claimed instead; #20 isn't taken again.
+    w.ctx.db(|d| d.fail(jobs[0].id, "boom")).unwrap();
+    w.ctx.db(|d| d.del("pickup:github:github.com/o/r")).unwrap();
+    crate::sweep::pickup(&w.ctx, &cfg, &key).await.unwrap();
+    assert_eq!(calls("DELETE", "/assignees"), ["/repos/o/r/issues/20/assignees"]);
+    assert_eq!(calls("POST", "/assignees").last().unwrap(), "/repos/o/r/issues/23/assignees");
+    w.ctx.db(|d| d.del("pickup:github:github.com/o/r")).unwrap();
+    crate::sweep::pickup(&w.ctx, &cfg, &key).await.unwrap();
+    assert_eq!(calls("POST", "/assignees").len(), 3, "a released issue isn't claimed again");
+}
+
 /// `deny_teams` must see every member: a GitLab group member on page two still counts, and the
 /// list is fetched once per hour, not per event.
 #[tokio::test]

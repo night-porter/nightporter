@@ -264,6 +264,9 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
     if let Err(e) = crate::sweep::watch_prs(ctx, &cfg, key).await {
         tracing::warn!("watch prs {}: {e:#}", key.1);
     }
+    if let Err(e) = crate::sweep::pickup(ctx, &cfg, key).await {
+        tracing::warn!("pickup {}: {e:#}", key.1);
+    }
     if cfg.pr_commands
         && let Err(e) = pr_commands(ctx, key).await
     {
@@ -887,16 +890,7 @@ mod tests {
         let (d, ctx, repo) = setup("subscribed = true");
         let cfg = Config::parse("daily_job_cap = 4\n[defaults]\ndebounce = \"0s\"").unwrap();
         let ctx = test_ctx(ctx.paths.clone(), cfg, ctx.clones().as_ref().clone());
-        let items: Vec<_> = (1..=5)
-            .map(|n| crate::forge::Listed {
-                number: n,
-                title: String::new(),
-                author: "a".into(),
-                created_at: String::new(),
-                labels: vec![],
-                draft: false,
-            })
-            .collect();
+        let items: Vec<_> = (1..=5).map(|n| crate::forge::Listed { number: n, author: "a".into(), ..Default::default() }).collect();
         crate::sweep::queue(&ctx, &repo, Target::Issue, crate::forge::Verb::Triage, "me", &items).unwrap();
         intake(&ctx, &ctx.cfg(), "me", ev(&repo, "pr", "alice", Role::Member, Trigger::Comment)).await.unwrap();
         dispatch(&ctx).unwrap();

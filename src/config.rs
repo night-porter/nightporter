@@ -688,10 +688,39 @@ pub struct Maintainer {
     /// A level per maintainer verb, over `level`: `{ triage = "auto", fix = "draft" }`.
     #[serde(default)]
     pub levels: std::collections::BTreeMap<JobKind, Level>,
+    /// Claim and work on issues by themselves: the current sprint's, picked by label or milestone.
+    #[serde(default)]
+    pub pickup: Option<Pickup>,
     /// Let maintainer jobs on this repo go above `draft` (`level` or `levels`). Only in a repo's
     /// own file: a project you maintain and trust its contributors on, not every repo at once.
     #[serde(default)]
     pub allow_above_draft: bool,
+}
+
+/// `[maintainer.pickup]`: issues to claim (assign to you) and work on, a few at a time.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pickup {
+    /// Issues with this label, e.g. `"sprint-42"`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Issues in this milestone; `"@current"` is the open one due soonest.
+    #[serde(default)]
+    pub milestone: Option<String>,
+    /// What to do with each: `triage`, `reproduce` or `fix` (default: opens a draft PR/MR).
+    #[serde(default = "fix_verb")]
+    pub verb: crate::forge::Verb,
+    /// Most issues held at once, so teammates still find work.
+    #[serde(default = "two")]
+    pub max_claimed: usize,
+}
+
+fn fix_verb() -> crate::forge::Verb {
+    crate::forge::Verb::Fix
+}
+
+fn two() -> usize {
+    2
 }
 
 impl Default for Maintainer {
@@ -760,6 +789,11 @@ impl Config {
         crate::schedule::validate(&s.schedule)?;
         if let Some(k) = s.plan_first.iter().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
             bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
+        }
+        if let Some(p) = &s.maintainer.pickup {
+            anyhow::ensure!(p.label.is_some() || p.milestone.is_some(), "maintainer.pickup needs a label or a milestone");
+            anyhow::ensure!(p.verb != crate::forge::Verb::Review, "maintainer.pickup works on issues: verb triage, reproduce or fix");
+            anyhow::ensure!(p.max_claimed > 0, "maintainer.pickup.max_claimed must be at least 1");
         }
         for (name, map) in [("levels", &s.levels), ("maintainer.levels", &s.maintainer.levels)] {
             if let Some(k) = map.keys().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
@@ -1244,6 +1278,16 @@ mod tests {
         assert_eq!(open.level_for(false, &[ReviewComment], false), Level::Suggest);
         // The opt-in is per repo only.
         assert!(Config::parse("[defaults.maintainer]\nallow_above_draft = true").is_err());
+    }
+
+    #[test]
+    fn pickup_needs_a_selector_and_an_issue_verb() {
+        let repo = |t: &str| Config::parse("").unwrap().resolve(Some(&t.parse().unwrap()));
+        assert!(repo("[maintainer.pickup]\nmax_claimed = 3").is_err());
+        assert!(repo("[maintainer.pickup]\nlabel = \"sprint\"\nverb = \"review\"").is_err());
+        assert!(repo("[maintainer.pickup]\nlabel = \"sprint\"\nmax_claimed = 0").is_err());
+        let p = repo("[maintainer.pickup]\nmilestone = \"@current\"").unwrap().maintainer.pickup.unwrap();
+        assert_eq!((p.verb, p.max_claimed), (crate::forge::Verb::Fix, 2));
     }
 
     #[test]

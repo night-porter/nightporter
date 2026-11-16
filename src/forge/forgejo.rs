@@ -470,6 +470,22 @@ impl Forgejo {
         ghlike::pr(&self.api, repo, n).await
     }
 
+    /// Gitea has no add/remove-one endpoint: read the list, then set it with only you changed.
+    pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
+        #[derive(Deserialize)]
+        struct I {
+            #[serde(default)]
+            assignees: Option<Vec<ghlike::Login>>,
+        }
+        let i: I = self.api.get(&format!("/repos/{}/issues/{n}", repo.path)).await?;
+        let mut who: Vec<String> =
+            i.assignees.unwrap_or_default().into_iter().map(|l| l.login).filter(|l| !l.eq_ignore_ascii_case(&self.me)).collect();
+        if on {
+            who.push(self.me.clone());
+        }
+        self.api.send(Method::PATCH, &format!("/repos/{}/issues/{n}", repo.path), &json!({ "assignees": who })).await.map(|_| ())
+    }
+
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
         let kind = if target == Target::Pr { "pulls" } else { "issues" };
         let path = format!("/repos/{}/issues?state=open&type={kind}&limit=50", repo.path);

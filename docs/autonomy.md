@@ -37,7 +37,7 @@ CI output is untrusted text, so CI-failure jobs stop at `draft` unless `ci_failu
 ## Maintainer mode
 
 Jobs on other people's issues and PRs (`/nightporter fix`, the `nightporter` label, review
-requests, sprint pickup) stop at `draft`. On a project you maintain, unlock them in **that repo's
+requests, [sprint pickup](/advanced#pick-up-the-sprint)) stop at `draft`. On a project you maintain, unlock them in **that repo's
 own file**. It can't be set in `[defaults]`, so it never unlocks every repo at once:
 
 ```toml
@@ -81,6 +81,7 @@ cover. A missing optional scope turns off only that feature.
 | PRs, issues, comments, pushes | `repo` | Contents, Pull requests, Issues: read and write | `api` |
 | notifications (new activity) | `notifications` or `repo` | Notifications aren't available to fine-grained tokens: use `gh auth login` | `api` |
 | team trust (`trust.allow_teams`) | `read:org` | Members: read (organization) | `api` |
+| sprint pickup (assign, comment) | `repo` | Issues: read and write | `api`, and the Reporter role |
 
 GitHub fine-grained tokens and GitLab OAuth logins don't list their scopes, so `doctor` names what
 they need instead of checking. Forgejo/Gitea tokens need `read:user, read:notification,

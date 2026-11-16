@@ -464,6 +464,11 @@ impl GitHub {
         ghlike::pr(&self.api, repo, n).await
     }
 
+    pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
+        let m = if on { Method::POST } else { Method::DELETE };
+        self.api.send(m, &format!("/repos/{}/issues/{n}/assignees", repo.path), &json!({ "assignees": [self.me] })).await.map(|_| ())
+    }
+
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
         // `/issues` lists PRs too (with a `pull_request` key); `/pulls` only PRs.
         let path = match target {

@@ -89,6 +89,18 @@ pub(super) struct ListItem {
     /// GitHub lists PRs among issues, marked with this.
     #[serde(default)]
     pub pull_request: Option<Value>,
+    #[serde(default)]
+    assignees: Option<Vec<Login>>,
+    #[serde(default)]
+    milestone: Option<MilestoneJson>,
+}
+#[derive(Deserialize)]
+struct MilestoneJson {
+    title: String,
+    #[serde(default)]
+    due_on: Option<String>,
+    #[serde(default)]
+    state: String,
 }
 #[derive(Deserialize)]
 pub(super) struct Name {
@@ -107,6 +119,8 @@ impl ListItem {
             author: self.user.login,
             created_at: self.created_at,
             labels: self.labels.into_iter().map(|l| l.name).collect(),
+            assignees: self.assignees.unwrap_or_default().into_iter().map(|l| l.login).collect(),
+            milestone: self.milestone.map(|m| super::Milestone { open: m.state != "closed", title: m.title, due: m.due_on }),
         }
     }
 }
@@ -125,9 +139,11 @@ pub(super) async fn issue(api: &Api, repo: &RepoId, n: u64) -> Result<IssueInfo>
         title: String,
         body: Option<String>,
         user: Login,
+        #[serde(default)]
+        state: String,
     }
     let i: I = api.get(&format!("/repos/{}/issues/{n}", repo.path)).await?;
-    Ok(IssueInfo { title: i.title, body: i.body.unwrap_or_default(), author: i.user.login })
+    Ok(IssueInfo { title: i.title, body: i.body.unwrap_or_default(), author: i.user.login, open: i.state != "closed" })
 }
 
 /// A top-level comment on a PR or issue.
