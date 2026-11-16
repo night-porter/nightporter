@@ -105,7 +105,9 @@ pub fn retry(db: &Db, id: i64, o: RetryOpts) -> Result<usize> {
     let n = db.requeue_events(id)?;
     // Also when an earlier retry already put the events back and they're still waiting (e.g.
     // `retry` while paused, then `run`).
-    let waiting = || db.events_with(crate::state::Disposition::Pending).is_ok_and(|p| p.iter().any(|(e, _)| e.repo == j.repo && e.number == j.number));
+    let waiting = || {
+        db.events_with(crate::state::Disposition::Pending).is_ok_and(|p| p.iter().any(|(e, _)| e.repo == j.repo && e.number == j.number))
+    };
     if n > 0 || waiting() {
         // `fresh=<sha>`: rebuild only over the branch head this job left, never over someone's push.
         let fresh = (!o.keep).then(|| format!("fresh={}", j.head_after));
