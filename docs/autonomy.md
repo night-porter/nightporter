@@ -57,11 +57,16 @@ A `[[schedule]]` window with a `level` is the default and the most any kind gets
 active, so a quiet daytime window holds everything back and a night window can raise the
 default without lifting a kind you set lower. See [Working hours](/advanced#working-hours).
 
-## Caps no setting lifts
+## Caps
+
+Only an explicit opt-in lifts these:
+
+- CI-failure jobs stop at `draft` unless `ci_failure` is set above it (or `ci_auto`).
+- Maintainer jobs stop at `draft` unless the repo's own file sets `allow_above_draft`.
+
+No setting lifts these:
 
 - `trust.open = true` caps everything at `suggest`.
-- CI-failure jobs stop at `draft` unless you opt in (above).
-- Maintainer jobs stop at `draft` unless the repo's own file opts in (above).
 - The secrets, personal-data, protected-path and history checks always run; a failed check makes
   an `auto` job wait for you.
 - Night Porter never merges, force-pushes someone else's work, or closes anything.

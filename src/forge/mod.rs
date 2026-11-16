@@ -515,10 +515,20 @@ impl Forge {
             scopes: Vec<String>,
         }
         match self {
+            // `get_cond` only for the headers: with no date sent, it's never "not modified".
             Forge::GitHub(g) => match g.api.get_cond::<serde_json::Value>("/user", None).await.ok()? {
-                crate::http::Got::Fresh(_, h) => Some(
-                    h.get("x-oauth-scopes")?.to_str().ok()?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-                ),
+                crate::http::Got::Fresh(_, h) => {
+                    let s: Vec<String> = h
+                        .get("x-oauth-scopes")?
+                        .to_str()
+                        .ok()?
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    // An empty header (some app tokens) says nothing either.
+                    (!s.is_empty()).then_some(s)
+                }
                 crate::http::Got::NotModified => None,
             },
             Forge::GitLab(g) => g.api.get::<Pat>("/personal_access_tokens/self").await.ok().map(|p| p.scopes),
