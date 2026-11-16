@@ -53,6 +53,7 @@ fn level(j: &Job) -> Level {
         "observe" => Level::Observe,
         "suggest" => Level::Suggest,
         "auto" => Level::Auto,
+        "merge" => Level::Merge,
         _ => Level::Draft,
     }
 }
@@ -669,7 +670,7 @@ async fn conclude(ctx: &Ctx, j: &mut Job, commits: usize, lvl: Level) -> Result<
     j.status = match lvl {
         Level::Suggest => JobStatus::Ready,
         // A formal review (approve above all) always waits for you.
-        Level::Auto if clean && j.meta.review.is_none() => JobStatus::Approved,
+        Level::Auto | Level::Merge if clean && j.meta.review.is_none() => JobStatus::Approved,
         _ => JobStatus::AwaitingApproval,
     };
     ctx.db(|d| d.update_job(j))?;
@@ -732,19 +733,10 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
 
     let f = forge.lock().await;
     if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
-        let pr_body = j
-            .replies
-            .iter()
-            .find(|r| r.event.is_none())
-            .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
-        let title = match first_line(&j.summary) {
-            l if l.trim().is_empty() => format!("Fix #{}", j.number),
-            l => format!("Fix #{}: {l}", j.number),
-        };
-        let url = f.open_draft(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number)).await?;
-        log(ctx, id, &format!("opened draft {url}"));
-        j.meta.pr_url = url;
-        ctx.db(|d| d.update_job(&j))?;
+        open_fix_pr(ctx, &mut j, &s, &f).await?;
+    }
+    if level(&j) == Level::Merge && has_code {
+        auto_merge(ctx, &j, &f).await;
     }
     for (i, r) in j.replies.clone().iter().enumerate() {
         if j.meta.posted.contains(&i) {
@@ -792,6 +784,51 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
     note(ctx, &j, Kind::Done, &format!("{pushed}posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" }));
     Ok(())
+}
+
+/// An issue fix's PR, with the general reply as its body. A draft, unless it's meant to merge.
+async fn open_fix_pr(ctx: &Ctx, j: &mut Job, s: &RepoSettings, f: &crate::forge::Forge) -> Result<()> {
+    let id = j.id;
+    let pr_body = j
+        .replies
+        .iter()
+        .find(|r| r.event.is_none())
+        .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
+    let title = match first_line(&j.summary) {
+        l if l.trim().is_empty() => format!("Fix #{}", j.number),
+        l => format!("Fix #{}: {l}", j.number),
+    };
+    // At `merge` it's opened ready for review: a draft can't merge.
+    let draft = level(j) != Level::Merge;
+    let url = f.open_pr(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number), draft).await?;
+    log(ctx, id, &format!("opened {}{url}", if draft { "draft " } else { "" }));
+    j.meta.pr_url = url;
+    ctx.db(|d| d.update_job(j))
+}
+
+/// `merge` level: let the PR merge by itself, but only once the forge's own rules allow it, and
+/// only if those rules require green checks and an approval of the latest push by someone else.
+/// Anything short of that, or any error, leaves the PR as `auto` would and says why.
+async fn auto_merge(ctx: &Ctx, j: &Job, f: &crate::forge::Forge) {
+    let n = match j.target {
+        Target::Pr => Some(j.number),
+        Target::Issue => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
+    };
+    let Some(n) = n else { return log(ctx, j.id, "merge: couldn't tell the PR's number; left it open") };
+    let res = async {
+        if let Some(why) = f.merge_gate(&j.repo, &j.meta.base).await? {
+            return Ok(Some(why));
+        }
+        f.enable_auto_merge(&j.repo, n).await?;
+        Ok::<_, anyhow::Error>(None)
+    }
+    .await;
+    let msg = match res {
+        Ok(None) => "merge: set to merge once checks pass and someone else approves".to_string(),
+        Ok(Some(why)) => format!("merge: not set to merge ({why}); left open as at auto"),
+        Err(e) => format!("merge: couldn't set it to merge ({e:#}); left open as at auto"),
+    };
+    log(ctx, j.id, &msg);
 }
 
 /// An approved learn job: write the instructions file.

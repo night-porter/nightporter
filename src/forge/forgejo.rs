@@ -537,8 +537,30 @@ impl Forgejo {
         Ok(())
     }
 
-    pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
-        ghlike::open_pr(&self.api, repo, &json!({ "title": format!("WIP: {title}"), "head": head, "base": base, "body": body })).await
+    pub async fn open_pr(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str, draft: bool) -> Result<String> {
+        let title = if draft { format!("WIP: {title}") } else { title.to_string() };
+        ghlike::open_pr(&self.api, repo, &json!({ "title": title, "head": head, "base": base, "body": body })).await
+    }
+
+    /// Branch protection (readable by repo admins): status checks on, at least one approval,
+    /// stale approvals dismissed on a new push.
+    pub async fn merge_gate(&self, repo: &RepoId, base: &str) -> Result<Option<String>> {
+        let Ok(p) = self.api.get::<serde_json::Value>(&format!("/repos/{}/branch_protections/{}", repo.path, crate::http::enc(base))).await
+        else {
+            return Ok(Some("its branch protection isn't readable with this token".into()));
+        };
+        Ok(if p["enable_status_check"] != true {
+            Some("its branch protection doesn't require status checks".into())
+        } else if p["required_approvals"].as_u64().unwrap_or(0) < 1 || p["dismiss_stale_approvals"] != true {
+            Some("its branch protection doesn't require an approval of the latest push".into())
+        } else {
+            None
+        })
+    }
+
+    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64) -> Result<()> {
+        let body = json!({ "Do": "merge", "merge_when_checks_succeed": true });
+        self.api.send(Method::POST, &format!("/repos/{}/pulls/{n}/merge", repo.path), &body).await.map(|_| ())
     }
 
     /// `org/team` membership, cached for an hour.

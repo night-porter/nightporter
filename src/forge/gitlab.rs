@@ -443,6 +443,29 @@ impl GitLab {
             .collect())
     }
 
+    /// Pipelines must succeed, approvals reset on a new push, authors can't approve their own, and
+    /// an approval rule asks for at least one (approval rules are a paid GitLab feature).
+    pub async fn merge_gate(&self, repo: &RepoId, _base: &str) -> Result<Option<String>> {
+        let p = enc(&repo.path);
+        let project: serde_json::Value = self.api.get(&format!("/projects/{p}")).await?;
+        let approvals: serde_json::Value = self.api.get(&format!("/projects/{p}/approvals")).await?;
+        let rules: Vec<serde_json::Value> = self.api.get(&format!("/projects/{p}/approval_rules")).await.unwrap_or_default();
+        Ok(if project["only_allow_merge_if_pipeline_succeeds"] != true {
+            Some("the project doesn't require pipelines to succeed".into())
+        } else if approvals["reset_approvals_on_push"] != true || approvals["merge_requests_author_approval"] == true {
+            Some("approvals aren't reset on a new push, or authors may approve their own".into())
+        } else if !rules.iter().any(|r| r["approvals_required"].as_u64().unwrap_or(0) >= 1) {
+            Some("no approval rule requires an approval".into())
+        } else {
+            None
+        })
+    }
+
+    pub async fn enable_auto_merge(&self, repo: &RepoId, iid: u64) -> Result<()> {
+        let path = format!("/projects/{}/merge_requests/{iid}/merge", enc(&repo.path));
+        self.api.send(Method::PUT, &path, &json!({ "merge_when_pipeline_succeeds": true, "auto_merge": true })).await.map(|_| ())
+    }
+
     /// Pickup only claims unassigned issues, so "only you" and "nobody" are the two states.
     /// Adds or removes only you: the list is read first, so anyone else on it stays.
     pub async fn assign(&self, repo: &RepoId, iid: u64, on: bool) -> Result<()> {
@@ -510,14 +533,15 @@ impl GitLab {
         Ok(())
     }
 
-    pub async fn open_draft(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str) -> Result<String> {
+    pub async fn open_pr(&self, repo: &RepoId, head: &str, base: &str, title: &str, body: &str, draft: bool) -> Result<String> {
         let p = enc(&repo.path);
+        let title = if draft { format!("Draft: {title}") } else { title.to_string() };
         let v = self
             .api
             .send(
                 Method::POST,
                 &format!("/projects/{p}/merge_requests"),
-                &json!({ "source_branch": head, "target_branch": base, "title": format!("Draft: {title}"), "description": body }),
+                &json!({ "source_branch": head, "target_branch": base, "title": title, "description": body }),
             )
             .await?;
         Ok(v["web_url"].as_str().unwrap_or_default().to_string())
