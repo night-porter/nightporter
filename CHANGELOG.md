@@ -13,6 +13,9 @@ All notable changes to Night Porter. The format follows
 - `nightporter cancel <id>` (TUI `K`) stops a job. A running agent is killed (its whole process group), and the job fails through its normal cleanup: env files restored, teardown run. Between agent runs it stops at its next step, and never pushes.
 - `nightporter burst <duration> [--jobs N] [--concurrency N]` gives more capacity for a while: no daily cap or sweep reserve, schedule windows ignored, twice the jobs at once (overall and per repo). The TUI header counts it down; `burst off` ends it.
 
+- `levels`: a level per kind of job (`ci_failure`, `review_comment`, `fix`, `triage`, …) over `level`, e.g. CI fixes at `auto`, issue fixes at `draft`. A job of several kinds gets the lowest.
+- `maintainer.allow_above_draft` (in a repo's own file only) lets maintainer jobs on that repo go above `draft`.
+
 ### Changed
 
 - `retry` (TUI `t`, CLI) also takes a job waiting for you, rejecting it first; `/nightporter retry` on a PR still doesn't. An issue job's branch is now rebuilt from the base and force-pushed over the head the last run left, with a lease; if anyone else pushed to it since, the job continues the branch instead. `--keep` always continues it. `--now` starts it like `run`.

@@ -12,6 +12,8 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 **Run it again, now, or not at all.** Changed a prompt, model or config? `t` (or `nightporter retry`) re-runs a job with what you have now, even one waiting for you; an issue's branch is rebuilt from scratch unless you pass `--keep`. `f` (`nightporter run`) starts a job now, past pause, schedule windows and the daily cap. `K` (`nightporter cancel`) stops a running one. Got budget to burn? `nightporter burst 3h` lifts the daily cap, ignores schedule windows and doubles how many jobs run at once until it runs out. See [Daily use](/daily-use).
 
+**A level per kind of job.** Let CI fixes and review replies go out on their own while issue fixes wait for you: `levels = { ci_failure = "auto", review_comment = "auto", fix = "draft" }`. On a project you maintain, `maintainer.allow_above_draft = true` in that repo's file lets maintainer jobs go above `draft` too. See [Configuration](/configuration).
+
 ## 0.5
 
 ### Plan first, learn from your fixes, stats (0.5.0)
