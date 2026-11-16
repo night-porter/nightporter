@@ -370,6 +370,7 @@ enabled = true
 
 [maintainer.pickup]
 milestone = "@current"   # or a title, e.g. "Sprint 42"; or use label = "sprint-42"
+# GitHub Projects instead: project = "acme/5", iteration = "@current" (needs read:project)
 verb = "fix"             # triage, reproduce or fix (opens a draft PR/MR)
 max_claimed = 2          # most issues held at once, so teammates still find work
 ```
@@ -382,7 +383,26 @@ assigned to anyone are never touched, and handing one back leaves anyone else on
 level (`draft` unless the repo [opts in](/autonomy#maintainer-mode)), and go through the same
 queue, schedule and caps as sweeps.
 
-On GitLab the token's user needs at least the Reporter role to assign issues.
+On GitLab the token's user needs at least the Reporter role to assign issues. A GitHub Project
+iteration (`project = "owner/number"`, `iteration = "@current"` or its title) picks the issues of
+this repo in the iteration running today; the token needs `read:project`
+(`gh auth refresh --scopes read:project`).
+
+### Triage and review what's new
+
+```toml
+[maintainer]
+enabled = true
+triage_new = true   # a triage comment on every new issue
+review_new = true   # a review of every new ready PR/MR by someone else
+```
+
+From the moment you turn each on (the backlog is left to `nightporter sweep`; off and on again
+starts afresh), every `sweep_interval`. Each issue or PR is handled once. Your own are skipped,
+and so are drafts and authors on `trust.deny_users` or `deny_teams`.
+Both run at the maintainer level, so they wait for you unless the repo
+[opts in](/autonomy#maintainer-mode). `review_new` replaces `watch_prs`'s inbox step for the
+PRs it reviews.
 
 ### Work through the backlog
 

@@ -125,6 +125,7 @@ cover. A missing optional scope turns off only that feature.
 | notifications (new activity) | `notifications` or `repo` | Notifications aren't available to fine-grained tokens: use `gh auth login` | `api` |
 | team trust (`trust.allow_teams`) | `read:org` | Members: read (organization) | `api` |
 | sprint pickup (assign, comment) | `repo` | Issues: read and write | `api`, and the Reporter role |
+| sprint pickup from a Project iteration | `read:project` | Projects: read | n/a |
 | `merge` (read rules, enable auto-merge) | `repo` | Contents, Pull requests: read and write; Administration: read for classic protection | `api`, and the Developer role |
 
 GitHub fine-grained tokens and GitLab OAuth logins don't list their scopes, so `doctor` names what

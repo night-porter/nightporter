@@ -35,7 +35,7 @@ pub async fn run(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, mut pick:
     drop(forge);
     resolve_milestone(&mut pick, &items)?;
     let picked = crate::forge::pick(items, &pick);
-    let queued = if dry_run { 0 } else { queue(ctx, repo, target, verb, &me, &picked)? };
+    let queued = if dry_run { 0 } else { queue(ctx, repo, target, verb, &me, &picked, "`nightporter sweep`")? };
     Ok(Report { picked, queued })
 }
 
@@ -138,12 +138,26 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
             }
         }
     }
+    if held.len() >= p.max_claimed {
+        return Ok(());
+    }
     let mut pick = Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
     resolve_milestone(&mut pick, &items)?;
+    if let (Some(project), Some(iteration)) = (&p.project, &p.iteration) {
+        let today = jiff::Zoned::now().date().to_string();
+        pick.numbers = Some(forge.iteration_issues(repo, project, iteration, &today).await?);
+    }
     let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
     // Not ones it holds or handed back, even if the list hasn't caught up with the assignment.
-    let free =
-        crate::forge::pick(items, &pick).into_iter().filter(|i| !held.contains(&i.number) && !released.contains_key(&i.number.to_string()));
+    // Nor ones something else is already on (a triage of a new issue, a sweep): one job would
+    // take both requests and run only one of them.
+    let busy = |n: u64| {
+        pending.iter().any(|(e, _)| e.repo == *repo && e.number == n && e.target == Target::Issue)
+            || ctx.db(|d| d.pr_busy(repo, n)).unwrap_or(true)
+    };
+    let free = crate::forge::pick(items, &pick)
+        .into_iter()
+        .filter(|i| !held.contains(&i.number) && !released.contains_key(&i.number.to_string()) && !busy(i.number));
     for i in free.take(p.max_claimed.saturating_sub(held.len())) {
         forge.assign(repo, i.number, true).await?;
         // Recorded the moment it's assigned, so a later failure still leaves it settled above.
@@ -184,14 +198,11 @@ fn sign(s: &crate::config::RepoSettings, body: &str) -> String {
 
 /// One pending, trusted (it's you) maintainer event per item. Ids are stable, so running the
 /// same sweep again doesn't queue anything twice.
-pub fn queue(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, me: &str, items: &[Listed]) -> Result<usize> {
+pub fn queue(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, me: &str, items: &[Listed], by: &str) -> Result<usize> {
     let mut n = 0;
     for i in items {
-        let e = Event {
-            body: format!("(queued by `nightporter sweep`: {})", crate::state::enum_str(&verb)),
-            ..event(repo, target, verb, i.number, me)
-        };
-        n += usize::from(ctx.db(|d| d.add_event(&e, Disposition::Pending, "sweep"))?);
+        let e = Event { body: format!("(queued by {by}: {})", crate::state::enum_str(&verb)), ..event(repo, target, verb, i.number, me) };
+        n += usize::from(ctx.db(|d| d.add_event(&e, Disposition::Pending, by))?);
     }
     Ok(n)
 }
@@ -216,6 +227,77 @@ fn event(repo: &RepoId, target: Target, verb: Verb, number: u64, author: &str) -
         created_at: crate::forge::now_iso(),
         verb: Some(verb),
     }
+}
+
+/// `[maintainer] triage_new` / `review_new`: every `sweep_interval`, queue a triage of each issue
+/// and a review of each ready PR/MR by someone else opened since that setting was turned on (the
+/// backlog before is left to `nightporter sweep`; turning one off and on again starts afresh).
+/// Authors on `trust.deny_users` / `deny_teams` are skipped. Stable ids: once each. Runs before
+/// `watch_prs`, so a PR reviewed here isn't also put in the inbox.
+pub async fn watch_new(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge::ForgeKind, String)) -> Result<()> {
+    for (repo, s) in ctx.subscribed(cfg) {
+        if repo.forge != key.0 || repo.host != key.1 {
+            continue;
+        }
+        let kv = format!("watch-new:{}", repo.key());
+        let last: Option<i64> = ctx.db(|d| d.get(&kv))?.and_then(|v| v.parse().ok());
+        if last.is_some_and(|t| crate::state::now() - t < i64::try_from(cfg.sweep_interval.as_secs()).unwrap_or(i64::MAX)) {
+            continue;
+        }
+        match watch_new_repo(ctx, &repo, &s).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("{repo}: queued {n} new issue(s)/PR(s)"),
+            Err(e) => {
+                ctx.warn_every(&kv, 3600, &format!("{repo}: triage/review new: {e:#}"));
+                continue;
+            }
+        }
+        ctx.db(|d| d.set(&kv, &crate::state::now().to_string()))?;
+    }
+    Ok(())
+}
+
+async fn watch_new_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings) -> Result<usize> {
+    let m = &s.maintainer;
+    let mut queued = 0;
+    for (on, target, verb, name) in
+        [(m.triage_new, Target::Issue, Verb::Triage, "triage_new"), (m.review_new, Target::Pr, Verb::Review, "review_new")]
+    {
+        let since_key = format!("new-since:{name}:{}", repo.key());
+        if !(on && m.enabled) {
+            ctx.db(|d| d.del(&since_key))?;
+            continue;
+        }
+        let Some(since) = ctx.db(|d| d.get(&since_key))?.and_then(|v| v.parse::<jiff::Timestamp>().ok()) else {
+            ctx.db(|d| d.set(&since_key, &jiff::Timestamp::now().to_string()))?;
+            continue;
+        };
+        let forge = ctx.forge(repo)?.lock().await;
+        let me = forge.me().to_string();
+        let pick = Pick { created_after: Some(since), skip_author: Some(me.clone()), ..Pick::default() };
+        let mut items = Vec::new();
+        for i in crate::forge::pick(forge.open_items(repo, target).await?, &pick).into_iter().filter(|i| !i.draft) {
+            if !denied(&forge, &s.trust, &i.author).await {
+                items.push(i);
+            }
+        }
+        drop(forge);
+        queued += queue(ctx, repo, target, verb, &me, &items, name)?;
+    }
+    Ok(queued)
+}
+
+/// On a deny list (a team lookup that fails counts as denied).
+async fn denied(forge: &crate::forge::Forge, t: &crate::config::Trust, author: &str) -> bool {
+    if t.deny_users.iter().any(|u| u.eq_ignore_ascii_case(author)) {
+        return true;
+    }
+    for team in &t.deny_teams {
+        if forge.in_team(team, author).await.unwrap_or(true) {
+            return true;
+        }
+    }
+    false
 }
 
 /// `[maintainer] watch_prs`: every `sweep_interval`, put each ready PR/MR by someone else in the
@@ -305,9 +387,9 @@ mod tests {
         let repo = RepoId::new(ForgeKind::GitLab, "git.drupalcode.org", "project/x");
         let it = |n| Listed { number: n, author: "a".into(), ..Default::default() };
         let items = [it(1), it(2)];
-        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Triage, "me", &items).unwrap(), 2);
-        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Triage, "me", &items).unwrap(), 0);
-        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Fix, "me", &items[..1]).unwrap(), 1);
+        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Triage, "me", &items, "sweep").unwrap(), 2);
+        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Triage, "me", &items, "sweep").unwrap(), 0);
+        assert_eq!(queue(&ctx, &repo, Target::Issue, Verb::Fix, "me", &items[..1], "sweep").unwrap(), 1);
         let pending = ctx.db(|d| d.events_with(Disposition::Pending)).unwrap();
         assert_eq!(pending.len(), 3);
         assert!(pending.iter().all(|(e, _)| is_sweep(e) && e.author == "me" && e.verb.is_some()));
@@ -328,6 +410,6 @@ mod tests {
         let inbox = ctx.db(|d| d.events_with(Disposition::Inbox)).unwrap();
         assert!(inbox.iter().all(|(e, _)| is_sweep(e) && e.author == "ann" && e.verb == Some(Verb::Review)));
         // A `sweep --verb review` of the same PR doesn't queue it twice.
-        assert_eq!(queue(&ctx, &repo, Target::Pr, Verb::Review, "me", &items[..1]).unwrap(), 0);
+        assert_eq!(queue(&ctx, &repo, Target::Pr, Verb::Review, "me", &items[..1], "sweep").unwrap(), 0);
     }
 }

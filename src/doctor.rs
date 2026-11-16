@@ -102,7 +102,7 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
 pub fn run(paths: &Paths) -> bool {
     let mut checks = collect(paths, tools, claude_user_settings_check());
     if let Ok(cfg) = Config::load(paths) {
-        checks.extend(token_checks(&cfg));
+        checks.extend(token_checks(&cfg, uses_projects(paths, &cfg)));
     }
     print(&checks);
     checks.iter().all(|c| c.ok || c.optional)
@@ -120,18 +120,32 @@ const GITHUB: &[Need] = &[
     Need { feature: "PRs, issues, comments, pushes", any_of: &["repo"], required: true },
     Need { feature: "notifications (new activity)", any_of: &["notifications", "repo"], required: true },
     Need { feature: "team trust (trust.allow_teams)", any_of: &["read:org", "write:org", "admin:org"], required: false },
+    Need { feature: PROJECTS, any_of: &["read:project", "project"], required: false },
 ];
 
 const GITLAB: &[Need] = &[Need { feature: "MRs, issues, comments, pushes", any_of: &["api"], required: true }];
 
+const PROJECTS: &str = "sprint pickup from a Project iteration";
+
+/// Some repo's `[maintainer.pickup]` reads a GitHub Project.
+fn uses_projects(paths: &Paths, cfg: &Config) -> bool {
+    walk_repo_files(&paths.repos_dir()).unwrap_or_default().iter().any(|f| {
+        std::fs::read_to_string(f)
+            .ok()
+            .and_then(|t| t.parse::<toml::Table>().ok())
+            .and_then(|t| cfg.resolve(Some(&t)).ok())
+            .is_some_and(|s| s.maintainer.pickup.is_some_and(|p| p.project.is_some()))
+    })
+}
+
 /// Each account's token scopes against [`GITHUB`] / [`GITLAB`]. Logs in, so it's online.
-fn token_checks(cfg: &Config) -> Vec<Check> {
+fn token_checks(cfg: &Config, projects: bool) -> Vec<Check> {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return Vec::new() };
     let mut out = Vec::new();
     // Forgejo/Gitea don't list scopes: `forgejo_auth` names the ones to create the token with.
     for a in cfg.accounts.iter().filter(|a| a.forge != ForgeKind::Forgejo) {
         match rt.block_on(async { Ok::<_, anyhow::Error>(crate::daemon::connect_one(a).await?.scopes().await) }) {
-            Ok(scopes) => out.extend(scope_checks(a.forge, a.host(), a.token, scopes.as_deref())),
+            Ok(scopes) => out.extend(scope_checks(a.forge, a.host(), a.token, scopes.as_deref(), projects)),
             // The CLI auth check doesn't see a keychain token, so say it here.
             Err(e) => out.push(Check {
                 name: format!("login ({})", a.host()),
@@ -159,12 +173,16 @@ fn refresh(forge: ForgeKind, host: &str, source: TokenSource, scope: Option<&str
 }
 
 /// One check per feature the token's scopes don't cover, or one that says it couldn't tell.
-fn scope_checks(forge: ForgeKind, host: &str, source: TokenSource, scopes: Option<&[String]>) -> Vec<Check> {
-    let needs = match forge {
+fn scope_checks(forge: ForgeKind, host: &str, source: TokenSource, scopes: Option<&[String]>, projects: bool) -> Vec<Check> {
+    let needs: Vec<&Need> = match forge {
         ForgeKind::GitHub => GITHUB,
         ForgeKind::GitLab => GITLAB,
         ForgeKind::Forgejo => return Vec::new(), // `forgejo_auth` names the scopes to create it with
-    };
+    }
+    .iter()
+    // Projects only matter where a repo's pickup reads one.
+    .filter(|n| projects || n.feature != PROJECTS)
+    .collect();
     let name = format!("token scopes ({host})");
     let Some(scopes) = scopes else {
         // A GitHub token that lists nothing is most likely fine-grained, and those can't read
@@ -183,7 +201,7 @@ fn scope_checks(forge: ForgeKind, host: &str, source: TokenSource, scopes: Optio
             fix: if github { refresh(forge, host, TokenSource::Cli, None) } else { String::new() },
         }];
     };
-    let missing: Vec<&Need> = needs.iter().filter(|n| !n.any_of.iter().any(|s| scopes.iter().any(|t| t == s))).collect();
+    let missing: Vec<&Need> = needs.iter().copied().filter(|n| !n.any_of.iter().any(|s| scopes.iter().any(|t| t == s))).collect();
     if missing.is_empty() {
         return vec![Check {
             name,
@@ -370,21 +388,23 @@ mod tests {
     fn scope_checks_name_what_breaks() {
         use TokenSource::{Cli, Keyring};
         let v = |xs: &[&str]| xs.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let gh = |xs: &[&str]| scope_checks(ForgeKind::GitHub, "github.com", Cli, Some(&v(xs)));
-        let all = gh(&["repo", "read:org"]);
+        let gh = |xs: &[&str]| scope_checks(ForgeKind::GitHub, "github.com", Cli, Some(&v(xs)), true);
+        let all = gh(&["repo", "read:org", "project"]);
         assert!(all.len() == 1 && all[0].ok, "every feature covered");
-        let no_org = gh(&["repo"]);
+        let no_org = gh(&["repo", "read:project"]);
         assert!(no_org.len() == 1 && !no_org[0].ok && no_org[0].optional && no_org[0].fix.contains("--scopes read:org"));
-        assert!(gh(&["admin:org", "repo"])[0].ok, "a broader scope counts");
+        assert!(gh(&["admin:org", "repo", "project"])[0].ok, "a broader scope counts");
         let bare = gh(&["gist"]);
         assert!(bare.iter().filter(|c| !c.optional).count() == 2, "core and notifications fail");
-        let unknown = scope_checks(ForgeKind::GitHub, "github.com", Cli, None);
+        let unknown = scope_checks(ForgeKind::GitHub, "github.com", Cli, None, true);
         assert!(!unknown[0].ok && unknown[0].optional && unknown[0].detail.contains("notifications"), "fine-grained: warn");
-        let pat = scope_checks(ForgeKind::GitHub, "github.com", Keyring, Some(&v(&["repo"])));
+        let pat = scope_checks(ForgeKind::GitHub, "github.com", Keyring, Some(&v(&["repo"])), true);
         assert!(pat[0].fix.contains("nightporter token set github"), "a keychain token isn't fixed with gh: {}", pat[0].fix);
-        assert!(!scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, Some(&v(&["read_api"])))[0].ok);
-        assert!(scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, None)[0].ok);
-        assert!(scope_checks(ForgeKind::Forgejo, "codeberg.org", Cli, None).is_empty());
+        assert!(!scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, Some(&v(&["read_api"])), true)[0].ok);
+        assert!(scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, None, true)[0].ok);
+        assert!(scope_checks(ForgeKind::Forgejo, "codeberg.org", Cli, None, true).is_empty());
+        let no_projects = scope_checks(ForgeKind::GitHub, "github.com", Cli, Some(&v(&["repo", "read:org"])), false);
+        assert!(no_projects.len() == 1 && no_projects[0].ok, "read:project only matters where a pickup uses a project");
     }
 
     #[test]

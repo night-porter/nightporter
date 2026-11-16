@@ -261,6 +261,9 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
         }
     }
     ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    if let Err(e) = crate::sweep::watch_new(ctx, &cfg, key).await {
+        tracing::warn!("watch new {}: {e:#}", key.1);
+    }
     if let Err(e) = crate::sweep::watch_prs(ctx, &cfg, key).await {
         tracing::warn!("watch prs {}: {e:#}", key.1);
     }
@@ -891,7 +894,7 @@ mod tests {
         let cfg = Config::parse("daily_job_cap = 4\n[defaults]\ndebounce = \"0s\"").unwrap();
         let ctx = test_ctx(ctx.paths.clone(), cfg, ctx.clones().as_ref().clone());
         let items: Vec<_> = (1..=5).map(|n| crate::forge::Listed { number: n, author: "a".into(), ..Default::default() }).collect();
-        crate::sweep::queue(&ctx, &repo, Target::Issue, crate::forge::Verb::Triage, "me", &items).unwrap();
+        crate::sweep::queue(&ctx, &repo, Target::Issue, crate::forge::Verb::Triage, "me", &items, "sweep").unwrap();
         intake(&ctx, &ctx.cfg(), "me", ev(&repo, "pr", "alice", Role::Member, Trigger::Comment)).await.unwrap();
         dispatch(&ctx).unwrap();
         let jobs = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();

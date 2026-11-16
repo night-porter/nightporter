@@ -696,6 +696,13 @@ pub struct Maintainer {
     /// Claim and work on issues by themselves: the current sprint's, picked by label or milestone.
     #[serde(default)]
     pub pickup: Option<Pickup>,
+    /// Triage every issue opened from now on (a comment, at the maintainer level).
+    #[serde(default)]
+    pub triage_new: bool,
+    /// Review every ready PR/MR others open from now on (instead of putting it in the inbox
+    /// like `watch_prs`).
+    #[serde(default)]
+    pub review_new: bool,
     /// Let maintainer jobs on this repo go above `draft` (`level` or `levels`). Only in a repo's
     /// own file: a project you maintain and trust its contributors on, not every repo at once.
     #[serde(default)]
@@ -712,6 +719,12 @@ pub struct Pickup {
     /// Issues in this milestone; `"@current"` is the open one due soonest.
     #[serde(default)]
     pub milestone: Option<String>,
+    /// GitHub only: issues in this Project (`"owner/number"`), in its `iteration` (`"@current"`:
+    /// the one running today, or an iteration's title). Needs the `read:project` scope.
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub iteration: Option<String>,
     /// What to do with each: `triage`, `reproduce` or `fix` (default: opens a draft PR/MR).
     #[serde(default = "fix_verb")]
     pub verb: crate::forge::Verb,
@@ -796,7 +809,17 @@ impl Config {
             bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
         }
         if let Some(p) = &s.maintainer.pickup {
-            anyhow::ensure!(p.label.is_some() || p.milestone.is_some(), "maintainer.pickup needs a label or a milestone");
+            anyhow::ensure!(
+                p.label.is_some() || p.milestone.is_some() || p.project.is_some(),
+                "maintainer.pickup needs a label, a milestone or a project"
+            );
+            anyhow::ensure!(p.project.is_some() == p.iteration.is_some(), "maintainer.pickup: project and iteration go together");
+            if let Some(pr) = &p.project {
+                anyhow::ensure!(
+                    pr.split_once('/').is_some_and(|(o, n)| !o.is_empty() && n.parse::<u64>().is_ok()),
+                    "maintainer.pickup.project is \"owner/number\", e.g. \"acme/5\""
+                );
+            }
             anyhow::ensure!(p.verb != crate::forge::Verb::Review, "maintainer.pickup works on issues: verb triage, reproduce or fix");
             anyhow::ensure!(p.max_claimed > 0, "maintainer.pickup.max_claimed must be at least 1");
         }

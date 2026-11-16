@@ -449,6 +449,8 @@ pub struct Pick {
     pub unassigned: bool,
     /// Only items in this milestone (title, case-insensitive).
     pub milestone: Option<String>,
+    /// Only these numbers (e.g. a Project iteration's issues).
+    pub numbers: Option<Vec<u64>>,
     pub limit: Option<usize>,
 }
 
@@ -462,6 +464,7 @@ pub fn pick(mut items: Vec<Listed>, p: &Pick) -> Vec<Listed> {
             && p.created_before.is_none_or(|t| at(i).is_some_and(|c| c < t))
             && p.created_after.is_none_or(|t| at(i).is_some_and(|c| c > t))
             && (!p.unassigned || i.assignees.is_empty())
+            && p.numbers.as_ref().is_none_or(|ns| ns.contains(&i.number))
             && p.milestone.as_ref().is_none_or(|m| i.milestone.as_ref().is_some_and(|x| x.title.eq_ignore_ascii_case(m)))
     });
     items.sort_by(|a, b| at(a).cmp(&at(b)).then(a.number.cmp(&b.number)));
@@ -594,6 +597,15 @@ impl Forge {
     /// rather than through notifications (`nightporter rescan`). Repeats are de-duplicated.
     pub async fn rescan(&self, repo: &RepoId, since: &str) -> Result<Vec<Event>> {
         each!(self, g => g.rescan(repo, since).await)
+    }
+
+    /// The issues of `repo` in a GitHub Project's iteration (`@current`: the one running on
+    /// `today`, `YYYY-MM-DD`; else its title). Other forges have no Projects.
+    pub async fn iteration_issues(&self, repo: &RepoId, project: &str, iteration: &str, today: &str) -> Result<Vec<u64>> {
+        match self {
+            Forge::GitHub(g) => g.iteration_issues(repo, project, iteration, today).await,
+            _ => anyhow::bail!("Projects and iterations are GitHub only; use a label or a milestone"),
+        }
     }
 
     /// Assign the token's user to an issue (`on`), or take them off it.
