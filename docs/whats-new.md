@@ -1,24 +1,30 @@
 ---
-description: "What's new in Night Porter 0.5, 0.4 and 0.3: plan first, learn from your fixes, stats, edit before it posts, real PR reviews and backlog sweeps."
+description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
 ---
 
 # What's new
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
-## 0.6 (in progress)
+## 0.6
 
-**See what a running job is doing.** The Queue shows a spinner, the job's stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
+### From draft to merge (0.6.0)
 
-**Run it again, now, or not at all.** Changed a prompt, model or config? `t` (or `nightporter retry`) re-runs a job with what you have now, even one waiting for you; an issue's branch is rebuilt from scratch unless you pass `--keep`. `f` (`nightporter run`) starts a job now, past pause, schedule windows and the daily cap. `K` (`nightporter cancel`) stops a running one. Got budget to burn? `nightporter burst 3h` lifts the daily cap, ignores schedule windows and doubles how many jobs run at once until it runs out. See [Daily use](/daily-use).
-
-**A level per kind of job.** Let CI fixes and review replies go out on their own while issue fixes wait for you: `levels = { ci_failure = "auto", review_comment = "auto", comment = "draft" }`. On a project you maintain, `maintainer.allow_above_draft = true` in that repo's file, with `maintainer.levels = { triage = "auto", fix = "draft" }`, lets maintainer jobs go above `draft` too. See [Autonomy and permissions](/autonomy).
+Night Porter starts as an intern that only drafts, and you promote it where it has earned it:
+per repo, per kind of job, all the way to merging behind your own branch rules. Everything about
+levels, caps and token scopes is now on one page, [Autonomy and permissions](/autonomy).
 
 **From draft to merge.** The new `merge` level pushes like `auto`, then hands the PR to your forge's own auto-merge, but only where the branch's rules require green checks and a fresh approval from someone else. Night Porter never approves its own PRs, so a person always signs off. See [Merge](/autonomy#merge).
+
+**A level per kind of job.** Let CI fixes and review replies go out on their own while issue fixes wait for you: `levels = { ci_failure = "auto", review_comment = "auto", comment = "draft" }`. On a project you maintain, `maintainer.allow_above_draft = true` in that repo's file, with `maintainer.levels = { triage = "auto", fix = "draft" }`, lets maintainer jobs go above `draft` too. See [Autonomy and permissions](/autonomy).
 
 **It picks up its share of the sprint.** With `[maintainer.pickup]`, Night Porter claims unassigned issues in the current milestone (or with a sprint label), assigns them to you with a comment, and works on them, two at a time by default. If a job fails or you reject it, the issue is handed back. See [Pick up the sprint](/advanced#pick-up-the-sprint).
 
 **Projects and new arrivals.** Pickup also reads a GitHub Project's current iteration (`project = "acme/5"`, `iteration = "@current"`). `triage_new` and `review_new` triage every new issue and review every new PR from others, from the moment you turn them on. See [Triage and review what's new](/advanced#triage-and-review-what-s-new).
+
+**Run it again, now, or not at all.** Changed a prompt, model or config? `t` (or `nightporter retry`) re-runs a job with what you have now, even one waiting for you; an issue's branch is rebuilt from scratch unless you pass `--keep`. `f` (`nightporter run`) starts a job now, past pause, schedule windows and the daily cap. `K` (`nightporter cancel`) stops a running one. Got budget to burn? `nightporter burst 3h` lifts the daily cap, ignores schedule windows and doubles how many jobs run at once until it runs out. See [Daily use](/daily-use).
+
+**See what a running job is doing.** The Queue shows a spinner, the job's stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
 
 **Doctor checks your token.** `nightporter doctor` now says which features your token's scopes don't cover, and how to add them.
 
