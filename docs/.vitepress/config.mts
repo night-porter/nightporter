@@ -25,6 +25,7 @@ const SIDEBAR = [
     text: 'Configuration',
     items: [
       { text: 'Reference', link: '/configuration' },
+      { text: 'Autonomy and permissions', link: '/autonomy' },
       { text: 'Advanced recipes', link: '/advanced' },
       { text: 'Writing packs', link: '/writing-packs' },
     ],

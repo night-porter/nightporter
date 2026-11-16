@@ -70,16 +70,22 @@ impl Ctx {
 pub async fn connect(cfg: &Config) -> Result<HashMap<(ForgeKind, String), tokio::sync::Mutex<Forge>>> {
     let mut out = HashMap::new();
     for a in &cfg.accounts {
-        let host = a.host().to_string();
-        let token = http::token(a.forge, &host, a.token).await?;
-        let base = std::env::var("NIGHTPORTER_API_BASE").ok().filter(|_| cfg!(debug_assertions));
-        let api = Api::new(&base.unwrap_or_else(|| Forge::api_base(a.forge, &host)), token, a.forge == ForgeKind::GitLab)?;
-        let mut f = Forge::new(a.forge, &host, api);
-        f.login().await.with_context(|| format!("log in to {host}"))?;
-        tracing::info!("logged in to {host} as {}", f.me());
-        out.insert((a.forge, host), tokio::sync::Mutex::new(f));
+        let f = connect_one(a).await?;
+        tracing::info!("logged in to {} as {}", a.host(), f.me());
+        out.insert((a.forge, a.host().to_string()), tokio::sync::Mutex::new(f));
     }
     Ok(out)
+}
+
+/// Log in to one account.
+pub async fn connect_one(a: &crate::config::Account) -> Result<Forge> {
+    let host = a.host();
+    let token = http::token(a.forge, host, a.token).await?;
+    let base = std::env::var("NIGHTPORTER_API_BASE").ok().filter(|_| cfg!(debug_assertions));
+    let api = Api::new(&base.unwrap_or_else(|| Forge::api_base(a.forge, host)), token, a.forge == ForgeKind::GitLab)?;
+    let mut f = Forge::new(a.forge, host, api);
+    f.login().await.with_context(|| format!("log in to {host}"))?;
+    Ok(f)
 }
 
 /// Ctrl-C or SIGTERM (`nightporter stop`, `kill`, logout). Exiting cleanly matters: launchd and

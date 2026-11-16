@@ -1,6 +1,6 @@
 //! `nightporter doctor` and the tool checks used by the setup wizard.
 
-use crate::config::{AgentKind, Config};
+use crate::config::{AgentKind, Config, TokenSource};
 use crate::forge::ForgeKind;
 use crate::paths::Paths;
 use std::process::Command;
@@ -100,9 +100,109 @@ pub fn tools(forges: &[(ForgeKind, String)], agents: &[AgentKind]) -> Vec<Check>
 }
 
 pub fn run(paths: &Paths) -> bool {
-    let checks = collect(paths, tools, claude_user_settings_check());
+    let mut checks = collect(paths, tools, claude_user_settings_check());
+    if let Ok(cfg) = Config::load(paths) {
+        checks.extend(token_checks(&cfg));
+    }
     print(&checks);
     checks.iter().all(|c| c.ok || c.optional)
+}
+
+/// What Night Porter does with a token, and the scopes that allow it (any one is enough).
+/// Required ones fail the doctor; the others only warn, since they turn one feature off.
+struct Need {
+    feature: &'static str,
+    any_of: &'static [&'static str],
+    required: bool,
+}
+
+const GITHUB: &[Need] = &[
+    Need { feature: "PRs, issues, comments, pushes", any_of: &["repo"], required: true },
+    Need { feature: "notifications (new activity)", any_of: &["notifications", "repo"], required: true },
+    Need { feature: "team trust (trust.allow_teams)", any_of: &["read:org", "write:org", "admin:org"], required: false },
+];
+
+const GITLAB: &[Need] = &[Need { feature: "MRs, issues, comments, pushes", any_of: &["api"], required: true }];
+
+/// Each account's token scopes against [`GITHUB`] / [`GITLAB`]. Logs in, so it's online.
+fn token_checks(cfg: &Config) -> Vec<Check> {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return Vec::new() };
+    let mut out = Vec::new();
+    // Forgejo/Gitea don't list scopes: `forgejo_auth` names the ones to create the token with.
+    for a in cfg.accounts.iter().filter(|a| a.forge != ForgeKind::Forgejo) {
+        match rt.block_on(async { Ok::<_, anyhow::Error>(crate::daemon::connect_one(a).await?.scopes().await) }) {
+            Ok(scopes) => out.extend(scope_checks(a.forge, a.host(), a.token, scopes.as_deref())),
+            // The CLI auth check doesn't see a keychain token, so say it here.
+            Err(e) => out.push(Check {
+                name: format!("login ({})", a.host()),
+                ok: false,
+                optional: false,
+                detail: format!("{e:#}"),
+                fix: refresh(a.forge, a.host(), a.token, None),
+            }),
+        }
+    }
+    out
+}
+
+/// How to get a token with `scope` (or a working one, with `None`) from where this account reads it.
+fn refresh(forge: ForgeKind, host: &str, source: TokenSource, scope: Option<&str>) -> String {
+    let with = scope.map(|s| format!(" with the `{s}` scope")).unwrap_or_default();
+    match (forge, source) {
+        (ForgeKind::GitHub, TokenSource::Cli) => match scope {
+            Some(s) => format!("gh auth refresh --hostname {host} --scopes {s}"),
+            None => format!("gh auth login --hostname {host}"),
+        },
+        (ForgeKind::GitLab, TokenSource::Cli) => format!("create a token{with} and run `glab auth login --hostname {host}`"),
+        (f, _) => format!("create a token{with} on {host}, then `nightporter token set {} {host}`", f.as_str()),
+    }
+}
+
+/// One check per feature the token's scopes don't cover, or one that says it couldn't tell.
+fn scope_checks(forge: ForgeKind, host: &str, source: TokenSource, scopes: Option<&[String]>) -> Vec<Check> {
+    let needs = match forge {
+        ForgeKind::GitHub => GITHUB,
+        ForgeKind::GitLab => GITLAB,
+        ForgeKind::Forgejo => return Vec::new(), // `forgejo_auth` names the scopes to create it with
+    };
+    let name = format!("token scopes ({host})");
+    let Some(scopes) = scopes else {
+        // A GitHub token that lists nothing is most likely fine-grained, and those can't read
+        // notifications, so Night Porter would never see new activity.
+        let github = forge == ForgeKind::GitHub;
+        let all: Vec<_> = needs.iter().map(|n| format!("{}: {}", n.feature, n.any_of[0])).collect();
+        return vec![Check {
+            name,
+            ok: !github,
+            optional: true,
+            detail: if github {
+                "this token doesn't list its scopes: if it's fine-grained, it can't read notifications and nothing new will show up".into()
+            } else {
+                format!("this token doesn't list its scopes; it needs {}", all.join("; "))
+            },
+            fix: if github { refresh(forge, host, TokenSource::Cli, None) } else { String::new() },
+        }];
+    };
+    let missing: Vec<&Need> = needs.iter().filter(|n| !n.any_of.iter().any(|s| scopes.iter().any(|t| t == s))).collect();
+    if missing.is_empty() {
+        return vec![Check {
+            name,
+            ok: true,
+            optional: false,
+            detail: format!("covers every feature ({})", scopes.join(", ")),
+            fix: String::new(),
+        }];
+    }
+    missing
+        .into_iter()
+        .map(|n| Check {
+            name: name.clone(),
+            ok: false,
+            optional: !n.required,
+            detail: format!("no `{}`: {} won't work", n.any_of[0], n.feature),
+            fix: refresh(forge, host, source, Some(n.any_of[0])),
+        })
+        .collect()
 }
 
 /// Every check, with the tool probes and the Claude settings finding passed in (tests stub them).
@@ -266,6 +366,27 @@ pub fn walk_repo_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scope_checks_name_what_breaks() {
+        use TokenSource::{Cli, Keyring};
+        let v = |xs: &[&str]| xs.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let gh = |xs: &[&str]| scope_checks(ForgeKind::GitHub, "github.com", Cli, Some(&v(xs)));
+        let all = gh(&["repo", "read:org"]);
+        assert!(all.len() == 1 && all[0].ok, "every feature covered");
+        let no_org = gh(&["repo"]);
+        assert!(no_org.len() == 1 && !no_org[0].ok && no_org[0].optional && no_org[0].fix.contains("--scopes read:org"));
+        assert!(gh(&["admin:org", "repo"])[0].ok, "a broader scope counts");
+        let bare = gh(&["gist"]);
+        assert!(bare.iter().filter(|c| !c.optional).count() == 2, "core and notifications fail");
+        let unknown = scope_checks(ForgeKind::GitHub, "github.com", Cli, None);
+        assert!(!unknown[0].ok && unknown[0].optional && unknown[0].detail.contains("notifications"), "fine-grained: warn");
+        let pat = scope_checks(ForgeKind::GitHub, "github.com", Keyring, Some(&v(&["repo"])));
+        assert!(pat[0].fix.contains("nightporter token set github"), "a keychain token isn't fixed with gh: {}", pat[0].fix);
+        assert!(!scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, Some(&v(&["read_api"])))[0].ok);
+        assert!(scope_checks(ForgeKind::GitLab, "gitlab.com", Cli, None)[0].ok);
+        assert!(scope_checks(ForgeKind::Forgejo, "codeberg.org", Cli, None).is_empty());
+    }
+
     #[test]
     fn flags_personal_claude_allows_and_plugins() {
         let v = serde_json::json!({"permissions": {"allow": ["Bash(npm:*)"]}, "enabledPlugins": {"x@y": true, "z@y": false}});

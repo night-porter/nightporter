@@ -13,6 +13,7 @@ All notable changes to Night Porter. The format follows
 - `nightporter cancel <id>` (TUI `K`) stops a job. A running agent is killed (its whole process group), and the job fails through its normal cleanup: env files restored, teardown run. Between agent runs it stops at its next step, and never pushes.
 - `nightporter burst <duration> [--jobs N] [--concurrency N]` gives more capacity for a while: no daily cap or sweep reserve, schedule windows ignored, twice the jobs at once (overall and per repo). The TUI header counts it down; `burst off` ends it.
 - `levels`: a level per kind of job on your own PRs (`ci_failure`, `review_comment`, `comment`, …) over `level`, e.g. CI fixes at `auto`, comments at `draft`. A job of several kinds gets the lowest; a schedule window's level caps them while it's active.
+- `nightporter doctor` checks each account's token scopes and names the features a missing scope turns off, with the command to add it. The new [Autonomy and permissions](docs/autonomy.md) page has levels, caps and scopes in one place.
 - `maintainer.levels` (per verb: `triage`, `fix`, …) and `maintainer.allow_above_draft` (in a repo's own file only) let maintainer jobs on that repo go above `draft`.
 
 ### Changed
