@@ -96,8 +96,13 @@ be reused for code it didn't see. `merge` never applies to maintainer jobs unles
 file opts in, never under `trust.open`, and CI output reaches it only through an explicit
 `levels.ci_failure`. The agent still holds no credentials (B2) and never sees the merge step.
 
+Auto-merge is pinned to the SHA Night Porter pushed, so a later push (anyone's) isn't merged on
+that request. On GitHub classic branch protection must also apply to admins; on GitLab neither
+authors nor committers may approve.
+
 Residual risk: whoever approves is the last check. Branch rules that a repo admin weakens after
-the check (between the push and the merge) are the forge's to enforce.
+the check (between the push and the merge) are the forge's to enforce, and GitHub doesn't show
+ruleset bypass lists to non-admins, so a token user on such a list isn't detected.
 
 ### B2. The agent holds no forge credentials
 

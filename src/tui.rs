@@ -1054,6 +1054,7 @@ fn window_note(base: &crate::config::RepoSettings, now: &crate::config::RepoSett
 
 fn level_style(level: &str) -> Style {
     match level {
+        "merge" => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         "auto" => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         "draft" => Style::new().fg(Color::Yellow),
         "suggest" => Style::new().fg(Color::Cyan),

@@ -490,7 +490,11 @@ async fn merge_level_sets_auto_merge_only_behind_the_forges_rules() {
     for (rules, merges) in [(strict, true), (loose, false)] {
         let w = world_with(
             "level = \"merge\"",
-            vec![("GET", "/repos/o/r/rules/branches/main", rules.into()), ("POST", "/graphql", r#"{"data":{}}"#.into())],
+            vec![
+                ("GET", "/repos/o/r/rules/branches/main", rules.into()),
+                ("GET", "/repos/o/r", r#"{"allow_merge_commit":false,"allow_squash_merge":true}"#.into()),
+                ("POST", "/graphql", r#"{"data":{}}"#.into()),
+            ],
         )
         .await;
         let ctx = &w.ctx;
@@ -501,9 +505,12 @@ async fn merge_level_sets_auto_merge_only_behind_the_forges_rules() {
         job::run(ctx, id).await.unwrap();
         let j = ctx.db(|d| d.job(id)).unwrap().unwrap();
         assert_eq!(j.status, JobStatus::Done, "{}", j.error);
-        let mutation =
-            w.log.lock().unwrap().iter().any(|(m, p, b)| m == "POST" && p == "/graphql" && b.contains("enablePullRequestAutoMerge"));
-        assert_eq!(mutation, merges, "rules: {rules}");
+        let sent = w.log.lock().unwrap().clone();
+        let mutation = sent.iter().find(|(m, p, b)| m == "POST" && p == "/graphql" && b.contains("enablePullRequestAutoMerge"));
+        assert_eq!(mutation.is_some(), merges, "rules: {rules}");
+        if let Some((_, _, body)) = mutation {
+            assert!(body.contains("SQUASH") && body.contains(&j.head_after), "the repo's method, pinned to the push: {body}");
+        }
         let log = ctx.db(|d| d.job_log(id)).unwrap().into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n");
         assert!(log.contains(if merges { "set to merge once" } else { "approval of the latest push" }), "{log}");
     }

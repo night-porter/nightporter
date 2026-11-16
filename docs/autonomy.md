@@ -77,16 +77,19 @@ No setting lifts these:
 
 `merge` is `auto` plus one step: after pushing, Night Porter turns on the forge's own auto-merge
 (GitHub auto-merge, GitLab "merge when pipeline succeeds", Forgejo "merge when checks succeed").
-The forge merges later, when its own rules are met, never before. An issue fix at `merge` opens
-its PR ready for review instead of as a draft.
+The forge merges later, when its own rules are met, never before, and only the commit Night
+Porter pushed: a later push needs a new go. It uses the first merge method the repo allows. An
+issue fix at `merge` opens its PR ready for review instead of as a draft, once the rules check
+out (otherwise as a draft, as at `auto`).
 
 It does this only on a branch whose rules, readable with your token, require all of:
 
 - status checks that must pass,
 - at least one approving review,
 - a new approval after the latest push (GitHub "require approval of the most recent push",
-  GitLab "reset approvals on push" with authors unable to approve their own, Forgejo "dismiss
-  stale approvals").
+  GitLab "reset approvals on push" with neither authors nor committers able to approve, Forgejo
+  "dismiss stale approvals"),
+- and on GitHub's classic branch protection, that it applies to admins too.
 
 Night Porter never approves its own PR, so the approval comes from someone else. If the rules
 don't prove all of that, or can't be read, the job stays at `auto`: pushed, left open, and the job
@@ -100,9 +103,12 @@ levels = { ci_failure = "merge", review_comment = "auto" }
 
 - GitHub: rulesets are read with normal access. Classic branch protection needs admin access to
   read, so with it alone, add a ruleset or the job stays at `auto`. Turn on "Allow auto-merge" in
-  the repo settings.
-- GitLab: approval rules are a paid feature; on GitLab Free a job at `merge` stays at `auto`.
-- Forgejo/Gitea: branch protection is readable by repo admins only.
+  the repo settings. Rulesets don't show who may bypass them: keep yourself off a ruleset's bypass
+  list on branches you use `merge` for.
+- GitLab: approval rules are a paid feature; on GitLab Free a job at `merge` stays at `auto`. The
+  rule must cover the target branch (all branches, or that one).
+- Forgejo/Gitea: branch protection is readable by repo admins only, and must name the required
+  status checks.
 
 `merge` works per kind with `levels`, and for maintainer jobs only where the repo
 [opts in](#maintainer-mode). `trust.open` still caps everything at `suggest`, and CI-failure jobs

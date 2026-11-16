@@ -127,8 +127,12 @@ fn github_rules_gap(rules: &[serde_json::Value]) -> Option<String> {
     }
 }
 
-/// The same for classic branch protection.
+/// The same for classic branch protection, which must also bind admins (the token's user often
+/// is one, on their own repos).
 fn github_protection_gap(p: &serde_json::Value) -> Option<String> {
+    if p.pointer("/enforce_admins/enabled") != Some(&serde_json::json!(true)) {
+        return Some("its branch protection doesn't apply to admins".into());
+    }
     let r = &p["required_pull_request_reviews"];
     let reviewed = r["required_approving_review_count"].as_u64().unwrap_or(0) >= 1 && r["require_last_push_approval"] == true;
     let c = &p["required_status_checks"];
@@ -604,8 +608,9 @@ impl GitHub {
     /// Rulesets first (readable with read access), then classic branch protection (needs admin;
     /// a 403/404 means it can't be proven).
     pub async fn merge_gate(&self, repo: &RepoId, base: &str) -> Result<Option<String>> {
+        // Not there on older GitHub Enterprise: then only classic protection can prove it.
         let rules: Vec<serde_json::Value> =
-            self.api.get(&format!("/repos/{}/rules/branches/{}", repo.path, crate::http::enc(base))).await?;
+            self.api.get(&format!("/repos/{}/rules/branches/{}", repo.path, crate::http::enc(base))).await.unwrap_or_default();
         if let Some(why) = github_rules_gap(&rules) {
             let classic =
                 self.api.get::<serde_json::Value>(&format!("/repos/{}/branches/{}/protection", repo.path, crate::http::enc(base))).await;
@@ -617,11 +622,18 @@ impl GitHub {
         Ok(None)
     }
 
-    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64) -> Result<()> {
+    /// Pinned to `sha`: if anyone pushes after it, GitHub won't merge on this request. Uses the
+    /// first merge method the repo allows (merge, squash, rebase).
+    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64, sha: &str) -> Result<()> {
         let pr: serde_json::Value = self.api.get(&format!("/repos/{}/pulls/{n}", repo.path)).await?;
+        let r: serde_json::Value = self.api.get(&format!("/repos/{}", repo.path)).await?;
+        let method = [("allow_merge_commit", "MERGE"), ("allow_squash_merge", "SQUASH"), ("allow_rebase_merge", "REBASE")]
+            .into_iter()
+            .find(|(k, _)| r[*k] != false)
+            .map_or("MERGE", |(_, m)| m);
         let m = json!({
-            "query": "mutation($id:ID!){ enablePullRequestAutoMerge(input:{pullRequestId:$id}){ clientMutationId } }",
-            "variables": { "id": pr["node_id"] }
+            "query": "mutation($id:ID!,$m:PullRequestMergeMethod!,$sha:GitObjectID!){ enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$m,expectedHeadOid:$sha}){ clientMutationId } }",
+            "variables": { "id": pr["node_id"], "m": method, "sha": sha }
         });
         let v = self.api.send(Method::POST, &format!("{}/graphql", self.api.base.trim_end_matches("/v3")), &m).await?;
         if let Some(e) = v.pointer("/errors/0/message").and_then(|m| m.as_str()) {
@@ -676,9 +688,12 @@ mod tests {
         assert!(super::github_rules_gap(&rules(&[&pr(2, true)])).unwrap().contains("status checks"));
         assert!(super::github_rules_gap(&[]).is_some());
         let classic = v(
-            r#"{"required_pull_request_reviews":{"required_approving_review_count":1,"require_last_push_approval":true},"required_status_checks":{"contexts":["ci"]}}"#,
+            r#"{"enforce_admins":{"enabled":true},"required_pull_request_reviews":{"required_approving_review_count":1,"require_last_push_approval":true},"required_status_checks":{"contexts":["ci"]}}"#,
         );
         assert_eq!(super::github_protection_gap(&classic), None);
+        let mut admins_exempt = classic.clone();
+        admins_exempt["enforce_admins"]["enabled"] = false.into();
+        assert!(super::github_protection_gap(&admins_exempt).unwrap().contains("admins"));
         assert!(super::github_protection_gap(&v("{}")).is_some());
     }
 }

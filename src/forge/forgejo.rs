@@ -24,6 +24,22 @@ use std::fmt::Write as _;
 /// Access token scopes Night Porter needs (Settings → Applications → Generate new token).
 pub const SCOPES: &str = "read:user, read:notification, write:issue, write:repository, read:organization";
 
+/// What the protection rule for `base` leaves out of "named status checks must pass, and an
+/// approval that a new push dismisses", or `None`.
+fn forgejo_gap(rules: &[serde_json::Value], base: &str) -> Option<String> {
+    let matches = |name: &str| name == base || name.strip_suffix('*').is_some_and(|prefix| base.starts_with(prefix));
+    let Some(p) = rules.iter().find(|r| r["rule_name"].as_str().or(r["branch_name"].as_str()).is_some_and(matches)) else {
+        return Some(format!("no branch protection covers {base}"));
+    };
+    if p["enable_status_check"] != true || p["status_check_contexts"].as_array().is_none_or(Vec::is_empty) {
+        Some("its branch protection doesn't require named status checks".into())
+    } else if p["required_approvals"].as_u64().unwrap_or(0) < 1 || p["dismiss_stale_approvals"] != true {
+        Some("its branch protection doesn't require an approval of the latest push".into())
+    } else {
+        None
+    }
+}
+
 pub struct Forgejo {
     pub host: String,
     pub me: String,
@@ -542,24 +558,22 @@ impl Forgejo {
         ghlike::open_pr(&self.api, repo, &json!({ "title": title, "head": head, "base": base, "body": body })).await
     }
 
-    /// Branch protection (readable by repo admins): status checks on, at least one approval,
-    /// stale approvals dismissed on a new push.
+    /// The protection rule for `base` (rules are named by branch or by a `*` pattern).
     pub async fn merge_gate(&self, repo: &RepoId, base: &str) -> Result<Option<String>> {
-        let Ok(p) = self.api.get::<serde_json::Value>(&format!("/repos/{}/branch_protections/{}", repo.path, crate::http::enc(base))).await
-        else {
+        let Ok(rules) = self.api.get::<Vec<serde_json::Value>>(&format!("/repos/{}/branch_protections", repo.path)).await else {
             return Ok(Some("its branch protection isn't readable with this token".into()));
         };
-        Ok(if p["enable_status_check"] != true {
-            Some("its branch protection doesn't require status checks".into())
-        } else if p["required_approvals"].as_u64().unwrap_or(0) < 1 || p["dismiss_stale_approvals"] != true {
-            Some("its branch protection doesn't require an approval of the latest push".into())
-        } else {
-            None
-        })
+        Ok(forgejo_gap(&rules, base))
     }
 
-    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64) -> Result<()> {
-        let body = json!({ "Do": "merge", "merge_when_checks_succeed": true });
+    /// Pinned to `sha`, with the first merge style the repo allows.
+    pub async fn enable_auto_merge(&self, repo: &RepoId, n: u64, sha: &str) -> Result<()> {
+        let r: serde_json::Value = self.api.get(&format!("/repos/{}", repo.path)).await?;
+        let style = [("allow_merge_commits", "merge"), ("allow_squash_merge", "squash"), ("allow_rebase", "rebase")]
+            .into_iter()
+            .find(|(k, _)| r[*k] != false)
+            .map_or("merge", |(_, d)| d);
+        let body = json!({ "Do": style, "merge_when_checks_succeed": true, "head_commit_id": sha });
         self.api.send(Method::POST, &format!("/repos/{}/pulls/{n}/merge", repo.path), &body).await.map(|_| ())
     }
 
@@ -587,6 +601,16 @@ impl Forgejo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merge_gate_finds_the_rule_for_the_branch() {
+        use serde_json::json;
+        let rule = |name: &str, contexts: serde_json::Value| json!({ "rule_name": name, "enable_status_check": true, "status_check_contexts": contexts, "required_approvals": 1, "dismiss_stale_approvals": true });
+        assert_eq!(super::forgejo_gap(&[rule("main", json!(["ci"]))], "main"), None);
+        assert_eq!(super::forgejo_gap(&[rule("ma*", json!(["ci"]))], "main"), None, "a pattern");
+        assert!(super::forgejo_gap(&[rule("release", json!(["ci"]))], "main").unwrap().contains("covers"));
+        assert!(super::forgejo_gap(&[rule("main", json!([]))], "main").is_some(), "checks on, but none named");
+    }
+
     #[test]
     fn roles_and_bots() {
         use super::{Role, User, role_from};

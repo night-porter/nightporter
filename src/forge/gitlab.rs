@@ -112,6 +112,29 @@ struct Name {
     name: String,
 }
 
+/// What a GitLab project's settings leave out of "pipelines must pass and someone other than the
+/// author or a committer approves after the latest push" for MRs into `base`, or `None`.
+fn gitlab_gap(project: &serde_json::Value, approvals: &serde_json::Value, rules: &[serde_json::Value], base: &str) -> Option<String> {
+    // A rule counts for `base` when it covers every branch (no protected branches listed) or
+    // lists `base`; report and code-owner rules only apply sometimes.
+    let covers = |r: &serde_json::Value| {
+        let branches = r["protected_branches"].as_array();
+        branches.is_none_or(Vec::is_empty) || branches.into_iter().flatten().any(|b| b["name"] == base)
+    };
+    let counted = |r: &serde_json::Value| matches!(r["rule_type"].as_str(), Some("regular" | "any_approver") | None);
+    if project["only_allow_merge_if_pipeline_succeeds"] != true {
+        Some("the project doesn't require pipelines to succeed".into())
+    } else if approvals["reset_approvals_on_push"] != true {
+        Some("approvals aren't reset on a new push".into())
+    } else if approvals["merge_requests_author_approval"] == true || approvals["merge_requests_disable_committers_approval"] != true {
+        Some("authors or committers may approve their own changes".into())
+    } else if !rules.iter().any(|r| counted(r) && covers(r) && r["approvals_required"].as_u64().unwrap_or(0) >= 1) {
+        Some(format!("no approval rule for {base} requires an approval"))
+    } else {
+        None
+    }
+}
+
 impl GitLab {
     pub fn new(host: &str, api: Api) -> Self {
         Self {
@@ -445,28 +468,31 @@ impl GitLab {
 
     /// Pipelines must succeed, approvals reset on a new push, authors can't approve their own, and
     /// an approval rule asks for at least one (approval rules are a paid GitLab feature).
-    pub async fn merge_gate(&self, repo: &RepoId, _base: &str) -> Result<Option<String>> {
+    pub async fn merge_gate(&self, repo: &RepoId, base: &str) -> Result<Option<String>> {
         let p = enc(&repo.path);
         let project: serde_json::Value = self.api.get(&format!("/projects/{p}")).await?;
         let approvals: serde_json::Value = self.api.get(&format!("/projects/{p}/approvals")).await?;
         let rules: Vec<serde_json::Value> = self.api.get(&format!("/projects/{p}/approval_rules")).await.unwrap_or_default();
-        Ok(if project["only_allow_merge_if_pipeline_succeeds"] != true {
-            Some("the project doesn't require pipelines to succeed".into())
-        } else if approvals["reset_approvals_on_push"] != true || approvals["merge_requests_author_approval"] == true {
-            Some("approvals aren't reset on a new push, or authors may approve their own".into())
-        } else if !rules.iter().any(|r| r["approvals_required"].as_u64().unwrap_or(0) >= 1) {
-            Some("no approval rule requires an approval".into())
-        } else {
-            None
-        })
+        Ok(gitlab_gap(&project, &approvals, &rules, base))
     }
 
-    pub async fn enable_auto_merge(&self, repo: &RepoId, iid: u64) -> Result<()> {
+    /// Pinned to `sha`. Right after a push the MR may still be checking its new pipeline, so a
+    /// refusal is retried a few times.
+    pub async fn enable_auto_merge(&self, repo: &RepoId, iid: u64, sha: &str) -> Result<()> {
         let path = format!("/projects/{}/merge_requests/{iid}/merge", enc(&repo.path));
-        self.api.send(Method::PUT, &path, &json!({ "merge_when_pipeline_succeeds": true, "auto_merge": true })).await.map(|_| ())
+        let body = json!({ "merge_when_pipeline_succeeds": true, "auto_merge": true, "sha": sha });
+        let mut last = None;
+        for wait in [0, 5, 15, 30] {
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            match self.api.send(Method::PUT, &path, &body).await {
+                Ok(_) => return Ok(()),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("tried at least once"))
     }
 
-    /// Pickup only claims unassigned issues, so "only you" and "nobody" are the two states.
+    /// Adds or removes only you.
     /// Adds or removes only you: the list is read first, so anyone else on it stays.
     pub async fn assign(&self, repo: &RepoId, iid: u64, on: bool) -> Result<()> {
         #[derive(Deserialize)]
@@ -575,5 +601,26 @@ impl GitLab {
             Ok(members.into_iter().map(|u| u.username).collect())
         };
         self.groups.member(group, user, fetch).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn merge_gate_needs_pipelines_fresh_approvals_and_a_rule_for_the_branch() {
+        use serde_json::json;
+        let project = json!({ "only_allow_merge_if_pipeline_succeeds": true });
+        let approvals = json!({ "reset_approvals_on_push": true, "merge_requests_author_approval": false, "merge_requests_disable_committers_approval": true });
+        let rule = |branches: serde_json::Value, n: u64| json!({ "rule_type": "regular", "approvals_required": n, "protected_branches": branches });
+        let gap = |p: &serde_json::Value, a: &serde_json::Value, r: &[serde_json::Value]| super::gitlab_gap(p, a, r, "main");
+        assert_eq!(gap(&project, &approvals, &[rule(json!([]), 1)]), None, "a rule for every branch");
+        assert_eq!(gap(&project, &approvals, &[rule(json!([{ "name": "main" }]), 1)]), None);
+        assert!(gap(&project, &approvals, &[rule(json!([{ "name": "release" }]), 1)]).is_some(), "another branch's rule");
+        assert!(gap(&project, &approvals, &[json!({ "rule_type": "report_approver", "approvals_required": 1 })]).is_some());
+        assert!(gap(&project, &approvals, &[rule(json!([]), 0)]).is_some());
+        assert!(gap(&json!({}), &approvals, &[rule(json!([]), 1)]).is_some(), "pipelines optional");
+        let mut committers = approvals.clone();
+        committers["merge_requests_disable_committers_approval"] = false.into();
+        assert!(gap(&project, &committers, &[rule(json!([]), 1)]).unwrap().contains("committers"));
     }
 }
