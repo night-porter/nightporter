@@ -151,6 +151,10 @@ Jobs show up in the **Queue** tab when your subscribed PRs get activity. Press `
 | `suggest` | the agent commits locally; you get copy-paste reply text and a push command, and Night Porter posts nothing |
 | `draft` | the agent commits; Night Porter pushes and replies after you approve |
 | `auto` | Night Porter pushes and replies on its own (pre-push checks still apply) |
+| `merge` | like `auto`, then the forge's own auto-merge, only where the branch's rules require green checks and a fresh approval from someone else ([Merge](/autonomy#merge)) |
+
+Levels can differ per repo and per kind of job: CI fixes at `auto` while comments wait for you,
+for example. See [Autonomy and permissions](/autonomy).
 
 Night Porter **never** merges by default, never force-pushes someone else's work and never closes anything. The opt-in [`merge` level](/autonomy#merge) hands merging to your forge's own auto-merge, behind its rules. It approves a PR only when you opt in with `review_verdicts` and approve that review job yourself.
 

@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
 ### Added
 
 - The Queue shows what each running job is doing: a spinner, the stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
@@ -315,7 +317,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/night-porter/nightporter/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/night-porter/nightporter/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/night-porter/nightporter/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/night-porter/nightporter/compare/v0.4.4...v0.4.5

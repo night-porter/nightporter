@@ -15,8 +15,8 @@ hero:
       text: Configuration
       link: /configuration
 features:
-  - title: What's new in 0.5
-    details: Plan first, learn from your fixes, stats; plus 0.4's backlog sweeps, Worktrees tab and agent handoffs.
+  - title: What's new in 0.6
+    details: From draft to merge, a level per kind of job, sprint pickup, run now, cancel and burst; plus 0.5's plan first and learning from your fixes.
     link: /whats-new
   - title: Getting started
     details: Install, run the setup wizard, subscribe to a repo and see your first job.
