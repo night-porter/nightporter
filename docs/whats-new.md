@@ -8,7 +8,7 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.6 (in progress)
 
-**See what a running job is doing.** The Queue shows a spinner, the job's stage (`worktree`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
+**See what a running job is doing.** The Queue shows a spinner, the job's stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
 
 ## 0.5
 

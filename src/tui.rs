@@ -174,7 +174,7 @@ impl App {
         let mut last = Instant::now();
         loop {
             term.draw(|f| self.draw(f))?;
-            if event::poll(Duration::from_millis(200))?
+            if event::poll(if self.spinning() { SPIN_TICK } else { Duration::from_millis(500) })?
                 && let CEvent::Key(k) = event::read()?
                 && k.kind == KeyEventKind::Press
                 && !self.key(k)
@@ -201,12 +201,23 @@ impl App {
         }
     }
 
+    /// A job's stage while it's really being worked on: the daemon is up and the job is running,
+    /// or approved and pushing.
+    fn live_stage(&self, j: &Job) -> Option<&(String, i64)> {
+        let live = |st: &String| j.status == JobStatus::Running || (j.status == JobStatus::Approved && st == "push");
+        self.stages.get(&j.id).filter(|(st, _)| self.daemon_up && live(st))
+    }
+
+    fn spinning(&self) -> bool {
+        self.tab == Tab::Queue && self.queue.iter().any(|j| self.live_stage(j).is_some())
+    }
+
     /// A job's list row; a running job gets a spinner, its stage and how long it has been in it.
     fn row(&self, j: &Job) -> String {
-        let live = |st: &String| j.status == JobStatus::Running || (j.status == JobStatus::Approved && st == "push");
-        match self.stages.get(&j.id).filter(|(st, _)| live(st)) {
+        match self.live_stage(j) {
             Some((st, since)) => {
-                format!("{} {}", spin(self.started.elapsed().as_millis() / 200, st, crate::state::now() - since), job_line(j))
+                let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
+                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j))
             }
             None => job_line(j),
         }
@@ -1058,11 +1069,18 @@ fn status_style(s: JobStatus) -> Style {
     }
 }
 
+/// How often the TUI redraws while a spinner is showing (one spinner frame per tick).
+const SPIN_TICK: Duration = Duration::from_millis(200);
+
 /// A running job's prefix in the list, e.g. `⠹ fix 4m12s`.
 fn spin(frame: u128, stage: &str, secs: i64) -> String {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let secs = secs.max(0);
-    let t = if secs < 60 { format!("{secs}s") } else { format!("{}m{:02}s", secs / 60, secs % 60) };
+    let t = match secs {
+        ..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    };
     format!("{} {stage} {t}", FRAMES[(frame % 10) as usize])
 }
 
@@ -1249,14 +1267,6 @@ Turning it off: D here, or `nightporter stop`. If it starts at login and you don
 
 #[cfg(test)]
 mod tests {
-    use super::spin;
-
-    #[test]
-    fn spinner_shows_stage_and_elapsed() {
-        assert_eq!(spin(0, "fix", 5), "⠋ fix 5s");
-        assert_eq!(spin(12, "checks", 252), "⠹ checks 4m12s");
-    }
-
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1281,6 +1291,13 @@ mod tests {
     }
     fn press(app: &mut App, c: KeyCode) -> bool {
         app.key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn spinner_shows_stage_and_elapsed() {
+        assert_eq!(spin(0, "fix", 5), "⠋ fix 5s");
+        assert_eq!(spin(12, "checks", 252), "⠹ checks 4m12s");
+        assert_eq!(spin(1, "fix", 9000), "⠙ fix 2h30m");
     }
 
     #[test]

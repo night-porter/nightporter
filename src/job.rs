@@ -401,6 +401,7 @@ async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work) -> Result<bool> {
 /// Pack filter gates (read-only). `true`: a gate blocked and the job was finished.
 async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_dir: &Path, events: &[Event]) -> Result<bool> {
     for (name, text, _) in packs::steps(&ctx.paths, &s.packs, Hook::Filter) {
+        stage(ctx, j.id, "gate");
         let gate_input = gate_prompt(&text, events);
         let gate = agent::run(s.agent, s, wt, &job_dir.join(format!("gate-{}", name.replace('/', "-"))), &gate_input, true).await?;
         if gate.verdict.as_deref() == Some("block") {
