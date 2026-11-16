@@ -76,6 +76,7 @@ struct App {
     color: bool,
     daemon_up: bool,
     paused: bool,
+    burst: Option<actions::Burst>,
     suspend: Option<Suspend>,
     settings: Vec<crate::settings::Row>,
     /// Why the Settings tab is empty: `config.toml` doesn't load.
@@ -151,6 +152,7 @@ impl App {
             color: std::env::var_os("NO_COLOR").is_none(),
             daemon_up: false,
             paused: false,
+            burst: None,
             suspend: None,
             settings: vec![],
             settings_err: String::new(),
@@ -248,6 +250,7 @@ impl App {
         self.history.clone_from(&self.history_all);
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
         self.paused = actions::paused(&self.db);
+        self.burst = actions::burst(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
             (self.settings_all, self.settings_err) = match crate::settings::rows(&self.paths) {
@@ -564,7 +567,9 @@ impl App {
                 ));
                 return;
             }
-            KeyCode::Char('t') => actions::retry(&self.db, id).map(|n| format!("re-queued {n} event(s)")),
+            KeyCode::Char('t') => actions::retry(&self.db, id, actions::RetryOpts::default()).map(|n| format!("re-queued {n} event(s)")),
+            KeyCode::Char('f') => actions::run_now(&self.db, id),
+            KeyCode::Char('K') => actions::cancel(&self.db, id),
             KeyCode::Char('e') => {
                 // Checked here so a job that can't be edited says why without leaving the TUI.
                 match actions::replies_file(&self.db, id) {
@@ -799,6 +804,7 @@ impl App {
             },
             Span::raw(" · "),
             if self.paused { Span::styled("PAUSED", self.style(warn)) } else { Span::styled("active", self.style(good)) },
+            Span::raw(self.burst.map_or(String::new(), |b| format!(" · BURST {}m left", (b.until - crate::state::now()).max(0) / 60 + 1))),
             Span::raw(" · "),
             Span::styled(format!("{needs} need you"), count(needs, warn)),
             Span::raw(" · "),
@@ -1244,7 +1250,10 @@ Repos: Enter details   space subscribe/unsubscribe   l next level (observe → s
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
        e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
           never saved, so a typo can't break the daemon.
-Jobs:  a approve   A approve despite blocking checks (asks first)   r reject   t retry
+Jobs:  a approve   A approve despite blocking checks (asks first)   r reject
+       t retry with today's config, prompts and model (a job waiting for you is rejected first)
+       f run now: a queued job goes next; any other is retried, past pause, schedule and caps
+       K cancel: stop a running job (marked failed) or reject a queued one
        x dismiss: put it away without replying or pushing (it stays in History)
        u undo a dismiss (or restore the selected dismissed job)   X delete for good (asks first)
        c copy the push command (suggest level)   y copy replies   w open the PR/MR or issue in the browser

@@ -6,7 +6,7 @@ use crate::forge::Reply;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// What we got back from a run.
@@ -403,9 +403,13 @@ async fn run_unguarded(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &P
             let _ = stdin.write_all(p.as_bytes()).await;
         });
     }
-    let pid = child.id();
+    // Kills the agent's whole process group however this ends. The pid file lets
+    // `nightporter cancel` kill it too, so the job fails through its normal cleanup.
+    let _group = Group(child.id(), job_dir.join(PID_FILE));
+    if let Some(pid) = child.id() {
+        std::fs::write(job_dir.join(PID_FILE), pid.to_string())?;
+    }
     let res = tokio::time::timeout(s.timeout, child.wait_with_output()).await;
-    kill_group(pid);
     let out = match res {
         Ok(r) => r?,
         Err(_) => bail!("agent timed out after {}", crate::config::format_duration(s.timeout)),
@@ -537,6 +541,28 @@ fn gemini_args(policy: &Path) -> Vec<String> {
     a
 }
 
+const PID_FILE: &str = "agent.pid";
+
+/// The agent's process group, killed (and its pid file removed) when dropped.
+struct Group(Option<u32>, PathBuf);
+impl Drop for Group {
+    fn drop(&mut self) {
+        kill_group(self.0);
+        let _ = std::fs::remove_file(&self.1);
+    }
+}
+
+/// Kill every agent still running for a job: its main run in `job_dir`, or a gate in a
+/// subdirectory. Returns how many it found.
+pub fn kill_agents(job_dir: &Path) -> usize {
+    let subdirs = std::fs::read_dir(job_dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir());
+    std::iter::once(job_dir.to_path_buf())
+        .chain(subdirs)
+        .filter_map(|d| std::fs::read_to_string(d.join(PID_FILE)).ok()?.trim().parse::<u32>().ok())
+        .inspect(|pid| kill_group(Some(*pid)))
+        .count()
+}
+
 /// Kill whatever is left in the agent's process group.
 fn kill_group(pid: Option<u32>) {
     #[cfg(unix)]
@@ -612,6 +638,20 @@ fn tail(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_kills_the_agent_and_its_children() {
+        use std::os::unix::process::CommandExt;
+        let d = tempfile::tempdir().unwrap();
+        let gate = d.path().join("gate-x");
+        std::fs::create_dir(&gate).unwrap();
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 30 & wait"]).process_group(0).spawn().unwrap();
+        std::fs::write(gate.join(PID_FILE), child.id().to_string()).unwrap();
+        assert_eq!(kill_agents(d.path()), 1);
+        assert!(!child.wait().unwrap().success());
+        assert_eq!(kill_agents(&d.path().join("missing")), 0);
+    }
 
     #[test]
     fn codex_runs_sandboxed_without_user_config() {

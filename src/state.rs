@@ -4,6 +4,7 @@ use crate::forge::{Event, RepoId, Target};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub struct Db(pub Connection);
@@ -170,8 +171,17 @@ impl JobStatus {
         if self == JobStatus::Dismissed {
             a.push("restore");
         }
+        if !self.is_active() {
+            a.push("retry"); // a job waiting for you is rejected first
+        }
+        if !matches!(self, JobStatus::Running | JobStatus::Approved) {
+            a.push("run");
+        }
+        if self.is_active() {
+            a.push("cancel");
+        }
         if !self.is_active() && !self.needs_user() {
-            a.extend(["retry", "purge"]);
+            a.push("purge");
         }
         a
     }
@@ -297,6 +307,15 @@ pub struct JobMeta {
     pub took_over: bool,
     #[serde(default)]
     pub retried: bool,
+    /// `nightporter run`: goes before other queued jobs, past the repo's own concurrency.
+    #[serde(default)]
+    pub front: bool,
+    /// A retry that rebuilds an issue's branch from the base instead of continuing it.
+    #[serde(default)]
+    pub fresh: bool,
+    /// For a `fresh` rebuild: the branch head it replaces, so the force-push only overwrites that.
+    #[serde(default)]
+    pub lease: String,
     /// `plan_first`: the plan, written by the agent and maybe edited by you. While `planning`, the
     /// job waits for you to approve it; after that, the build follows it.
     #[serde(default)]
@@ -696,6 +715,25 @@ impl Db {
         Ok(())
     }
 
+    /// Every `kv` entry whose key starts with `prefix`: rest of key -> value.
+    pub fn prefixed(&self, prefix: &str) -> Result<HashMap<String, String>> {
+        let mut st = self.0.prepare("SELECT k, v FROM kv WHERE k LIKE ?1")?;
+        let rows: Vec<(String, String)> =
+            st.query_map([format!("{prefix}%")], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows.into_iter().filter_map(|(k, v)| Some((k.strip_prefix(prefix)?.to_string(), v))).collect())
+    }
+
+    /// Put a queued job first in line (`nightporter run`). Only that one field, and only while
+    /// it's still queued, so a job the daemon just started keeps the meta it saved.
+    pub fn set_front(&self, id: i64) -> Result<bool> {
+        Ok(self.0.execute("UPDATE jobs SET meta=json_set(meta, '$.front', json('true')) WHERE id=?1 AND status='queued'", [id])? == 1)
+    }
+
+    pub fn del(&self, k: &str) -> Result<()> {
+        self.0.execute("DELETE FROM kv WHERE k=?1", [k])?;
+        Ok(())
+    }
+
     /// What a running job is doing now, and since when. Kept in `kv` so no migration is needed.
     pub fn set_stage(&self, job: i64, stage: &str) -> Result<()> {
         self.set(&format!("stage:{job}"), &format!("{}\t{stage}", now()))
@@ -891,9 +929,10 @@ pub(crate) mod tests {
         }
         assert!(!Running.can_become(Rejected));
         assert!(!AwaitingApproval.can_become(Done) && !AwaitingRunApproval.can_become(Running));
-        assert_eq!(Ready.actions(), ["approve", "reject", "dismiss"]);
-        assert_eq!(Running.actions(), Vec::<&str>::new());
-        assert_eq!(Dismissed.actions(), ["restore", "retry", "purge"]);
+        assert_eq!(Ready.actions(), ["approve", "reject", "dismiss", "retry", "run"]);
+        assert_eq!(Running.actions(), ["cancel"]);
+        assert_eq!(Queued.actions(), ["reject", "run", "cancel"]);
+        assert_eq!(Dismissed.actions(), ["restore", "retry", "run", "purge"]);
     }
 
     #[test]

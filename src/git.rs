@@ -236,8 +236,16 @@ pub async fn remote_head(clone: &Path, url: &str, branch: &str) -> Result<Option
 
 /// Push exactly `sha` from the clone (not the worktree). Never forced: a non-fast-forward is
 /// rejected by the server.
-pub async fn push(clone: &Path, url: &str, sha: &str, remote_branch: &str) -> Result<()> {
-    git(clone, &["push", "--quiet", "--no-verify", "--end-of-options", url, &format!("{sha}:refs/heads/{remote_branch}")]).await.map(|_| ())
+/// Push `sha` to `remote_branch`. With `lease`, replace the branch, but only if it's still at
+/// that SHA (a fresh rebuild); otherwise only a fast-forward goes through.
+pub async fn push(clone: &Path, url: &str, sha: &str, remote_branch: &str, lease: Option<&str>) -> Result<()> {
+    let dest = format!("refs/heads/{remote_branch}");
+    let lease = lease.map(|l| format!("--force-with-lease={dest}:{l}"));
+    let mut args = vec!["push", "--quiet", "--no-verify"];
+    args.extend(lease.as_deref());
+    let refspec = format!("{sha}:{dest}");
+    args.extend(["--end-of-options", url, &refspec]);
+    git(clone, &args).await.map(|_| ())
 }
 
 /// When your git config asks for signed commits (`commit.gpgsign`), re-create the commits in
