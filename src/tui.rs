@@ -57,6 +57,9 @@ struct RepoRow {
 #[allow(clippy::struct_excessive_bools, reason = "independent UI flags, not a state machine")]
 struct App {
     paths: Paths,
+    /// Running jobs' current stage and when it started (from the daemon, via `kv`).
+    stages: std::collections::HashMap<i64, (String, i64)>,
+    started: Instant,
     db: Db,
     tab: Tab,
     sel: ListState,
@@ -159,6 +162,8 @@ impl App {
             history_all: vec![],
             repo_view: None,
             undo_jobs: vec![],
+            stages: std::collections::HashMap::default(),
+            started: Instant::now(),
             undo_events: vec![],
             update: None,
             worktrees: vec![],
@@ -169,7 +174,7 @@ impl App {
         let mut last = Instant::now();
         loop {
             term.draw(|f| self.draw(f))?;
-            if event::poll(Duration::from_millis(500))?
+            if event::poll(Duration::from_millis(200))?
                 && let CEvent::Key(k) = event::read()?
                 && k.kind == KeyEventKind::Press
                 && !self.key(k)
@@ -196,8 +201,20 @@ impl App {
         }
     }
 
+    /// A job's list row; a running job gets a spinner, its stage and how long it has been in it.
+    fn row(&self, j: &Job) -> String {
+        let live = |st: &String| j.status == JobStatus::Running || (j.status == JobStatus::Approved && st == "push");
+        match self.stages.get(&j.id).filter(|(st, _)| live(st)) {
+            Some((st, since)) => {
+                format!("{} {}", spin(self.started.elapsed().as_millis() / 200, st, crate::state::now() - since), job_line(j))
+            }
+            None => job_line(j),
+        }
+    }
+
     fn refresh(&mut self, repos: bool) {
         let jobs = self.db.recent_jobs(500).unwrap_or_default();
+        self.stages = self.db.stages().unwrap_or_default();
         let day_ago = crate::state::now() - 86400;
         let recent_failure = |j: &Job| j.status == JobStatus::Failed && j.updated_at > day_ago;
         self.queue = jobs.iter().filter(|j| j.status.needs_user() || j.status.is_active() || recent_failure(j)).cloned().collect();
@@ -823,7 +840,7 @@ impl App {
             let items: Vec<ListItem> = match self.tab {
                 Tab::Queue | Tab::History => {
                     let list = if self.tab == Tab::Queue { &self.queue } else { &self.history };
-                    list.iter().map(|j| ListItem::new(job_line(j)).style(self.style(status_style(j.status)))).collect()
+                    list.iter().map(|j| ListItem::new(self.row(j)).style(self.style(status_style(j.status)))).collect()
                 }
                 Tab::Inbox => self
                     .inbox
@@ -1041,6 +1058,14 @@ fn status_style(s: JobStatus) -> Style {
     }
 }
 
+/// A running job's prefix in the list, e.g. `⠹ fix 4m12s`.
+fn spin(frame: u128, stage: &str, secs: i64) -> String {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let secs = secs.max(0);
+    let t = if secs < 60 { format!("{secs}s") } else { format!("{}m{:02}s", secs / 60, secs % 60) };
+    format!("{} {stage} {t}", FRAMES[(frame % 10) as usize])
+}
+
 fn job_line(j: &Job) -> String {
     let when = jiff::Timestamp::from_second(j.updated_at).map(|t| t.strftime("%m-%d %H:%M").to_string()).unwrap_or_default();
     let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { format!("{}#{:<5}", j.repo, j.number) };
@@ -1224,6 +1249,14 @@ Turning it off: D here, or `nightporter stop`. If it starts at login and you don
 
 #[cfg(test)]
 mod tests {
+    use super::spin;
+
+    #[test]
+    fn spinner_shows_stage_and_elapsed() {
+        assert_eq!(spin(0, "fix", 5), "⠋ fix 5s");
+        assert_eq!(spin(12, "checks", 252), "⠹ checks 4m12s");
+    }
+
     use super::*;
     use crate::forge::{ForgeKind, RepoId, Target};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

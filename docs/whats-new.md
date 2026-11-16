@@ -6,6 +6,10 @@ description: "What's new in Night Porter 0.5, 0.4 and 0.3: plan first, learn fro
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
+## 0.6 (in progress)
+
+**See what a running job is doing.** The Queue shows a spinner, the job's stage (`worktree`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
+
 ## 0.5
 
 ### Plan first, learn from your fixes, stats (0.5.0)

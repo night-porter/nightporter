@@ -62,6 +62,11 @@ pub fn worktree_path(ctx: &Ctx, j: &Job) -> PathBuf {
     ctx.paths.worktrees_dir().join(j.repo.forge.as_str()).join(&j.repo.host).join(&j.repo.path).join(format!("{kind}-{}", j.number))
 }
 
+/// Record what the job is doing now, for the TUI's spinner. Best effort.
+fn stage(ctx: &Ctx, id: i64, stage: &str) {
+    let _ = ctx.db(|d| d.set_stage(id, stage));
+}
+
 fn log(ctx: &Ctx, id: i64, msg: &str) {
     tracing::info!("job {id}: {msg}");
     let _ = ctx.db(|d| d.log(id, msg));
@@ -108,6 +113,17 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         return Ok(());
     }
     j.status = JobStatus::Running;
+    stage(
+        ctx,
+        id,
+        if j.mode == crate::improve::LEARN {
+            "learn"
+        } else if j.meta.amend {
+            "amend"
+        } else {
+            "worktree"
+        },
+    );
     if j.mode == crate::improve::LEARN {
         return crate::improve::run_learn(ctx, &mut j, &s).await;
     }
@@ -398,6 +414,7 @@ async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_d
 
 /// The user's `env.setup` commands, in order; the first failure fails the job.
 async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Path) -> Result<()> {
+    stage(ctx, j.id, "env");
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
     // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
     // install doesn't stop the job; the agent reports what it couldn't run.
@@ -441,6 +458,7 @@ fn env_guarded(s: &RepoSettings) -> bool {
 async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: &Path, events: &[Event]) -> Result<agent::Outcome> {
     let verb = j.meta.verb;
     let planning = w.step == "plan";
+    stage(ctx, j.id, w.step);
     let mut pack_prompts: Vec<String> = Vec::new();
     for hook in [Hook::PreFix, Hook::PostFix] {
         for (name, text, _) in packs::steps(&ctx.paths, &s.packs, hook) {
@@ -524,6 +542,7 @@ async fn inspect(
 ) -> Result<usize> {
     // Only HEAD is read from the worktree (after checking the agent didn't repoint its .git);
     // everything else runs in the clone on fixed SHAs.
+    stage(ctx, j.id, "checks");
     let (clone, wt) = (&w.clone, &w.wt);
     git::verify_gitfile(wt, &w.gitfile)?;
     j.head_after = git::head(wt).await?;
@@ -652,6 +671,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if j.status != JobStatus::Approved {
         bail!("job {id} is {:?}, not approved", j.status);
     }
+    stage(ctx, id, "push");
     if j.mode == crate::improve::LEARN {
         return deliver_learn(ctx, &mut j);
     }

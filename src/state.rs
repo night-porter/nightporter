@@ -696,6 +696,24 @@ impl Db {
         Ok(())
     }
 
+    /// What a running job is doing now, and since when. Kept in `kv` so no migration is needed.
+    pub fn set_stage(&self, job: i64, stage: &str) -> Result<()> {
+        self.set(&format!("stage:{job}"), &format!("{}\t{stage}", now()))
+    }
+
+    /// Every job's current stage: job id -> (stage, started at).
+    pub fn stages(&self) -> Result<std::collections::HashMap<i64, (String, i64)>> {
+        let mut st = self.0.prepare("SELECT substr(k, 7), v FROM kv WHERE k LIKE 'stage:%'")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for (id, v) in rows.flatten() {
+            if let (Ok(id), Some((ts, stage))) = (id.parse(), v.split_once('\t')) {
+                out.insert(id, (stage.to_string(), ts.parse().unwrap_or(0)));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn job_log(&self, job: i64) -> Result<Vec<(i64, String)>> {
         let mut st = self.0.prepare("SELECT ts, line FROM job_log WHERE job_id=?1 ORDER BY rowid")?;
         let rows = st.query_map([job], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -724,6 +742,11 @@ impl Db {
         let settled = JobStatus::sql(|s| !s.holds_pr());
         self.0.execute(&format!("DELETE FROM jobs WHERE updated_at < ?1 AND status IN ({settled})"), [cutoff])?;
         self.0.execute("DELETE FROM events WHERE seen_at < ?1 AND disposition IN ('taken','dropped','inbox')", [cutoff])?;
+        let active = JobStatus::sql(JobStatus::is_active);
+        self.0.execute(
+            &format!("DELETE FROM kv WHERE k LIKE 'stage:%' AND CAST(substr(k, 7) AS INTEGER) NOT IN (SELECT id FROM jobs WHERE status IN ({active}))"),
+            [],
+        )?;
         Ok(())
     }
 }
@@ -809,6 +832,24 @@ pub(crate) mod tests {
         let other = RepoId::new(ForgeKind::GitHub, "github.com", "x/y");
         assert_eq!(db.set_author_disposition("ALICE", Some(&other), Disposition::Pending, "allow").unwrap(), 0);
         assert_eq!(db.set_author_disposition("ALICE", Some(&e.repo), Disposition::Pending, "allow").unwrap(), 1);
+    }
+
+    #[test]
+    fn stages_are_kept_while_active_and_pruned_after() {
+        let mut db = Db::memory().unwrap();
+        let r = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let (live, gone) = (
+            db.create_job(&r, Target::Pr, 1, "my_prs", "draft", &[]).unwrap(),
+            db.create_job(&r, Target::Pr, 2, "my_prs", "draft", &[]).unwrap(),
+        );
+        db.set_stage(live, "env").unwrap();
+        db.set_stage(live, "fix").unwrap();
+        db.set_stage(gone, "checks").unwrap();
+        db.set_status(gone, JobStatus::Done).unwrap();
+        assert_eq!(db.stages().unwrap()[&live].0, "fix");
+        db.prune(30).unwrap();
+        let st = db.stages().unwrap();
+        assert!(st.contains_key(&live) && !st.contains_key(&gone));
     }
 
     #[test]
