@@ -42,16 +42,19 @@ pub async fn run(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, mut pick:
 /// `@current` becomes the open milestone due soonest among `items`.
 fn resolve_milestone(pick: &mut Pick, items: &[Listed]) -> Result<()> {
     if pick.milestone.as_deref() == Some("@current") {
-        let today = jiff::Zoned::now().date().to_string();
+        // Due dates are UTC timestamps (GitHub, Gitea) or plain dates (GitLab): compare in UTC.
+        let today = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         pick.milestone =
             Some(crate::forge::current_milestone(items, &today).context("no open issue is in a milestone with a due date from today on")?);
     }
     Ok(())
 }
 
-/// `[maintainer.pickup]`, every `sweep_interval`: release issues whose job failed or was put
-/// away, forget closed ones, then claim (assign to you, with a comment) and queue unassigned
-/// matching issues until `max_claimed` are held. An issue it released isn't claimed again.
+/// `[maintainer.pickup]`, every `sweep_interval`: settle the issues it holds, then claim
+/// (assign to you, with a comment) and queue unassigned matching issues until `max_claimed` are
+/// held. A claim is let go when its issue closes, when its job ends without a PR to wait on, or
+/// when it fails or you put it away; an issue it handed back isn't claimed again. One repo's
+/// error doesn't stop the others.
 pub async fn pickup(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge::ForgeKind, String)) -> Result<()> {
     for (repo, s) in ctx.subscribed(cfg) {
         let Some(p) = s.maintainer.pickup.as_ref().filter(|_| s.maintainer.enabled) else { continue };
@@ -63,53 +66,115 @@ pub async fn pickup(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge:
         if last.is_some_and(|t| crate::state::now() - t < i64::try_from(cfg.sweep_interval.as_secs()).unwrap_or(i64::MAX)) {
             continue;
         }
-        ctx.db(|d| d.set(&kv, &crate::state::now().to_string()))?;
-        let forge = ctx.forge(&repo)?.lock().await;
-        let me = forge.me().to_string();
-        let items = forge.open_items(&repo, Target::Issue).await?;
-        let claim_key = |n: u64| format!("claim:{}#{n}", repo.key());
-        let mut held = Vec::new();
-        for n in ctx.db(|d| d.prefixed(&format!("claim:{}#", repo.key())))?.keys().filter_map(|n| n.parse::<u64>().ok()) {
-            if !items.iter().any(|i| i.number == n) {
-                ctx.db(|d| d.del(&claim_key(n)))?; // closed: done
-                continue;
-            }
-            let job = ctx.db(|d| d.latest_job(&repo, n))?;
-            if job.is_some_and(|j| matches!(j.status, JobStatus::Failed | JobStatus::Rejected | JobStatus::Dismissed)) {
-                forge.assign(&repo, n, false).await?;
-                forge.comment(&repo, n, &sign(&s, "Night Porter couldn't finish this one, so it's free again.")).await?;
-                ctx.db(|d| d.del(&claim_key(n)))?;
-                ctx.db(|d| d.set(&format!("released:{}#{n}", repo.key()), "1"))?;
-                tracing::info!("{repo}#{n}: released");
-                continue;
-            }
-            held.push(n);
-        }
-        let mut pick =
-            Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
-        if let Err(e) = resolve_milestone(&mut pick, &items) {
-            ctx.warn_every(&kv, 86400, &format!("{repo}: pickup: {e:#}"));
-            continue;
-        }
-        let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
-        // Not ones it holds or let go, even if the list hasn't caught up with the assignment yet.
-        let free = crate::forge::pick(items, &pick)
-            .into_iter()
-            .filter(|i| !held.contains(&i.number) && !released.contains_key(&i.number.to_string()));
-        for i in free.take(p.max_claimed.saturating_sub(held.len())) {
-            forge.assign(&repo, i.number, true).await?;
-            let what = match p.verb {
-                Verb::Fix => "work on this and open a draft PR",
-                Verb::Reproduce => "try to reproduce this",
-                _ => "triage this",
-            };
-            forge.comment(&repo, i.number, &sign(&s, &format!("Night Porter picked this up from the sprint and will {what}."))).await?;
-            ctx.db(|d| d.set(&claim_key(i.number), "1"))?;
-            queue(ctx, &repo, Target::Issue, p.verb, &me, std::slice::from_ref(&i))?;
-            tracing::info!("{repo}#{}: claimed", i.number);
+        match pickup_repo(ctx, &repo, &s, p).await {
+            Ok(()) => ctx.db(|d| d.set(&kv, &crate::state::now().to_string()))?,
+            Err(e) => ctx.warn_every(&kv, 3600, &format!("{repo}: pickup: {e:#}")),
         }
     }
     Ok(())
+}
+
+/// What happens to an issue Night Porter holds.
+#[derive(Debug, PartialEq, Eq)]
+enum Claim {
+    Hold,
+    /// The issue closed, or the work is done with nothing left to wait for.
+    Forget,
+    /// Done without a change: hand it back, saying so if it was meant to be fixed.
+    Finished,
+    /// The job failed or you put it away: hand it back and don't take it again.
+    GiveBack,
+}
+
+/// `job`: the newest job on the issue since it was claimed. `pending`: its events are waiting
+/// to run (again, e.g. after a restart).
+fn settle(open: bool, job: Option<&crate::state::Job>, pending: bool) -> Claim {
+    if !open {
+        return Claim::Forget;
+    }
+    let Some(j) = job.filter(|_| !pending) else { return Claim::Hold };
+    match j.status {
+        JobStatus::Failed | JobStatus::Rejected | JobStatus::Dismissed => Claim::GiveBack,
+        // A PR is open for it: held until the issue closes (the PR merging closes it).
+        JobStatus::Done if !j.meta.pr_url.is_empty() => Claim::Hold,
+        JobStatus::Done => Claim::Finished,
+        _ => Claim::Hold,
+    }
+}
+
+async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, p: &crate::config::Pickup) -> Result<()> {
+    let forge = ctx.forge(repo)?.lock().await;
+    let me = forge.me().to_string();
+    let items = forge.open_items(repo, Target::Issue).await?;
+    let claim_key = |n: u64| format!("claim:{}#{n}", repo.key());
+    let pending = ctx.db(|d| d.events_with(Disposition::Pending))?;
+    let mut held = Vec::new();
+    for (n, since) in ctx.db(|d| d.prefixed(&format!("claim:{}#", repo.key())))? {
+        let (Ok(n), Ok(since)) = (n.parse::<u64>(), since.parse::<i64>()) else { continue };
+        // Not in the (page-capped) list doesn't prove it's closed: ask.
+        let open = items.iter().any(|i| i.number == n) || forge.issue(repo, n).await?.open;
+        let job = ctx.db(|d| d.latest_job(repo, Target::Issue, n, since))?;
+        let waiting = pending.iter().any(|(e, _)| e.repo == *repo && e.number == n && e.target == Target::Issue);
+        match settle(open, job.as_ref(), waiting) {
+            Claim::Hold => held.push(n),
+            Claim::Forget => ctx.db(|d| d.del(&claim_key(n)))?,
+            c @ (Claim::Finished | Claim::GiveBack) => {
+                forge.assign(repo, n, false).await?;
+                let why = match (&c, p.verb) {
+                    (Claim::GiveBack, _) => Some("Night Porter couldn't finish this one, so it's free again."),
+                    (_, Verb::Fix) => Some("Night Porter found nothing to change here, so it's free again."),
+                    _ => None, // a triage or reproduction says what it found itself
+                };
+                if let Some(why) = why
+                    && let Err(e) = forge.comment(repo, n, &sign(s, why)).await
+                {
+                    tracing::warn!("{repo}#{n}: couldn't say it's free again: {e:#}");
+                }
+                ctx.db(|d| d.del(&claim_key(n)))?;
+                if c == Claim::GiveBack {
+                    ctx.db(|d| d.set(&format!("released:{}#{n}", repo.key()), "1"))?;
+                }
+                tracing::info!("{repo}#{n}: handed back");
+            }
+        }
+    }
+    let mut pick = Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
+    resolve_milestone(&mut pick, &items)?;
+    let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
+    // Not ones it holds or handed back, even if the list hasn't caught up with the assignment.
+    let free =
+        crate::forge::pick(items, &pick).into_iter().filter(|i| !held.contains(&i.number) && !released.contains_key(&i.number.to_string()));
+    for i in free.take(p.max_claimed.saturating_sub(held.len())) {
+        forge.assign(repo, i.number, true).await?;
+        // Recorded the moment it's assigned, so a later failure still leaves it settled above.
+        let now = crate::state::now();
+        ctx.db(|d| d.set(&claim_key(i.number), &now.to_string()))?;
+        queue_claim(ctx, repo, p.verb, &me, i.number, now)?;
+        let what = match p.verb {
+            Verb::Fix => "work on this and open a PR",
+            Verb::Reproduce => "try to reproduce this",
+            _ => "triage this",
+        };
+        if let Err(e) =
+            forge.comment(repo, i.number, &sign(s, &format!("Night Porter picked this up from the sprint and will {what}."))).await
+        {
+            tracing::warn!("{repo}#{}: claimed, but couldn't say so: {e:#}", i.number);
+        }
+        tracing::info!("{repo}#{}: claimed", i.number);
+    }
+    Ok(())
+}
+
+/// The claim's own event (its id carries the claim time), so an issue swept or claimed before
+/// still gets a new job.
+fn queue_claim(ctx: &Ctx, repo: &RepoId, verb: Verb, me: &str, n: u64, at: i64) -> Result<()> {
+    let base = event(repo, Target::Issue, verb, n, me);
+    let e = Event {
+        id: format!("{}-pickup-{at}", base.id),
+        body: format!("(claimed by sprint pickup: {})", crate::state::enum_str(&verb)),
+        ..base
+    };
+    ctx.db(|d| d.add_event(&e, Disposition::Pending, "pickup")).map(|_| ())
 }
 
 /// A post as you, marked as Night Porter's per the repo's `reply` settings.
@@ -211,6 +276,26 @@ pub fn is_sweep(e: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::forge::ForgeKind;
+
+    #[test]
+    fn claims_settle_by_their_own_job() {
+        let mut db = crate::state::Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, Target::Issue, 1, "maintainer", "draft", &[]).unwrap();
+        let job = |status, pr: &str| {
+            let mut j = db.job(id).unwrap().unwrap();
+            (j.status, j.meta.pr_url) = (status, pr.into());
+            j
+        };
+        assert_eq!(settle(false, None, false), Claim::Forget, "closed");
+        assert_eq!(settle(true, None, false), Claim::Hold, "not dispatched yet");
+        assert_eq!(settle(true, Some(&job(JobStatus::Failed, "")), true), Claim::Hold, "re-queued after a restart");
+        assert_eq!(settle(true, Some(&job(JobStatus::Failed, "")), false), Claim::GiveBack);
+        assert_eq!(settle(true, Some(&job(JobStatus::Dismissed, "")), false), Claim::GiveBack);
+        assert_eq!(settle(true, Some(&job(JobStatus::Done, "https://x/pull/3")), false), Claim::Hold, "PR open: wait for it");
+        assert_eq!(settle(true, Some(&job(JobStatus::Done, "")), false), Claim::Finished, "triaged, or nothing to change");
+        assert_eq!(settle(true, Some(&job(JobStatus::AwaitingApproval, "")), false), Claim::Hold);
+    }
 
     #[test]
     fn queues_once_per_item_and_verb() {

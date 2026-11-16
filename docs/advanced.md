@@ -374,9 +374,11 @@ verb = "fix"             # triage, reproduce or fix (opens a draft PR/MR)
 max_claimed = 2          # most issues held at once, so teammates still find work
 ```
 
-Every `sweep_interval` it looks again. An issue that closes frees its slot. If a job fails or you
-reject or dismiss it, the issue is unassigned with a comment that it's free again, and it isn't
-claimed a second time. Issues assigned to anyone are never touched. Jobs follow the maintainer
+Every `sweep_interval` it looks again. An issue frees its slot when it closes (a merged PR that
+closes it), or when its job ends without a PR to wait on (a triage, or a fix that found nothing to
+change), and it's unassigned again. If a job fails or you reject or dismiss it, the issue is
+unassigned with a comment that it's free again, and it isn't claimed a second time. Issues
+assigned to anyone are never touched, and handing one back leaves anyone else on it. Jobs follow the maintainer
 level (`draft` unless the repo [opts in](/autonomy#maintainer-mode)), and go through the same
 queue, schedule and caps as sweeps.
 

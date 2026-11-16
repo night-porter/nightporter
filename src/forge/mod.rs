@@ -379,6 +379,7 @@ pub struct IssueInfo {
     pub title: String,
     pub body: String,
     pub author: String,
+    pub open: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +418,8 @@ pub struct Listed {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Milestone {
     pub title: String,
+    /// Still open (a closed one isn't the current sprint, even with issues left in it).
+    pub open: bool,
     /// Due date, `YYYY-MM-DD…` (GitHub and Gitea send a timestamp, GitLab a date).
     pub due: Option<String>,
 }
@@ -426,6 +429,7 @@ pub fn current_milestone(items: &[Listed], today: &str) -> Option<String> {
     items
         .iter()
         .filter_map(|i| i.milestone.as_ref())
+        .filter(|m| m.open)
         .filter_map(|m| Some((m.due.as_deref()?.get(..10)?, &m.title)))
         .filter(|(due, _)| *due >= today)
         .min()
@@ -592,7 +596,6 @@ impl Forge {
         each!(self, g => g.rescan(repo, since).await)
     }
 
-    /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
     /// Assign the token's user to an issue (`on`), or take them off it.
     pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
         each!(self, g => g.assign(repo, n, on).await)
@@ -602,6 +605,7 @@ impl Forge {
         each!(self, g => g.reply(repo, Target::Issue, n, None, body).await)
     }
 
+    /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
         each!(self, g => g.open_items(repo, target).await)
     }
@@ -836,17 +840,22 @@ mod tests {
     #[test]
     fn current_milestone_is_the_next_one_due() {
         let it = |title: &str, due: Option<&str>| Listed {
-            milestone: Some(Milestone { title: title.into(), due: due.map(Into::into) }),
+            milestone: Some(Milestone { title: title.into(), due: due.map(Into::into), open: title != "closed" }),
             ..Default::default()
         };
-        let items =
-            [it("old", Some("2026-01-01T00:00:00Z")), it("next", Some("2026-12-01")), it("later", Some("2027-01-01")), it("none", None)];
+        let items = [
+            it("old", Some("2026-01-01T00:00:00Z")),
+            it("closed", Some("2026-11-20")),
+            it("next", Some("2026-12-01")),
+            it("later", Some("2027-01-01")),
+            it("none", None),
+        ];
         assert_eq!(current_milestone(&items, "2026-11-16").as_deref(), Some("next"));
         assert_eq!(current_milestone(&items, "2028-01-01"), None);
         let p = Pick { milestone: Some("NEXT".into()), unassigned: true, ..Default::default() };
         let mut taken = it("next", None);
         taken.assignees = vec!["bob".into()];
-        assert_eq!(pick(vec![items[1].clone(), taken, items[2].clone()], &p).len(), 1);
+        assert_eq!(pick(vec![items[2].clone(), taken, items[3].clone()], &p).len(), 1);
     }
 
     #[test]

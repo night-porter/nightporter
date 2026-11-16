@@ -422,6 +422,8 @@ impl GitLab {
             title: String,
             #[serde(default)]
             due_date: Option<String>,
+            #[serde(default)]
+            state: String,
         }
         let kind = if target == Target::Pr { "merge_requests" } else { "issues" };
         let path = format!("/projects/{}/{kind}?state=opened&per_page=100", enc(&repo.path));
@@ -436,14 +438,27 @@ impl GitLab {
                 labels: i.labels,
                 draft: i.draft,
                 assignees: i.assignees.into_iter().map(|u| u.username).collect(),
-                milestone: i.milestone.map(|m| super::Milestone { title: m.title, due: m.due_date }),
+                milestone: i.milestone.map(|m| super::Milestone { open: m.state != "closed", title: m.title, due: m.due_date }),
             })
             .collect())
     }
 
     /// Pickup only claims unassigned issues, so "only you" and "nobody" are the two states.
+    /// Adds or removes only you: the list is read first, so anyone else on it stays.
     pub async fn assign(&self, repo: &RepoId, iid: u64, on: bool) -> Result<()> {
-        let ids: Vec<u64> = if on { vec![self.me_id] } else { vec![0] };
+        #[derive(Deserialize)]
+        struct I {
+            #[serde(default)]
+            assignees: Vec<User>,
+        }
+        let i: I = self.api.get(&format!("/projects/{}/issues/{iid}", enc(&repo.path))).await?;
+        let mut ids: Vec<u64> = i.assignees.into_iter().map(|u| u.id).filter(|id| *id != self.me_id).collect();
+        if on {
+            ids.push(self.me_id);
+        }
+        if ids.is_empty() {
+            ids.push(0); // GitLab's "nobody"
+        }
         self.api
             .send(Method::PUT, &format!("/projects/{}/issues/{iid}", enc(&repo.path)), &json!({ "assignee_ids": ids }))
             .await
@@ -456,9 +471,16 @@ impl GitLab {
             title: String,
             description: Option<String>,
             author: User,
+            #[serde(default)]
+            state: String,
         }
         let i: I = self.api.get(&format!("/projects/{}/issues/{iid}", enc(&repo.path))).await?;
-        Ok(super::IssueInfo { title: i.title, body: i.description.unwrap_or_default(), author: i.author.username })
+        Ok(super::IssueInfo {
+            title: i.title,
+            body: i.description.unwrap_or_default(),
+            author: i.author.username,
+            open: i.state != "closed",
+        })
     }
 
     pub async fn reply(&self, repo: &RepoId, target: Target, n: u64, to: Option<&Event>, body: &str) -> Result<()> {

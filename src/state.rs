@@ -752,10 +752,11 @@ impl Db {
         Ok(out)
     }
 
-    /// The newest job on a PR or issue.
-    pub fn latest_job(&self, repo: &RepoId, number: u64) -> Result<Option<Job>> {
-        let mut st = self.0.prepare(&format!("{JOB_LIST} WHERE repo=?1 AND number=?2 ORDER BY id DESC LIMIT 1"))?;
-        Ok(st.query_row(params![repo.key(), number.cast_signed()], row_job).optional()?)
+    /// The newest job on a PR or issue created at `since` or later.
+    pub fn latest_job(&self, repo: &RepoId, target: Target, number: u64, since: i64) -> Result<Option<Job>> {
+        let mut st =
+            self.0.prepare(&format!("{JOB_LIST} WHERE repo=?1 AND target=?2 AND number=?3 AND created_at>=?4 ORDER BY id DESC LIMIT 1"))?;
+        Ok(st.query_row(params![repo.key(), enum_str(&target), number.cast_signed(), since], row_job).optional()?)
     }
 
     pub fn job_log(&self, job: i64) -> Result<Vec<(i64, String)>> {
