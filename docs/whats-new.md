@@ -14,6 +14,8 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 **A level per kind of job.** Let CI fixes and review replies go out on their own while issue fixes wait for you: `levels = { ci_failure = "auto", review_comment = "auto", comment = "draft" }`. On a project you maintain, `maintainer.allow_above_draft = true` in that repo's file, with `maintainer.levels = { triage = "auto", fix = "draft" }`, lets maintainer jobs go above `draft` too. See [Autonomy and permissions](/autonomy).
 
+**It picks up its share of the sprint.** With `[maintainer.pickup]`, Night Porter claims unassigned issues in the current milestone (or with a sprint label), assigns them to you with a comment, and works on them, two at a time by default. If a job fails or you reject it, the issue is handed back. See [Pick up the sprint](/advanced#pick-up-the-sprint).
+
 **Doctor checks your token.** `nightporter doctor` now says which features your token's scopes don't cover, and how to add them.
 
 ## 0.5

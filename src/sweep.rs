@@ -4,8 +4,8 @@
 
 use crate::daemon::Ctx;
 use crate::forge::{Event, Listed, Pick, RepoId, Role, Target, Trigger, Verb};
-use crate::state::Disposition;
-use anyhow::{Result, bail};
+use crate::state::{Disposition, JobStatus};
+use anyhow::{Context, Result, bail};
 
 /// Event ids start with this, so dispatch can tell backlog work from your own PRs.
 pub const PREFIX: &str = "sweep-";
@@ -33,9 +33,88 @@ pub async fn run(ctx: &Ctx, repo: &RepoId, target: Target, verb: Verb, mut pick:
     }
     let items = forge.open_items(repo, target).await?;
     drop(forge);
+    resolve_milestone(&mut pick, &items)?;
     let picked = crate::forge::pick(items, &pick);
     let queued = if dry_run { 0 } else { queue(ctx, repo, target, verb, &me, &picked)? };
     Ok(Report { picked, queued })
+}
+
+/// `@current` becomes the open milestone due soonest among `items`.
+fn resolve_milestone(pick: &mut Pick, items: &[Listed]) -> Result<()> {
+    if pick.milestone.as_deref() == Some("@current") {
+        let today = jiff::Zoned::now().date().to_string();
+        pick.milestone =
+            Some(crate::forge::current_milestone(items, &today).context("no open issue is in a milestone with a due date from today on")?);
+    }
+    Ok(())
+}
+
+/// `[maintainer.pickup]`, every `sweep_interval`: release issues whose job failed or was put
+/// away, forget closed ones, then claim (assign to you, with a comment) and queue unassigned
+/// matching issues until `max_claimed` are held. An issue it released isn't claimed again.
+pub async fn pickup(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge::ForgeKind, String)) -> Result<()> {
+    for (repo, s) in ctx.subscribed(cfg) {
+        let Some(p) = s.maintainer.pickup.as_ref().filter(|_| s.maintainer.enabled) else { continue };
+        if repo.forge != key.0 || repo.host != key.1 {
+            continue;
+        }
+        let kv = format!("pickup:{}", repo.key());
+        let last: Option<i64> = ctx.db(|d| d.get(&kv))?.and_then(|v| v.parse().ok());
+        if last.is_some_and(|t| crate::state::now() - t < i64::try_from(cfg.sweep_interval.as_secs()).unwrap_or(i64::MAX)) {
+            continue;
+        }
+        ctx.db(|d| d.set(&kv, &crate::state::now().to_string()))?;
+        let forge = ctx.forge(&repo)?.lock().await;
+        let me = forge.me().to_string();
+        let items = forge.open_items(&repo, Target::Issue).await?;
+        let claim_key = |n: u64| format!("claim:{}#{n}", repo.key());
+        let mut held = Vec::new();
+        for n in ctx.db(|d| d.prefixed(&format!("claim:{}#", repo.key())))?.keys().filter_map(|n| n.parse::<u64>().ok()) {
+            if !items.iter().any(|i| i.number == n) {
+                ctx.db(|d| d.del(&claim_key(n)))?; // closed: done
+                continue;
+            }
+            let job = ctx.db(|d| d.latest_job(&repo, n))?;
+            if job.is_some_and(|j| matches!(j.status, JobStatus::Failed | JobStatus::Rejected | JobStatus::Dismissed)) {
+                forge.assign(&repo, n, false).await?;
+                forge.comment(&repo, n, &sign(&s, "Night Porter couldn't finish this one, so it's free again.")).await?;
+                ctx.db(|d| d.del(&claim_key(n)))?;
+                ctx.db(|d| d.set(&format!("released:{}#{n}", repo.key()), "1"))?;
+                tracing::info!("{repo}#{n}: released");
+                continue;
+            }
+            held.push(n);
+        }
+        let mut pick =
+            Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
+        if let Err(e) = resolve_milestone(&mut pick, &items) {
+            ctx.warn_every(&kv, 86400, &format!("{repo}: pickup: {e:#}"));
+            continue;
+        }
+        let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
+        // Not ones it holds or let go, even if the list hasn't caught up with the assignment yet.
+        let free = crate::forge::pick(items, &pick)
+            .into_iter()
+            .filter(|i| !held.contains(&i.number) && !released.contains_key(&i.number.to_string()));
+        for i in free.take(p.max_claimed.saturating_sub(held.len())) {
+            forge.assign(&repo, i.number, true).await?;
+            let what = match p.verb {
+                Verb::Fix => "work on this and open a draft PR",
+                Verb::Reproduce => "try to reproduce this",
+                _ => "triage this",
+            };
+            forge.comment(&repo, i.number, &sign(&s, &format!("Night Porter picked this up from the sprint and will {what}."))).await?;
+            ctx.db(|d| d.set(&claim_key(i.number), "1"))?;
+            queue(ctx, &repo, Target::Issue, p.verb, &me, std::slice::from_ref(&i))?;
+            tracing::info!("{repo}#{}: claimed", i.number);
+        }
+    }
+    Ok(())
+}
+
+/// A post as you, marked as Night Porter's per the repo's `reply` settings.
+fn sign(s: &crate::config::RepoSettings, body: &str) -> String {
+    crate::prompts::sign(body, s.reply.attribution(), s.agent)
 }
 
 /// One pending, trusted (it's you) maintainer event per item. Ids are stable, so running the

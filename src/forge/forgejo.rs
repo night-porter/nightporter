@@ -470,6 +470,13 @@ impl Forgejo {
         ghlike::pr(&self.api, repo, n).await
     }
 
+    /// Gitea has no add/remove-one endpoint: set the list. Pickup only claims unassigned issues,
+    /// so "only you" and "nobody" are the two states it moves between.
+    pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
+        let who: Vec<&str> = if on { vec![self.me.as_str()] } else { vec![] };
+        self.api.send(Method::PATCH, &format!("/repos/{}/issues/{n}", repo.path), &json!({ "assignees": who })).await.map(|_| ())
+    }
+
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<super::Listed>> {
         let kind = if target == Target::Pr { "pulls" } else { "issues" };
         let path = format!("/repos/{}/issues?state=open&type={kind}&limit=50", repo.path);

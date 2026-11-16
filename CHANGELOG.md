@@ -14,6 +14,7 @@ All notable changes to Night Porter. The format follows
 - `nightporter burst <duration> [--jobs N] [--concurrency N]` gives more capacity for a while: no daily cap or sweep reserve, schedule windows ignored, twice the jobs at once (overall and per repo). The TUI header counts it down; `burst off` ends it.
 - `levels`: a level per kind of job on your own PRs (`ci_failure`, `review_comment`, `comment`, …) over `level`, e.g. CI fixes at `auto`, comments at `draft`. A job of several kinds gets the lowest; a schedule window's level caps them while it's active.
 - `nightporter doctor` checks each account's token scopes and names the features a missing scope turns off, with the command to add it. The new [Autonomy and permissions](docs/autonomy.md) page has levels, caps and scopes in one place.
+- `[maintainer.pickup]` claims unassigned issues of the current sprint (`label`, or `milestone`, `"@current"` = the open one due soonest), assigns them to you with a comment, and works on them, at most `max_claimed` (2) at a time. A failed, rejected or dismissed job unassigns the issue again and it isn't claimed twice. `sweep` gets `--milestone` and `--unassigned`.
 - `maintainer.levels` (per verb: `triage`, `fix`, …) and `maintainer.allow_above_draft` (in a repo's own file only) let maintainer jobs on that repo go above `draft`.
 
 ### Changed

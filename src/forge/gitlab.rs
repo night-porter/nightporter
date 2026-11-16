@@ -412,6 +412,16 @@ impl GitLab {
             labels: Vec<String>,
             #[serde(default)]
             draft: bool,
+            #[serde(default)]
+            assignees: Vec<User>,
+            #[serde(default)]
+            milestone: Option<Ms>,
+        }
+        #[derive(Deserialize)]
+        struct Ms {
+            title: String,
+            #[serde(default)]
+            due_date: Option<String>,
         }
         let kind = if target == Target::Pr { "merge_requests" } else { "issues" };
         let path = format!("/projects/{}/{kind}?state=opened&per_page=100", enc(&repo.path));
@@ -425,8 +435,19 @@ impl GitLab {
                 created_at: i.created_at,
                 labels: i.labels,
                 draft: i.draft,
+                assignees: i.assignees.into_iter().map(|u| u.username).collect(),
+                milestone: i.milestone.map(|m| super::Milestone { title: m.title, due: m.due_date }),
             })
             .collect())
+    }
+
+    /// Pickup only claims unassigned issues, so "only you" and "nobody" are the two states.
+    pub async fn assign(&self, repo: &RepoId, iid: u64, on: bool) -> Result<()> {
+        let ids: Vec<u64> = if on { vec![self.me_id] } else { vec![0] };
+        self.api
+            .send(Method::PUT, &format!("/projects/{}/issues/{iid}", enc(&repo.path)), &json!({ "assignee_ids": ids }))
+            .await
+            .map(|_| ())
     }
 
     pub async fn issue(&self, repo: &RepoId, iid: u64) -> Result<super::IssueInfo> {

@@ -409,6 +409,27 @@ pub struct Listed {
     pub labels: Vec<String>,
     /// A draft PR/MR (never set for issues).
     pub draft: bool,
+    /// Logins it's assigned to.
+    pub assignees: Vec<String>,
+    pub milestone: Option<Milestone>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Milestone {
+    pub title: String,
+    /// Due date, `YYYY-MM-DD…` (GitHub and Gitea send a timestamp, GitLab a date).
+    pub due: Option<String>,
+}
+
+/// `milestone = "@current"`: of the milestones on `items`, the one due soonest from today on.
+pub fn current_milestone(items: &[Listed], today: &str) -> Option<String> {
+    items
+        .iter()
+        .filter_map(|i| i.milestone.as_ref())
+        .filter_map(|m| Some((m.due.as_deref()?.get(..10)?, &m.title)))
+        .filter(|(due, _)| *due >= today)
+        .min()
+        .map(|(_, t)| t.clone())
 }
 
 /// Which listed items a sweep takes: all set conditions must hold.
@@ -420,6 +441,10 @@ pub struct Pick {
     pub created_after: Option<jiff::Timestamp>,
     /// Leave out this author's items (your own PRs are already watched).
     pub skip_author: Option<String>,
+    /// Only items nobody is assigned to.
+    pub unassigned: bool,
+    /// Only items in this milestone (title, case-insensitive).
+    pub milestone: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -432,6 +457,8 @@ pub fn pick(mut items: Vec<Listed>, p: &Pick) -> Vec<Listed> {
             && p.skip_author.as_ref().is_none_or(|a| !i.author.eq_ignore_ascii_case(a))
             && p.created_before.is_none_or(|t| at(i).is_some_and(|c| c < t))
             && p.created_after.is_none_or(|t| at(i).is_some_and(|c| c > t))
+            && (!p.unassigned || i.assignees.is_empty())
+            && p.milestone.as_ref().is_none_or(|m| i.milestone.as_ref().is_some_and(|x| x.title.eq_ignore_ascii_case(m)))
     });
     items.sort_by(|a, b| at(a).cmp(&at(b)).then(a.number.cmp(&b.number)));
     items.truncate(p.limit.unwrap_or(usize::MAX));
@@ -566,6 +593,15 @@ impl Forge {
     }
 
     /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
+    /// Assign the token's user to an issue (`on`), or take them off it.
+    pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
+        each!(self, g => g.assign(repo, n, on).await)
+    }
+
+    pub async fn comment(&self, repo: &RepoId, n: u64, body: &str) -> Result<()> {
+        each!(self, g => g.reply(repo, Target::Issue, n, None, body).await)
+    }
+
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
         each!(self, g => g.open_items(repo, target).await)
     }
@@ -795,6 +831,22 @@ mod tests {
         assert_eq!(Role::from_gitlab(40), Role::Maintainer);
         assert_eq!(Role::from_gitlab(30), Role::Collaborator);
         assert!(Role::Owner > Role::Contributor);
+    }
+
+    #[test]
+    fn current_milestone_is_the_next_one_due() {
+        let it = |title: &str, due: Option<&str>| Listed {
+            milestone: Some(Milestone { title: title.into(), due: due.map(Into::into) }),
+            ..Default::default()
+        };
+        let items =
+            [it("old", Some("2026-01-01T00:00:00Z")), it("next", Some("2026-12-01")), it("later", Some("2027-01-01")), it("none", None)];
+        assert_eq!(current_milestone(&items, "2026-11-16").as_deref(), Some("next"));
+        assert_eq!(current_milestone(&items, "2028-01-01"), None);
+        let p = Pick { milestone: Some("NEXT".into()), unassigned: true, ..Default::default() };
+        let mut taken = it("next", None);
+        taken.assignees = vec!["bob".into()];
+        assert_eq!(pick(vec![items[1].clone(), taken, items[2].clone()], &p).len(), 1);
     }
 
     #[test]

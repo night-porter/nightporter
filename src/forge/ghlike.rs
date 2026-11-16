@@ -89,6 +89,16 @@ pub(super) struct ListItem {
     /// GitHub lists PRs among issues, marked with this.
     #[serde(default)]
     pub pull_request: Option<Value>,
+    #[serde(default)]
+    assignees: Option<Vec<Login>>,
+    #[serde(default)]
+    milestone: Option<MilestoneJson>,
+}
+#[derive(Deserialize)]
+struct MilestoneJson {
+    title: String,
+    #[serde(default)]
+    due_on: Option<String>,
 }
 #[derive(Deserialize)]
 pub(super) struct Name {
@@ -107,6 +117,8 @@ impl ListItem {
             author: self.user.login,
             created_at: self.created_at,
             labels: self.labels.into_iter().map(|l| l.name).collect(),
+            assignees: self.assignees.unwrap_or_default().into_iter().map(|l| l.login).collect(),
+            milestone: self.milestone.map(|m| super::Milestone { title: m.title, due: m.due_on }),
         }
     }
 }

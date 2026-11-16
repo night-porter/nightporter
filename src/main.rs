@@ -94,6 +94,12 @@ enum Cmd {
         /// Only items with this label (repeat for several; all must match).
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Only items nobody is assigned to.
+        #[arg(long)]
+        unassigned: bool,
+        /// Only items in this milestone; `@current` is the open one due soonest.
+        #[arg(long)]
+        milestone: Option<String>,
         /// Only items opened more than this long ago (e.g. 90d).
         #[arg(long)]
         older_than: Option<String>,
@@ -538,7 +544,7 @@ async fn cmd_rescan(paths: &Paths, repo: &str, since: &str, out: &mut dyn Write)
 }
 
 async fn cmd_sweep(paths: &Paths, cmd: Cmd) -> Result<()> {
-    let Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run } = cmd else { unreachable!() };
+    let Cmd::Sweep { repo, prs, verb, labels, unassigned, milestone, older_than, newer_than, limit, dry_run } = cmd else { unreachable!() };
 
     let r = resolve_repo(paths, &repo)?;
     let target = if prs { forge::Target::Pr } else { forge::Target::Issue };
@@ -554,7 +560,15 @@ async fn cmd_sweep(paths: &Paths, cmd: Cmd) -> Result<()> {
         })
         .transpose()
     };
-    let pick = forge::Pick { labels, created_before: ago(older_than)?, created_after: ago(newer_than)?, skip_author: None, limit };
+    let pick = forge::Pick {
+        labels,
+        created_before: ago(older_than)?,
+        created_after: ago(newer_than)?,
+        skip_author: None,
+        unassigned,
+        milestone,
+        limit,
+    };
 
     let ctx = daemon::offline_ctx(paths, config::Config::load(paths)?).await?;
     let rep = sweep::run(&ctx, &r, target, verb, pick, dry_run).await?;
@@ -1057,7 +1071,7 @@ mod tests {
             "5",
             "--dry-run",
         ]);
-        let Some(super::Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run }) = c.cmd else {
+        let Some(super::Cmd::Sweep { repo, prs, verb, labels, older_than, newer_than, limit, dry_run, .. }) = c.cmd else {
             panic!("not sweep")
         };
         assert_eq!(

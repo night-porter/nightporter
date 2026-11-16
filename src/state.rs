@@ -752,6 +752,12 @@ impl Db {
         Ok(out)
     }
 
+    /// The newest job on a PR or issue.
+    pub fn latest_job(&self, repo: &RepoId, number: u64) -> Result<Option<Job>> {
+        let mut st = self.0.prepare(&format!("{JOB_LIST} WHERE repo=?1 AND number=?2 ORDER BY id DESC LIMIT 1"))?;
+        Ok(st.query_row(params![repo.key(), number.cast_signed()], row_job).optional()?)
+    }
+
     pub fn job_log(&self, job: i64) -> Result<Vec<(i64, String)>> {
         let mut st = self.0.prepare("SELECT ts, line FROM job_log WHERE job_id=?1 ORDER BY rowid")?;
         let rows = st.query_map([job], |r| Ok((r.get(0)?, r.get(1)?)))?;

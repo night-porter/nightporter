@@ -358,6 +358,30 @@ ready one by someone else in the inbox. Drafts wait until they're marked ready. 
 fills the inbox with its open PRs without notifying you; after that each new one notifies.
 `a` (allow always) trusts the PR's author on the repo, as for any inbox item.
 
+### Pick up the sprint
+
+Give Night Porter its own share of the sprint: it claims unassigned issues that match, assigns
+them to you (the token's user), says so in a comment, and works on them, a few at a time.
+
+```toml
+# repos/github/acme/api.toml
+[maintainer]
+enabled = true
+
+[maintainer.pickup]
+milestone = "@current"   # or a title, e.g. "Sprint 42"; or use label = "sprint-42"
+verb = "fix"             # triage, reproduce or fix (opens a draft PR/MR)
+max_claimed = 2          # most issues held at once, so teammates still find work
+```
+
+Every `sweep_interval` it looks again. An issue that closes frees its slot. If a job fails or you
+reject or dismiss it, the issue is unassigned with a comment that it's free again, and it isn't
+claimed a second time. Issues assigned to anyone are never touched. Jobs follow the maintainer
+level (`draft` unless the repo [opts in](/autonomy#maintainer-mode)), and go through the same
+queue, schedule and caps as sweeps.
+
+On GitLab the token's user needs at least the Reporter role to assign issues.
+
 ### Work through the backlog
 
 `nightporter sweep` queues a maintainer job for each open issue in a repo (or each open PR/MR by
@@ -370,12 +394,15 @@ nightporter sweep project/token --older-than 90d             # triage everything
 nightporter sweep project/token --newer-than 14d --verb fix  # draft MRs for the last two weeks
 nightporter sweep project/token --label "Needs work" --label Bug --limit 20
 nightporter sweep project/token --prs                        # review open MRs from others
+nightporter sweep project/token --milestone @current --unassigned --verb fix
 ```
 
 | flag | what it does |
 |---|---|
 | `--verb` | `triage` (default for issues), `reproduce`, `fix` (draft PR/MR per issue) or `review` (default with `--prs`) |
 | `--label` | only items with this label; repeat it and all must match |
+| `--milestone` | only items in this milestone; `@current` is the open one due soonest |
+| `--unassigned` | only items nobody is assigned to |
 | `--older-than`, `--newer-than` | only items opened more than / less than this long ago (`90d`, `14d`, `12h`) |
 | `--limit` | at most this many, oldest first |
 | `--dry-run` | list them, queue nothing (works before the repo is subscribed) |
