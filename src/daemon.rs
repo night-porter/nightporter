@@ -1,6 +1,6 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
-use crate::config::{Config, Level};
+use crate::config::Config;
 use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
@@ -544,12 +544,13 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
             ctx.db(|d| d.set_ci_attempts(&repo, n, tries + 1))?;
             ctx.db(|d| d.set_ci_failure(&repo, n, &failure))?;
         }
-        let level: Level = match mode {
-            Mode::MyPrs => s.level,
-            Mode::Maintainer => s.maintainer.level,
+        let kinds: Vec<_> = match verb {
+            Some(_) => crate::config::JobKind::of(verb, []).into_iter().collect(),
+            None => evs.iter().filter_map(|(e, _)| crate::config::JobKind::of(None, [e.trigger])).collect(),
         };
         // CI output is untrusted text: such jobs wait for you unless the repo opts in.
-        let level = if !s.ci_auto && evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure) { level.min(Level::Draft) } else { level };
+        let ci = evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure);
+        let level = s.level_for(matches!(mode, Mode::Maintainer), &kinds, ci);
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
@@ -659,6 +660,7 @@ pub fn test_ctx(paths: Paths, cfg: Config, clones: CloneMap) -> Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Level;
     use crate::forge::{Role, Target};
 
     fn setup(repo_toml: &str) -> (tempfile::TempDir, Ctx, RepoId) {
@@ -860,9 +862,11 @@ mod tests {
 
     #[tokio::test]
     async fn ci_failure_jobs_stop_at_draft_unless_opted_in() {
-        for (toml, want) in
-            [("subscribed = true\nlevel = \"auto\"", Level::Draft), ("subscribed = true\nlevel = \"auto\"\nci_auto = true", Level::Auto)]
-        {
+        for (toml, want) in [
+            ("subscribed = true\nlevel = \"auto\"", Level::Draft),
+            ("subscribed = true\nlevel = \"auto\"\nci_auto = true", Level::Auto),
+            ("subscribed = true\nlevels = { ci_failure = \"auto\" }", Level::Auto),
+        ] {
             let (_d, ctx, repo) = setup(toml);
             let cfg = ctx.cfg();
             intake(&ctx, &cfg, "me", ev(&repo, "1", "me", Role::Owner, Trigger::CiFailure)).await.unwrap();
