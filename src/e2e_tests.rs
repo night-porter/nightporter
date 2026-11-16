@@ -1102,6 +1102,35 @@ async fn pickup_claims_sprint_issues_up_to_the_limit_and_releases_failures() {
     assert_eq!(calls("POST", "/assignees").len(), 3, "a released issue isn't claimed again");
 }
 
+#[tokio::test]
+async fn new_issues_and_prs_are_triaged_and_reviewed_from_when_it_was_turned_on() {
+    let issues = r#"[{"number":30,"title":"old","user":{"login":"ann"},"created_at":"2020-01-01T00:00:00Z"},
+                     {"number":31,"title":"new","user":{"login":"ann"},"created_at":"2999-01-01T00:00:00Z"},
+                     {"number":32,"title":"mine","user":{"login":"me"},"created_at":"2999-01-01T00:00:00Z"}]"#;
+    let pulls = r#"[{"number":40,"title":"new","user":{"login":"dan"},"created_at":"2999-01-01T00:00:00Z"},
+                    {"number":41,"title":"draft","user":{"login":"dan"},"created_at":"2999-01-01T00:00:00Z","draft":true}]"#;
+    let w = world_with(
+        "[maintainer]\nenabled = true\ntriage_new = true\nreview_new = true",
+        vec![("GET", "/repos/o/r/issues", issues.into()), ("GET", "/repos/o/r/pulls", pulls.into())],
+    )
+    .await;
+    let (cfg, key) = (w.ctx.cfg(), (ForgeKind::GitHub, "github.com".to_string()));
+    crate::sweep::watch_new(&w.ctx, &cfg, &key).await.unwrap();
+    assert!(w.ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap().is_empty(), "the first look only sets the start");
+    crate::sweep::watch_new(&w.ctx, &cfg, &key).await.unwrap();
+    let pending = w.ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap();
+    let mut got: Vec<_> = pending.iter().map(|(e, _)| (e.number, e.verb)).collect();
+    got.sort_by_key(|(n, _)| *n);
+    assert_eq!(
+        got,
+        [(31, Some(crate::forge::Verb::Triage)), (40, Some(crate::forge::Verb::Review))],
+        "not the backlog, not yours, not drafts"
+    );
+    w.ctx.db(|d| d.del("watch-new:github:github.com/o/r")).unwrap();
+    crate::sweep::watch_new(&w.ctx, &cfg, &key).await.unwrap();
+    assert_eq!(w.ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap().len(), 2, "once each");
+}
+
 /// `deny_teams` must see every member: a GitLab group member on page two still counts, and the
 /// list is fetched once per hour, not per event.
 #[tokio::test]

@@ -18,6 +18,8 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 **It picks up its share of the sprint.** With `[maintainer.pickup]`, Night Porter claims unassigned issues in the current milestone (or with a sprint label), assigns them to you with a comment, and works on them, two at a time by default. If a job fails or you reject it, the issue is handed back. See [Pick up the sprint](/advanced#pick-up-the-sprint).
 
+**Projects and new arrivals.** Pickup also reads a GitHub Project's current iteration (`project = "acme/5"`, `iteration = "@current"`). `triage_new` and `review_new` triage every new issue and review every new PR from others, from the moment you turn them on. See [Triage and review what's new](/advanced#triage-and-review-what-s-new).
+
 **Doctor checks your token.** `nightporter doctor` now says which features your token's scopes don't cover, and how to add them.
 
 ## 0.5

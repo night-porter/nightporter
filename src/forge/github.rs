@@ -112,6 +112,29 @@ struct Label {
     name: String,
 }
 
+/// Issue numbers of `repo` on one page of Project items whose iteration is `iteration`
+/// (`@current`: started on or before `today` and not yet over).
+fn iteration_matches(page: &serde_json::Value, repo: &str, iteration: &str, today: &str) -> Vec<u64> {
+    let current = |it: &serde_json::Value| -> bool {
+        let (Some(start), Some(days)) = (it["startDate"].as_str(), it["duration"].as_i64()) else { return false };
+        let Ok(start) = start.parse::<jiff::civil::Date>() else { return false };
+        let Ok(today) = today.parse::<jiff::civil::Date>() else { return false };
+        start <= today && today < start.checked_add(jiff::Span::new().days(days)).unwrap_or(start)
+    };
+    page["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| n.pointer("/content/repository/nameWithOwner").and_then(|r| r.as_str()).is_some_and(|r| r.eq_ignore_ascii_case(repo)))
+        .filter(|n| {
+            n.pointer("/fieldValues/nodes").and_then(|v| v.as_array()).into_iter().flatten().any(|it| {
+                if iteration == "@current" { current(it) } else { it["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(iteration)) }
+            })
+        })
+        .filter_map(|n| n.pointer("/content/number").and_then(serde_json::Value::as_u64))
+        .collect()
+}
+
 /// What a branch's rulesets leave out of "checks must pass and someone else approves the latest
 /// push", or `None` if they require all of it.
 fn github_rules_gap(rules: &[serde_json::Value]) -> Option<String> {
@@ -496,6 +519,37 @@ impl GitHub {
         ghlike::pr(&self.api, repo, n).await
     }
 
+    /// See [`super::Forge::iteration_issues`]. Reads up to 20 pages of 100 items.
+    pub async fn iteration_issues(&self, repo: &RepoId, project: &str, iteration: &str, today: &str) -> Result<Vec<u64>> {
+        let (owner, number) = project.split_once('/').context("project is \"owner/number\"")?;
+        let number: u64 = number.parse().context("project is \"owner/number\"")?;
+        let gql = format!("{}/graphql", self.api.base.trim_end_matches("/v3"));
+        let mut out = Vec::new();
+        let mut after = serde_json::Value::Null;
+        for _ in 0..20 {
+            // An organization's project, else a user's.
+            let mut page = serde_json::Value::Null;
+            for kind in ["organization", "user"] {
+                let q = json!({
+                    "query": format!("query($o:String!,$n:Int!,$a:String){{ {kind}(login:$o){{ projectV2(number:$n){{ items(first:100,after:$a){{ pageInfo{{ hasNextPage endCursor }} nodes{{ content{{ ... on Issue{{ number repository{{ nameWithOwner }} }} }} fieldValues(first:20){{ nodes{{ ... on ProjectV2ItemFieldIterationValue{{ title startDate duration }} }} }} }} }} }} }} }}"),
+                    "variables": { "o": owner, "n": number, "a": after }
+                });
+                let v = self.api.send(Method::POST, &gql, &q).await?;
+                if let Some(items) = v.pointer(&format!("/data/{kind}/projectV2/items")).filter(|i| !i.is_null()) {
+                    page = items.clone();
+                    break;
+                }
+            }
+            anyhow::ensure!(!page.is_null(), "can't read project {project} (does the token have read:project?)");
+            out.extend(iteration_matches(&page, &repo.path, iteration, today));
+            if page.pointer("/pageInfo/hasNextPage") != Some(&json!(true)) {
+                break;
+            }
+            after = page.pointer("/pageInfo/endCursor").cloned().unwrap_or_default();
+        }
+        Ok(out)
+    }
+
     pub async fn assign(&self, repo: &RepoId, n: u64, on: bool) -> Result<()> {
         let m = if on { Method::POST } else { Method::DELETE };
         self.api.send(m, &format!("/repos/{}/issues/{n}/assignees", repo.path), &json!({ "assignees": [self.me] })).await.map(|_| ())
@@ -695,5 +749,23 @@ mod tests {
         admins_exempt["enforce_admins"]["enabled"] = false.into();
         assert!(super::github_protection_gap(&admins_exempt).unwrap().contains("admins"));
         assert!(super::github_protection_gap(&v("{}")).is_some());
+    }
+
+    #[test]
+    fn iteration_picks_this_repos_issues_in_the_running_iteration() {
+        let item = |n: u64, repo: &str, title: &str, start: &str| {
+            serde_json::json!({ "content": { "number": n, "repository": { "nameWithOwner": repo } },
+                "fieldValues": { "nodes": [ {}, { "title": title, "startDate": start, "duration": 14 } ] } })
+        };
+        let page = serde_json::json!({ "nodes": [
+            item(1, "o/r", "Sprint 41", "2026-11-02"),
+            item(2, "o/r", "Sprint 42", "2026-11-16"),
+            item(3, "o/other", "Sprint 42", "2026-11-16"),
+            item(4, "O/R", "Sprint 42", "2026-11-16"),
+            { "content": {}, "fieldValues": { "nodes": [] } },
+        ]});
+        assert_eq!(super::iteration_matches(&page, "o/r", "@current", "2026-11-16"), [2, 4]);
+        assert_eq!(super::iteration_matches(&page, "o/r", "@current", "2026-11-15"), [1], "the last day of 41");
+        assert_eq!(super::iteration_matches(&page, "o/r", "sprint 41", "2026-12-25"), [1]);
     }
 }

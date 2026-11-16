@@ -261,6 +261,9 @@ pub(crate) async fn poll(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<u64> {
         }
     }
     ctx.db(|d| d.set_json(&ckey, &cursor))?;
+    if let Err(e) = crate::sweep::watch_new(ctx, &cfg, key).await {
+        tracing::warn!("watch new {}: {e:#}", key.1);
+    }
     if let Err(e) = crate::sweep::watch_prs(ctx, &cfg, key).await {
         tracing::warn!("watch prs {}: {e:#}", key.1);
     }

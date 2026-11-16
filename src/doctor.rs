@@ -120,6 +120,7 @@ const GITHUB: &[Need] = &[
     Need { feature: "PRs, issues, comments, pushes", any_of: &["repo"], required: true },
     Need { feature: "notifications (new activity)", any_of: &["notifications", "repo"], required: true },
     Need { feature: "team trust (trust.allow_teams)", any_of: &["read:org", "write:org", "admin:org"], required: false },
+    Need { feature: "sprint pickup from a Project iteration", any_of: &["read:project", "project"], required: false },
 ];
 
 const GITLAB: &[Need] = &[Need { feature: "MRs, issues, comments, pushes", any_of: &["api"], required: true }];
@@ -371,11 +372,11 @@ mod tests {
         use TokenSource::{Cli, Keyring};
         let v = |xs: &[&str]| xs.iter().map(ToString::to_string).collect::<Vec<_>>();
         let gh = |xs: &[&str]| scope_checks(ForgeKind::GitHub, "github.com", Cli, Some(&v(xs)));
-        let all = gh(&["repo", "read:org"]);
+        let all = gh(&["repo", "read:org", "project"]);
         assert!(all.len() == 1 && all[0].ok, "every feature covered");
-        let no_org = gh(&["repo"]);
+        let no_org = gh(&["repo", "read:project"]);
         assert!(no_org.len() == 1 && !no_org[0].ok && no_org[0].optional && no_org[0].fix.contains("--scopes read:org"));
-        assert!(gh(&["admin:org", "repo"])[0].ok, "a broader scope counts");
+        assert!(gh(&["admin:org", "repo", "project"])[0].ok, "a broader scope counts");
         let bare = gh(&["gist"]);
         assert!(bare.iter().filter(|c| !c.optional).count() == 2, "core and notifications fail");
         let unknown = scope_checks(ForgeKind::GitHub, "github.com", Cli, None);

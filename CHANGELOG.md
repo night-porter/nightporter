@@ -16,6 +16,8 @@ All notable changes to Night Porter. The format follows
 - `nightporter doctor` checks each account's token scopes and names the features a missing scope turns off, with the command to add it. The new [Autonomy and permissions](docs/autonomy.md) page has levels, caps and scopes in one place.
 - `[maintainer.pickup]` claims unassigned issues of the current sprint (`label`, or `milestone`, `"@current"` = the open one due soonest), assigns them to you with a comment, and works on them, at most `max_claimed` (2) at a time. A failed, rejected or dismissed job unassigns the issue again and it isn't claimed twice. `sweep` gets `--milestone` and `--unassigned`.
 - `level = "merge"` (also per kind in `levels`): `auto`, then the forge's own auto-merge is turned on for the PR, but only where the target branch's rules, readable with your token, require passing checks, an approval, and a new approval after the latest push. Otherwise the job stays at `auto` and its log says why. Issue fixes at `merge` open their PR ready for review. See [Merge](docs/autonomy.md#merge).
+- Sprint pickup from a GitHub Project: `project = "owner/number"`, `iteration = "@current"` (or a title). `doctor` checks for `read:project`.
+- `maintainer.triage_new` and `maintainer.review_new` (off by default): triage every new issue and review every new ready PR/MR by others, from when they're turned on.
 - `maintainer.levels` (per verb: `triage`, `fix`, …) and `maintainer.allow_above_draft` (in a repo's own file only) let maintainer jobs on that repo go above `draft`.
 
 ### Changed

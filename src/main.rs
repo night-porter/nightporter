@@ -567,6 +567,7 @@ async fn cmd_sweep(paths: &Paths, cmd: Cmd) -> Result<()> {
         skip_author: None,
         unassigned,
         milestone,
+        numbers: None,
         limit,
     };
 

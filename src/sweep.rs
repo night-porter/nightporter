@@ -140,6 +140,10 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
     }
     let mut pick = Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
     resolve_milestone(&mut pick, &items)?;
+    if let (Some(project), Some(iteration)) = (&p.project, &p.iteration) {
+        let today = jiff::Zoned::now().date().to_string();
+        pick.numbers = Some(forge.iteration_issues(repo, project, iteration, &today).await?);
+    }
     let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
     // Not ones it holds or handed back, even if the list hasn't caught up with the assignment.
     let free =
@@ -216,6 +220,47 @@ fn event(repo: &RepoId, target: Target, verb: Verb, number: u64, author: &str) -
         created_at: crate::forge::now_iso(),
         verb: Some(verb),
     }
+}
+
+/// `[maintainer] triage_new` / `review_new`: every `sweep_interval`, queue a triage of each issue
+/// and a review of each ready PR/MR by someone else opened since the setting was first seen (the
+/// backlog before that is left alone: `nightporter sweep` is for that). Stable ids: once each.
+/// Runs before `watch_prs`, so a PR reviewed here isn't also put in the inbox.
+pub async fn watch_new(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge::ForgeKind, String)) -> Result<()> {
+    for (repo, s) in ctx.subscribed(cfg) {
+        let m = &s.maintainer;
+        if repo.forge != key.0 || repo.host != key.1 || !m.enabled || !(m.triage_new || m.review_new) {
+            continue;
+        }
+        let since_key = format!("new-since:{}", repo.key());
+        let Some(since) = ctx.db(|d| d.get(&since_key))?.and_then(|v| v.parse::<jiff::Timestamp>().ok()) else {
+            ctx.db(|d| d.set(&since_key, &jiff::Timestamp::now().to_string()))?;
+            continue;
+        };
+        let kv = format!("watch-new:{}", repo.key());
+        let last: Option<i64> = ctx.db(|d| d.get(&kv))?.and_then(|v| v.parse().ok());
+        if last.is_some_and(|t| crate::state::now() - t < i64::try_from(cfg.sweep_interval.as_secs()).unwrap_or(i64::MAX)) {
+            continue;
+        }
+        let forge = ctx.forge(&repo)?.lock().await;
+        let me = forge.me().to_string();
+        let mut queued = 0;
+        for (on, target, verb) in [(m.triage_new, Target::Issue, Verb::Triage), (m.review_new, Target::Pr, Verb::Review)] {
+            if !on {
+                continue;
+            }
+            let pick = Pick { created_after: Some(since), skip_author: Some(me.clone()), ..Pick::default() };
+            let items: Vec<Listed> =
+                crate::forge::pick(forge.open_items(&repo, target).await?, &pick).into_iter().filter(|i| !i.draft).collect();
+            queued += queue(ctx, &repo, target, verb, &me, &items)?;
+        }
+        drop(forge);
+        ctx.db(|d| d.set(&kv, &crate::state::now().to_string()))?;
+        if queued > 0 {
+            tracing::info!("{repo}: queued {queued} new issue(s)/PR(s)");
+        }
+    }
+    Ok(())
 }
 
 /// `[maintainer] watch_prs`: every `sweep_interval`, put each ready PR/MR by someone else in the
