@@ -170,8 +170,17 @@ impl JobStatus {
         if self == JobStatus::Dismissed {
             a.push("restore");
         }
+        if !self.is_active() {
+            a.push("retry"); // a job waiting for you is rejected first
+        }
+        if !matches!(self, JobStatus::Running | JobStatus::Approved) {
+            a.push("run");
+        }
+        if self.is_active() {
+            a.push("cancel");
+        }
         if !self.is_active() && !self.needs_user() {
-            a.extend(["retry", "purge"]);
+            a.push("purge");
         }
         a
     }
@@ -297,6 +306,15 @@ pub struct JobMeta {
     pub took_over: bool,
     #[serde(default)]
     pub retried: bool,
+    /// `nightporter run`: goes before other queued jobs, past the repo's own concurrency.
+    #[serde(default)]
+    pub front: bool,
+    /// A retry that rebuilds an issue's branch from the base instead of continuing it.
+    #[serde(default)]
+    pub fresh: bool,
+    /// For a `fresh` rebuild: the branch head it replaces, so the force-push only overwrites that.
+    #[serde(default)]
+    pub lease: String,
     /// `plan_first`: the plan, written by the agent and maybe edited by you. While `planning`, the
     /// job waits for you to approve it; after that, the build follows it.
     #[serde(default)]
@@ -696,6 +714,20 @@ impl Db {
         Ok(())
     }
 
+    /// Read and delete every `kv` entry whose key starts with `prefix`: (rest of key, value).
+    pub fn take_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let like = format!("{prefix}%");
+        let mut st = self.0.prepare("SELECT k, v FROM kv WHERE k LIKE ?1")?;
+        let rows: Vec<(String, String)> = st.query_map([&like], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        self.0.execute("DELETE FROM kv WHERE k LIKE ?1", [&like])?;
+        Ok(rows.into_iter().map(|(k, v)| (k[prefix.len()..].to_string(), v)).collect())
+    }
+
+    pub fn del(&self, k: &str) -> Result<()> {
+        self.0.execute("DELETE FROM kv WHERE k=?1", [k])?;
+        Ok(())
+    }
+
     /// What a running job is doing now, and since when. Kept in `kv` so no migration is needed.
     pub fn set_stage(&self, job: i64, stage: &str) -> Result<()> {
         self.set(&format!("stage:{job}"), &format!("{}\t{stage}", now()))
@@ -891,9 +923,10 @@ pub(crate) mod tests {
         }
         assert!(!Running.can_become(Rejected));
         assert!(!AwaitingApproval.can_become(Done) && !AwaitingRunApproval.can_become(Running));
-        assert_eq!(Ready.actions(), ["approve", "reject", "dismiss"]);
-        assert_eq!(Running.actions(), Vec::<&str>::new());
-        assert_eq!(Dismissed.actions(), ["restore", "retry", "purge"]);
+        assert_eq!(Ready.actions(), ["approve", "reject", "dismiss", "retry", "run"]);
+        assert_eq!(Running.actions(), ["cancel"]);
+        assert_eq!(Queued.actions(), ["reject", "run", "cancel"]);
+        assert_eq!(Dismissed.actions(), ["restore", "retry", "run", "purge"]);
     }
 
     #[test]

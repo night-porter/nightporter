@@ -330,8 +330,13 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             // A request on someone else's issue: their text shaped the job.
             j.meta.untrusted_input |= verb.is_some() && !i.author.eq_ignore_ascii_case(&me);
             issue = Some(i);
-            // A later request on the same issue continues the branch from earlier work.
-            let continue_branch = git::remote_head(&clone, &repo_url, &branch).await?.is_some();
+            // A later request on the same issue continues the branch from earlier work; a fresh
+            // retry rebuilds it from the base and force-pushes over exactly the head seen here.
+            let remote = git::remote_head(&clone, &repo_url, &branch).await?;
+            if j.meta.fresh {
+                j.meta.lease = remote.clone().unwrap_or_default();
+            }
+            let continue_branch = remote.is_some() && !j.meta.fresh;
             // Reproducing can mean running the reporter's snippet through allowed commands.
             j.meta.untrusted_code =
                 verb == Some(Verb::Reproduce) && (s.env.install || !s.env.setup.is_empty() || !s.allow_commands.is_empty());
@@ -692,7 +697,9 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         let remote = git::remote_head(&clone, &j.meta.push_url, &j.meta.push_ref).await?;
         let fresh_branch = j.target == Target::Issue && remote.is_none();
         let already = remote.as_deref() == Some(j.head_after.as_str());
-        if !already && !fresh_branch && remote.as_deref() != Some(j.head_before.as_str()) {
+        let lease = (!j.meta.lease.is_empty()).then_some(j.meta.lease.as_str());
+        let replaces = lease.is_some() && remote.as_deref() == lease;
+        if !already && !fresh_branch && !replaces && remote.as_deref() != Some(j.head_before.as_str()) {
             // Someone pushed in the meantime: redo the work on the new head.
             ctx.db(|d| d.requeue_events(id))?;
             j.status = JobStatus::Failed;
@@ -706,7 +713,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         } else {
             log(ctx, id, &format!("pushing {} to {}", crate::git::short(&j.head_after), j.meta.push_ref));
             // Other push failures (protected branch, auth) are real failures, not a retry loop.
-            git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref).await?;
+            git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref, lease.filter(|_| replaces)).await?;
         }
     }
 

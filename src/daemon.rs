@@ -21,6 +21,8 @@ pub struct Ctx {
     clones: RwLock<Arc<CloneMap>>,
     /// Jobs with a task in flight, and their repo (for per-repo limits).
     running: Mutex<HashMap<i64, RepoId>>,
+    /// The tasks of running jobs, for `nightporter cancel`.
+    tasks: Mutex<HashMap<i64, tokio::task::AbortHandle>>,
     /// Last time a recurring warning was logged, so the 5s loop doesn't spam.
     warned: Mutex<HashMap<String, i64>>,
 }
@@ -130,6 +132,7 @@ pub async fn run(paths: Paths) -> Result<()> {
         forges,
         clones: RwLock::new(Arc::new(clones)),
         running: Mutex::new(HashMap::new()),
+        tasks: Mutex::new(HashMap::new()),
         warned: Mutex::new(HashMap::new()),
     });
 
@@ -164,6 +167,9 @@ pub async fn run(paths: Paths) -> Result<()> {
                 }
             };
             next_poll.insert(key.clone(), Instant::now() + wait);
+        }
+        if let Err(e) = cancel_jobs(&ctx) {
+            tracing::error!("cancel: {e:#}");
         }
         if let Err(e) = dispatch(&ctx) {
             tracing::error!("dispatch: {e:#}");
@@ -409,25 +415,66 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     Ok(())
 }
 
-/// Batch pending events into jobs: debounce, schedule, one job per PR, caps.
-pub fn dispatch(ctx: &Ctx) -> Result<()> {
-    if ctx.db(|d| Ok(crate::actions::paused(d)))? {
-        return Ok(());
+/// Stop the jobs `nightporter cancel` asked for: abort their task (which kills the agent's
+/// process group) and mark them failed.
+fn cancel_jobs(ctx: &Ctx) -> Result<()> {
+    for (id, _) in ctx.db(|d| d.take_prefixed("cancel:"))? {
+        let Ok(id) = id.parse::<i64>() else { continue };
+        if let Some(t) = ctx.tasks.lock().unwrap().remove(&id) {
+            t.abort();
+        }
+        ctx.running.lock().unwrap().remove(&id);
+        if ctx.db(|d| d.fail(id, "cancelled"))? {
+            ctx.db(|d| d.log(id, "cancelled"))?;
+            tracing::info!("job {id}: cancelled");
+        }
     }
-    let cfg = ctx.cfg();
-    let pending = ctx.db(|d| d.events_with(Disposition::Pending))?;
+    Ok(())
+}
+
+/// A PR's or issue's events.
+type Group = ((RepoId, u64), Vec<(Event, i64)>, String);
+
+/// Pending events per PR or issue, with the retry flags set for it, in the order to dispatch:
+/// started by hand first, then your own PRs; backlog sweeps take what's left, and never the last
+/// quarter of the daily cap, so a few hundred queued issues can't crowd out tonight's review comments.
+fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
     let mut groups: BTreeMap<(RepoId, u64), Vec<(Event, i64)>> = BTreeMap::new();
-    for (e, seen) in pending {
+    for (e, seen) in ctx.db(|d| d.events_with(Disposition::Pending))? {
         groups.entry((e.repo.clone(), e.number)).or_default().push((e, seen));
     }
+    let mut groups: Vec<Group> = groups
+        .into_iter()
+        .map(|((repo, n), evs)| {
+            let flags = ctx.db(|d| d.get(&crate::actions::retry_key(&repo, n))).ok().flatten().unwrap_or_default();
+            ((repo, n), evs, flags)
+        })
+        .collect();
+    groups.sort_by_key(|(_, evs, flags)| (!flags.contains("now"), evs.iter().all(|(e, _)| crate::sweep::is_sweep(e))));
+    Ok(groups)
+}
+
+/// Batch pending events into jobs: debounce, schedule, one job per PR, caps. A retry with
+/// `now` (`nightporter run`) skips pause, schedule, debounce and caps; a burst skips the
+/// schedule and caps.
+pub fn dispatch(ctx: &Ctx) -> Result<()> {
+    let paused = ctx.db(|d| Ok(crate::actions::paused(d)))?;
+    let burst = ctx.db(|d| Ok(crate::actions::burst(d)))?;
+    let cfg = ctx.cfg();
+    let groups = pending_groups(ctx)?;
     let now = crate::state::now();
     let tz_now = jiff::Zoned::now();
-    // Your own PRs first; backlog sweeps take what's left, and never the last quarter of the
-    // daily cap, so a few hundred queued issues can't crowd out tonight's review comments.
-    let mut groups: Vec<_> = groups.into_iter().collect();
-    groups.sort_by_key(|(_, evs)| evs.iter().all(|(e, _)| crate::sweep::is_sweep(e)));
     let sweep_cap = cfg.daily_job_cap - cfg.daily_job_cap / 4;
-    for ((repo, n), evs) in groups {
+    // A burst lifts the daily cap until it has started its own `jobs` (if set).
+    let burst_open = match burst {
+        Some(b) => b.jobs.is_none_or(|max| ctx.db(|d| d.jobs_since(b.since)).is_ok_and(|n| n < max)),
+        None => false,
+    };
+    for ((repo, n), evs, flags) in groups {
+        let now_ = flags.contains("now");
+        if paused && !now_ {
+            return Ok(()); // sorted: nothing started by hand is left
+        }
         let s = match cfg.settings_for(&ctx.paths, &repo) {
             Ok(s) => s,
             Err(e) => {
@@ -435,22 +482,23 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
                 continue;
             }
         };
-        if !schedule::is_active(&s.schedule, &tz_now).unwrap_or(true) {
+        if !now_ && !burst_open && !schedule::is_active(&s.schedule, &tz_now).unwrap_or(true) {
             continue;
         }
         let last = evs.iter().map(|(_, t)| *t).max().unwrap_or(now);
-        if now - last < i64::try_from(s.debounce.as_secs()).unwrap_or(i64::MAX) {
+        if !now_ && now - last < i64::try_from(s.debounce.as_secs()).unwrap_or(i64::MAX) {
             continue;
         }
         if ctx.db(|d| d.pr_busy(&repo, n))? {
             continue;
         }
         let today = ctx.db(|d| d.jobs_since(now - 86400))?;
-        if today >= cfg.daily_job_cap {
+        if now_ || burst_open {
+            // Started by hand, or a burst: no daily cap, no sweep reserve.
+        } else if today >= cfg.daily_job_cap {
             ctx.warn_every("cap", 3600, &format!("daily job cap ({}) reached; waiting", cfg.daily_job_cap));
             return Ok(());
-        }
-        if today >= sweep_cap && evs.iter().all(|(e, _)| crate::sweep::is_sweep(e)) {
+        } else if today >= sweep_cap && evs.iter().all(|(e, _)| crate::sweep::is_sweep(e)) {
             ctx.warn_every("sweep-cap", 3600, &format!("sweep jobs paused for today ({today} of {} jobs used)", cfg.daily_job_cap));
             return Ok(()); // sorted: only sweep groups are left
         }
@@ -502,7 +550,11 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let target = evs[0].0.target;
         let mode_s = crate::state::enum_str(&mode);
         let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
-        ctx.db(|d| d.set_meta(id, &JobMeta { verb, ..Default::default() }))?;
+        let meta = JobMeta { verb, front: now_, fresh: flags.contains("fresh"), ..Default::default() };
+        ctx.db(|d| d.set_meta(id, &meta))?;
+        if !flags.is_empty() {
+            ctx.db(|d| d.del(&crate::actions::retry_key(&repo, n)))?;
+        }
         tracing::info!("job {id}: {repo}#{n} ({} event(s), {})", ids.len(), level.as_str());
     }
     Ok(())
@@ -511,11 +563,14 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
 /// Start queued and approved jobs within concurrency limits.
 fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
     let cfg = ctx.cfg();
-    let queued = ctx.db(|d| d.jobs_with(JobStatus::Queued))?;
+    let mut queued = ctx.db(|d| d.jobs_with(JobStatus::Queued))?;
+    queued.sort_by_key(|j| !j.meta.front); // stable: `nightporter run` first, then oldest
     let approved = ctx.db(|d| d.jobs_with(JobStatus::Approved))?;
+    let burst = ctx.db(|d| Ok(crate::actions::burst(d)))?;
+    let max = burst.map_or(cfg.max_concurrent_jobs, |b| b.concurrency.unwrap_or(cfg.max_concurrent_jobs * 2));
     for j in approved.into_iter().chain(queued) {
         let running = ctx.running.lock().unwrap().len();
-        if running >= cfg.max_concurrent_jobs {
+        if running >= max {
             break;
         }
         if ctx.running.lock().unwrap().contains_key(&j.id) {
@@ -529,7 +584,8 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
             }
         };
         let same_repo = ctx.running.lock().unwrap().values().filter(|r| **r == j.repo).count();
-        if j.status == JobStatus::Queued && same_repo >= s.concurrency() {
+        let repo_max = if burst.is_some() { s.concurrency() * 2 } else { s.concurrency() };
+        if j.status == JobStatus::Queued && !j.meta.front && same_repo >= repo_max {
             continue;
         }
         if j.status == JobStatus::Queued {
@@ -541,7 +597,8 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
         }
         ctx.running.lock().unwrap().insert(j.id, j.repo.clone());
         let c = ctx.clone();
-        tokio::spawn(async move {
+        let job_id = j.id;
+        let task = tokio::spawn(async move {
             let id = j.id;
             let res = if j.status == JobStatus::Approved { job::deliver(&c, id).await } else { job::run(&c, id).await };
             if let Err(e) = res {
@@ -550,7 +607,9 @@ fn start_jobs(ctx: &Arc<Ctx>) -> Result<()> {
                 job::note(&c, &j, Kind::Failed, &format!("job {id} failed: {e:#}"));
             }
             c.running.lock().unwrap().remove(&id);
+            c.tasks.lock().unwrap().remove(&id);
         });
+        ctx.tasks.lock().unwrap().insert(job_id, task.abort_handle());
     }
     Ok(())
 }
@@ -569,6 +628,7 @@ pub async fn offline_ctx(paths: &Paths, cfg: Config) -> Result<Ctx> {
         forges,
         clones: RwLock::new(Arc::new(clones)),
         running: Mutex::new(HashMap::new()),
+        tasks: Mutex::new(HashMap::new()),
         warned: Mutex::new(HashMap::new()),
     })
 }
@@ -582,6 +642,7 @@ pub fn test_ctx(paths: Paths, cfg: Config, clones: CloneMap) -> Ctx {
         forges: HashMap::new(),
         clones: RwLock::new(Arc::new(clones)),
         running: Mutex::new(HashMap::new()),
+        tasks: Mutex::new(HashMap::new()),
         warned: Mutex::new(HashMap::new()),
     }
 }
@@ -708,6 +769,32 @@ mod tests {
         // Green resets it.
         ctx.db(|d| d.set_ci_attempts(&repo, 7, 0)).unwrap();
         assert!(run(ci("4", 4, "assert 3 == 4")).await);
+    }
+
+    #[tokio::test]
+    async fn retry_now_skips_pause_and_goes_first_and_cancel_fails_it() {
+        let (_d, ctx, repo) = setup("subscribed = true");
+        let cfg = ctx.cfg();
+        intake(&ctx, &cfg, "me", ev(&repo, "1", "alice", Role::Member, Trigger::Comment)).await.unwrap();
+        dispatch(&ctx).unwrap();
+        let first = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap()[0].id;
+        ctx.db(|d| d.set_status(first, JobStatus::Done)).unwrap();
+        ctx.db(|d| crate::actions::set_paused(d, true)).unwrap();
+        ctx.db(|d| crate::actions::retry(d, first, crate::actions::RetryOpts::default())).unwrap();
+        dispatch(&ctx).unwrap();
+        assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty(), "a plain retry waits while paused");
+        ctx.db(|d| d.set_status(first, JobStatus::Done)).unwrap();
+        ctx.db(|d| crate::actions::run_now(d, first)).unwrap();
+        dispatch(&ctx).unwrap();
+        let q = ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap();
+        assert_eq!(q.len(), 1, "run now starts past pause");
+        assert!(q[0].meta.front && q[0].meta.fresh);
+        assert_eq!(ctx.db(|d| d.get(&crate::actions::retry_key(&repo, 1))).unwrap(), None, "the flags are used once");
+        ctx.db(|d| d.set_status(q[0].id, JobStatus::Running)).unwrap();
+        ctx.db(|d| crate::actions::cancel(d, q[0].id)).unwrap();
+        cancel_jobs(&ctx).unwrap();
+        let j = ctx.db(|d| d.job(q[0].id)).unwrap().unwrap();
+        assert_eq!((j.status, j.error.as_str()), (JobStatus::Failed, "cancelled"));
     }
 
     #[tokio::test]

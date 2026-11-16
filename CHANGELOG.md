@@ -9,6 +9,13 @@ All notable changes to Night Porter. The format follows
 ### Added
 
 - The Queue shows what each running job is doing: a spinner, the stage (`worktree`, `gate`, `env`, `plan`, `fix`, `checks`, `push`, …) and how long it has been in it, e.g. `⠹ checks 4m12s`.
+- `nightporter run <id>` (TUI `f`) runs a job now: a queued job goes next, past its repo's concurrency; any other is retried and starts past pause, schedule windows, the daily cap and debounce. The one-job-per-PR rule, the disk check and `max_concurrent_jobs` still hold.
+- `nightporter cancel <id>` (TUI `K`) stops a running job, killing the agent's whole process group, and marks it failed.
+- `nightporter burst <duration> [--jobs N] [--concurrency N]` gives more capacity for a while: no daily cap or sweep reserve, schedule windows ignored, twice the jobs at once (overall and per repo). The TUI header counts it down; `burst off` ends it.
+
+### Changed
+
+- `retry` (TUI `t`, `/nightporter retry`) also takes a job waiting for you, rejecting it first. An issue job's branch is now rebuilt from the base and force-pushed over the last run's (only if nobody pushed since); `--keep` continues it as before. `--now` starts it like `run`.
 
 ## [0.5.0] - 2026-11-13
 

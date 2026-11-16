@@ -403,9 +403,10 @@ async fn run_unguarded(kind: AgentKind, s: &RepoSettings, wt: &Path, job_dir: &P
             let _ = stdin.write_all(p.as_bytes()).await;
         });
     }
-    let pid = child.id();
+    // Kills the agent's whole process group however this ends, also when the job is cancelled
+    // (its task aborted while waiting here).
+    let _group = Group(child.id());
     let res = tokio::time::timeout(s.timeout, child.wait_with_output()).await;
-    kill_group(pid);
     let out = match res {
         Ok(r) => r?,
         Err(_) => bail!("agent timed out after {}", crate::config::format_duration(s.timeout)),
@@ -535,6 +536,14 @@ fn gemini_args(policy: &Path) -> Vec<String> {
     .to_vec();
     a.push(policy.to_string_lossy().into());
     a
+}
+
+/// The agent's process group, killed when dropped.
+struct Group(Option<u32>);
+impl Drop for Group {
+    fn drop(&mut self) {
+        kill_group(self.0);
+    }
 }
 
 /// Kill whatever is left in the agent's process group.

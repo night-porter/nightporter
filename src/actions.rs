@@ -73,17 +73,94 @@ pub fn reject(db: &Db, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Re-run a finished or failed job's events as a new job.
-pub fn retry(db: &Db, id: i64) -> Result<usize> {
+/// How a retried job starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetryOpts {
+    /// Continue an issue's branch from the last run instead of rebuilding it from the base.
+    pub keep: bool,
+    /// Start as soon as a slot is free: past pause, the schedule window, the daily cap and the debounce.
+    pub now: bool,
+}
+
+/// `kv` key carrying a retry's options to the job `dispatch` makes from its events.
+pub fn retry_key(repo: &crate::forge::RepoId, n: u64) -> String {
+    format!("retry:{}#{n}", repo.key())
+}
+
+/// Re-run a job's events as a new job, with the config, prompts and model as they are now. A job
+/// still waiting for you is rejected first. By default an issue's branch is rebuilt from the base
+/// (and force-pushed over the last run's); a PR job always works on the PR's current head.
+pub fn retry(db: &Db, id: i64, o: RetryOpts) -> Result<usize> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
-    if j.status.is_active() || j.status.needs_user() {
+    if j.status.is_active() {
         bail!("job {id} is still {}", j.status.label());
     }
     anyhow::ensure!(j.mode != crate::improve::LEARN, "a learn job has no requests to retry; start a new one (L on the Repos tab)");
+    if j.status.needs_user() {
+        reject(db, id)?;
+    }
     let mut m = j.meta.clone();
     m.retried = true;
     db.set_meta(id, &m)?;
+    let flags = [(!o.keep).then_some("fresh"), o.now.then_some("now")].into_iter().flatten().collect::<Vec<_>>().join(",");
+    db.set(&retry_key(&j.repo, j.number), &flags)?;
     db.requeue_events(id)
+}
+
+/// Start a job now. A queued one goes before the others (still within `max_concurrent_jobs`);
+/// any other is retried with [`RetryOpts::now`].
+pub fn run_now(db: &Db, id: i64) -> Result<String> {
+    let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    match j.status {
+        JobStatus::Queued => {
+            let mut m = j.meta.clone();
+            m.front = true;
+            db.set_meta(id, &m)?;
+            Ok(format!("job {id} starts next"))
+        }
+        JobStatus::Running | JobStatus::Approved => bail!("job {id} is already {}", j.status.label()),
+        _ => retry(db, id, RetryOpts { keep: false, now: true })
+            .map(|n| format!("re-queued {n} event(s); starting as soon as a slot is free")),
+    }
+}
+
+/// Stop a job. A queued one is rejected; a running one is killed by the daemon within seconds
+/// and marked failed ("cancelled").
+pub fn cancel(db: &Db, id: i64) -> Result<String> {
+    let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
+    match j.status {
+        JobStatus::Queued => reject(db, id).map(|()| format!("job {id} rejected before it started")),
+        JobStatus::Running | JobStatus::Approved => {
+            db.set(&format!("cancel:{id}"), "1")?;
+            Ok(format!("job {id} will be stopped within a few seconds"))
+        }
+        s => bail!("job {id} is {}, not running", s.label()),
+    }
+}
+
+/// A time-boxed run with more capacity: no daily cap or sweep reserve, schedule windows ignored,
+/// and more jobs at once. `nightporter burst 3h`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Burst {
+    pub since: i64,
+    pub until: i64,
+    /// Most jobs to start during the burst (`None`: no limit).
+    pub jobs: Option<u32>,
+    /// Jobs at once (`None`: twice `max_concurrent_jobs`).
+    pub concurrency: Option<usize>,
+}
+
+pub fn set_burst(db: &Db, b: Option<Burst>) -> Result<()> {
+    match b {
+        Some(b) => db.set_json("burst", &(b.since, b.until, b.jobs, b.concurrency)),
+        None => db.del("burst"),
+    }
+}
+
+/// The burst in effect now, if any.
+pub fn burst(db: &Db) -> Option<Burst> {
+    let (since, until, jobs, concurrency) = db.get_json::<Option<(i64, i64, Option<u32>, Option<usize>)>>("burst").ok().flatten()?;
+    (until > crate::state::now()).then_some(Burst { since, until, jobs, concurrency })
 }
 
 /// A `/nightporter <command>` you posted on the PR (see `daemon::pr_commands`). Returns a status
@@ -100,7 +177,7 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
         }
         Control::Approve => approve(db, id, false).map(|_| None),
         Control::Dismiss => dismiss(db, id).map(|()| None),
-        Control::Retry => retry(db, id).map(|_| None),
+        Control::Retry => retry(db, id, RetryOpts::default()).map(|_| None),
         Control::Status => Ok(Some(format!("Job {id}: {}", j.status.label()))),
     }
 }
@@ -423,6 +500,20 @@ mod tests {
         assert!(std::fs::read_to_string(paths.config_file()).unwrap().starts_with("# mine"));
         set_subscribed(&paths, &repo, true).unwrap();
         assert!(cfg.settings_for(&paths, &repo).unwrap().subscribed);
+    }
+
+    #[test]
+    fn burst_expires() {
+        let db = Db::memory().unwrap();
+        let now = crate::state::now();
+        assert_eq!(burst(&db), None);
+        let b = Burst { since: now, until: now + 60, jobs: Some(3), concurrency: None };
+        set_burst(&db, Some(b)).unwrap();
+        assert_eq!(burst(&db), Some(b));
+        set_burst(&db, Some(Burst { until: now - 1, ..b })).unwrap();
+        assert_eq!(burst(&db), None, "an expired burst is off");
+        set_burst(&db, None).unwrap();
+        assert_eq!(db.get("burst").unwrap(), None);
     }
 
     #[test]

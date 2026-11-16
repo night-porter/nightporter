@@ -142,8 +142,33 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Re-run a finished or failed job's requests as a new job.
-    Retry { id: i64 },
+    /// Re-run a job's requests as a new job, with today's config, prompts and model. A job
+    /// waiting for you is rejected first. An issue's branch is rebuilt from the base.
+    Retry {
+        id: i64,
+        /// Continue the issue branch from the last run instead of rebuilding it.
+        #[arg(long)]
+        keep: bool,
+        /// Start as soon as a slot is free: past pause, schedule windows, the daily cap and debounce.
+        #[arg(long)]
+        now: bool,
+    },
+    /// Run a job now: a queued job goes next; any other is retried with `--now`.
+    Run { id: i64 },
+    /// Stop a job: a queued one is rejected, a running one is killed and marked failed.
+    Cancel { id: i64 },
+    /// More capacity for a while: no daily cap, schedule windows ignored, twice the jobs at once.
+    /// `nightporter burst 3h`, `nightporter burst off`, `nightporter burst` shows it.
+    Burst {
+        /// How long (`90m`, `3h`), or `off`.
+        duration: Option<String>,
+        /// Most jobs to start during the burst.
+        #[arg(long)]
+        jobs: Option<u32>,
+        /// Jobs at once during the burst (default: twice `max_concurrent_jobs`).
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
     /// Take over a job interactively in herdr, Rex, tmux, Zellij or a new terminal (opens it with a briefed agent).
     Handoff { id: i64 },
     /// Show a job: checks, replies, diff, log.
@@ -342,6 +367,27 @@ fn main() -> Result<()> {
 }
 
 /// Run one command; its own output goes to `out` (stdout, or a buffer in tests).
+/// `nightporter burst [duration|off]`.
+fn burst(db: &Db, duration: Option<&str>, jobs: Option<u32>, concurrency: Option<usize>, out: &mut dyn Write) -> Result<()> {
+    match duration {
+        Some("off") => {
+            actions::set_burst(db, None)?;
+            writeln!(out, "burst ended")?;
+        }
+        Some(d) => {
+            let secs = i64::try_from(config::parse_duration(d)?.as_secs())?;
+            let now = state::now();
+            actions::set_burst(db, Some(actions::Burst { since: now, until: now + secs, jobs, concurrency }))?;
+            writeln!(out, "burst on for {d}: no daily cap, schedule windows ignored, more jobs at once")?;
+        }
+        None => match actions::burst(db) {
+            Some(b) => writeln!(out, "burst on, {} min left", (b.until - state::now()) / 60 + 1)?,
+            None => writeln!(out, "no burst")?,
+        },
+    }
+    Ok(())
+}
+
 fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
     let cmd_name = match &cmd {
         Cmd::Subscribe { .. } => "subscribe",
@@ -398,10 +444,13 @@ fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
             writeln!(out, "job {id} rejected: nothing will be pushed or posted")?;
             Ok(())
         }
-        Cmd::Retry { id } => {
-            writeln!(out, "re-queued {} event(s)", actions::retry(&db(paths)?, id)?)?;
+        Cmd::Retry { id, keep, now } => {
+            writeln!(out, "re-queued {} event(s)", actions::retry(&db(paths)?, id, actions::RetryOpts { keep, now })?)?;
             Ok(())
         }
+        Cmd::Run { id } => Ok(writeln!(out, "{}", actions::run_now(&db(paths)?, id)?)?),
+        Cmd::Cancel { id } => Ok(writeln!(out, "{}", actions::cancel(&db(paths)?, id)?)?),
+        Cmd::Burst { duration, jobs, concurrency } => burst(&db(paths)?, duration.as_deref(), jobs, concurrency, out),
         Cmd::Handoff { id } => {
             let db = db(paths)?;
             let j = db.job(id)?.with_context(|| format!("no job {id}"))?;

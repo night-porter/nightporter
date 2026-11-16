@@ -54,7 +54,9 @@ invalid file from the editor is never written; you can fix it or throw the edit 
 | `a` | approve: push and post. On a job waiting for **NEEDS RUN APPROVAL**, let the agent run. On a `suggest` job, mark it done. |
 | `A` | approve even though a blocking check failed (asks first) |
 | `r` | reject: nothing is pushed or posted (asks first) |
-| `t` | retry: run the same requests again as a new job |
+| `t` | retry: run the same requests again as a new job, with today's config, prompts and model. A job waiting for you is rejected first. An issue's branch is rebuilt from the base; a PR job works on the PR as it is now |
+| `f` | run now: a queued job goes next; any other is retried and starts as soon as a slot is free, even while paused, outside schedule windows or over the daily cap |
+| `K` | cancel: stop a running job (marked failed, "cancelled") or reject a queued one |
 | `x` | dismiss: put the job away without replying or pushing. Its status becomes `dismissed` and it stays in History |
 | `u` | undo the last dismiss, or restore the selected dismissed job |
 | `X` | delete a finished or dismissed job for good, with its logs (asks first) |
@@ -169,7 +171,7 @@ Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Git
 |---|---|
 | `/nightporter approve` | push and post a job that is **NEEDS APPROVAL** (like `a`) |
 | `/nightporter dismiss` | put the job away (like `x`) |
-| `/nightporter retry` | run a finished or failed job's requests again (like `t`) |
+| `/nightporter retry` | run a job's requests again (like `t`) |
 | `/nightporter status` | Night Porter replies with the job's status |
 
 The command acts on Night Porter's newest job for that PR, and only when the comment is newer
@@ -219,6 +221,13 @@ nightporter inbox restore <event>
 
 nightporter pause                # no new jobs; running ones finish
 nightporter resume
+nightporter retry 42 --keep      # continue the issue branch instead of rebuilding it
+nightporter retry 42 --now       # and start it past pause, schedule windows, caps and debounce
+nightporter run 42               # run now: a queued job goes next, any other is retried --now
+nightporter cancel 42            # stop it: kills the agent, marks the job failed
+nightporter burst 3h             # no daily cap, schedule windows ignored, twice the jobs at once
+nightporter burst 3h --jobs 20 --concurrency 6
+nightporter burst off
 nightporter gc                   # remove idle worktrees (--all: every unused one)
 nightporter worktrees            # every worktree Night Porter made, and removed ones
 nightporter worktrees rm 42      # remove job 42's worktree (kept for 7 days)
