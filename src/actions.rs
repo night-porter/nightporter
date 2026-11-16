@@ -102,9 +102,23 @@ pub fn retry(db: &Db, id: i64, o: RetryOpts) -> Result<usize> {
     let mut m = j.meta.clone();
     m.retried = true;
     db.set_meta(id, &m)?;
-    let flags = [(!o.keep).then_some("fresh"), o.now.then_some("now")].into_iter().flatten().collect::<Vec<_>>().join(",");
-    db.set(&retry_key(&j.repo, j.number), &flags)?;
-    db.requeue_events(id)
+    let n = db.requeue_events(id)?;
+    // Also when an earlier retry already put the events back and they're still waiting (e.g.
+    // `retry` while paused, then `run`).
+    let waiting = || db.events_with(crate::state::Disposition::Pending).is_ok_and(|p| p.iter().any(|(e, _)| e.repo == j.repo && e.number == j.number));
+    if n > 0 || waiting() {
+        // `fresh=<sha>`: rebuild only over the branch head this job left, never over someone's push.
+        let fresh = (!o.keep).then(|| format!("fresh={}", j.head_after));
+        let flags = [fresh, o.now.then(|| "now".to_string())].into_iter().flatten().collect::<Vec<_>>().join(",");
+        db.set(&retry_key(&j.repo, j.number), &flags)?;
+    }
+    Ok(n)
+}
+
+/// What `retry` asked for, from its `kv` flags: (`now`, the head a fresh rebuild may replace).
+pub fn retry_flags(flags: &str) -> (bool, Option<&str>) {
+    let now = flags.split(',').any(|f| f == "now");
+    (now, flags.split(',').find_map(|f| f.strip_prefix("fresh=")))
 }
 
 /// Start a job now. A queued one goes before the others (still within `max_concurrent_jobs`);
@@ -113,9 +127,7 @@ pub fn run_now(db: &Db, id: i64) -> Result<String> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     match j.status {
         JobStatus::Queued => {
-            let mut m = j.meta.clone();
-            m.front = true;
-            db.set_meta(id, &m)?;
+            anyhow::ensure!(db.set_front(id)?, "job {id} just started");
             Ok(format!("job {id} starts next"))
         }
         JobStatus::Running | JobStatus::Approved => bail!("job {id} is already {}", j.status.label()),
@@ -157,6 +169,17 @@ pub fn set_burst(db: &Db, b: Option<Burst>) -> Result<()> {
     }
 }
 
+/// The burst in effect now and how many more jobs it may start (`None`: no limit), unless it
+/// has used up its `jobs`.
+pub fn burst_left(db: &Db) -> Option<(Burst, Option<u32>)> {
+    let b = burst(db)?;
+    let left = match b.jobs {
+        Some(max) => Some(max.checked_sub(db.jobs_since(b.since).ok()?).filter(|n| *n > 0)?),
+        None => None,
+    };
+    Some((b, left))
+}
+
 /// The burst in effect now, if any.
 pub fn burst(db: &Db) -> Option<Burst> {
     let (since, until, jobs, concurrency) = db.get_json::<Option<(i64, i64, Option<u32>, Option<usize>)>>("burst").ok().flatten()?;
@@ -177,6 +200,8 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
         }
         Control::Approve => approve(db, id, false).map(|_| None),
         Control::Dismiss => dismiss(db, id).map(|()| None),
+        // Never throws away a job waiting for you: that needs the TUI or CLI.
+        Control::Retry if j.status.needs_user() => bail!("job {id} is waiting for you; reject it first, or retry it in the TUI"),
         Control::Retry => retry(db, id, RetryOpts::default()).map(|_| None),
         Control::Status => Ok(Some(format!("Job {id}: {}", j.status.label()))),
     }
@@ -500,6 +525,25 @@ mod tests {
         assert!(std::fs::read_to_string(paths.config_file()).unwrap().starts_with("# mine"));
         set_subscribed(&paths, &repo, true).unwrap();
         assert!(cfg.settings_for(&paths, &repo).unwrap().subscribed);
+    }
+
+    #[test]
+    fn retry_flags_parse() {
+        assert_eq!(retry_flags("fresh=abc,now"), (true, Some("abc")));
+        assert_eq!(retry_flags("fresh="), (false, Some("")));
+        assert_eq!(retry_flags(""), (false, None));
+    }
+
+    #[test]
+    fn pr_comment_retry_never_throws_away_a_waiting_job() {
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, crate::forge::Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        db.set_status(id, JobStatus::AwaitingApproval).unwrap();
+        assert!(pr_command(&db, id, crate::forge::Control::Retry).is_err());
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
+        retry(&db, id, RetryOpts::default()).unwrap();
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Rejected, "the TUI/CLI retry rejects it first");
     }
 
     #[test]

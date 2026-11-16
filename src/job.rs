@@ -62,9 +62,16 @@ pub fn worktree_path(ctx: &Ctx, j: &Job) -> PathBuf {
     ctx.paths.worktrees_dir().join(j.repo.forge.as_str()).join(&j.repo.host).join(&j.repo.path).join(format!("{kind}-{}", j.number))
 }
 
+/// Stop here if `nightporter cancel` asked for it (see `daemon::cancel_jobs`).
+pub(crate) fn check_cancel(ctx: &Ctx, id: i64) -> Result<()> {
+    anyhow::ensure!(ctx.db(|d| d.get(&format!("cancel:{id}")))?.is_none(), "cancelled");
+    Ok(())
+}
+
 /// Record what the job is doing now, for the TUI's spinner. Best effort.
-fn stage(ctx: &Ctx, id: i64, stage: &str) {
+fn stage(ctx: &Ctx, id: i64, stage: &str) -> Result<()> {
     let _ = ctx.db(|d| d.set_stage(id, stage));
+    check_cancel(ctx, id)
 }
 
 fn log(ctx: &Ctx, id: i64, msg: &str) {
@@ -123,7 +130,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         } else {
             "worktree"
         },
-    );
+    )?;
     if j.mode == crate::improve::LEARN {
         return crate::improve::run_learn(ctx, &mut j, &s).await;
     }
@@ -332,11 +339,17 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             issue = Some(i);
             // A later request on the same issue continues the branch from earlier work; a fresh
             // retry rebuilds it from the base and force-pushes over exactly the head seen here.
+            // Only over the head the retried job left: if anyone pushed since, continue instead.
             let remote = git::remote_head(&clone, &repo_url, &branch).await?;
-            if j.meta.fresh {
-                j.meta.lease = remote.clone().unwrap_or_default();
+            let rebuild =
+                j.meta.fresh && (remote.is_none() || (!j.meta.lease.is_empty() && remote.as_deref() == Some(j.meta.lease.as_str())));
+            if j.meta.fresh && !rebuild {
+                log(ctx, j.id, "the branch has commits from someone else: continuing it instead of rebuilding");
             }
-            let continue_branch = remote.is_some() && !j.meta.fresh;
+            if !rebuild || remote.is_none() {
+                j.meta.lease.clear();
+            }
+            let continue_branch = remote.is_some() && !rebuild;
             // Reproducing can mean running the reporter's snippet through allowed commands.
             j.meta.untrusted_code =
                 verb == Some(Verb::Reproduce) && (s.env.install || !s.env.setup.is_empty() || !s.allow_commands.is_empty());
@@ -406,7 +419,7 @@ async fn await_run_approval(ctx: &Ctx, j: &mut Job, w: &Work) -> Result<bool> {
 /// Pack filter gates (read-only). `true`: a gate blocked and the job was finished.
 async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_dir: &Path, events: &[Event]) -> Result<bool> {
     for (name, text, _) in packs::steps(&ctx.paths, &s.packs, Hook::Filter) {
-        stage(ctx, j.id, "gate");
+        stage(ctx, j.id, "gate")?;
         let gate_input = gate_prompt(&text, events);
         let gate = agent::run(s.agent, s, wt, &job_dir.join(format!("gate-{}", name.replace('/', "-"))), &gate_input, true).await?;
         if gate.verdict.as_deref() == Some("block") {
@@ -420,7 +433,7 @@ async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_d
 
 /// The user's `env.setup` commands, in order; the first failure fails the job.
 async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Path) -> Result<()> {
-    stage(ctx, j.id, "env");
+    stage(ctx, j.id, "env")?;
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
     // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
     // install doesn't stop the job; the agent reports what it couldn't run.
@@ -464,7 +477,7 @@ fn env_guarded(s: &RepoSettings) -> bool {
 async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: &Path, events: &[Event]) -> Result<agent::Outcome> {
     let verb = j.meta.verb;
     let planning = w.step == "plan";
-    stage(ctx, j.id, w.step);
+    stage(ctx, j.id, w.step)?;
     let mut pack_prompts: Vec<String> = Vec::new();
     for hook in [Hook::PreFix, Hook::PostFix] {
         for (name, text, _) in packs::steps(&ctx.paths, &s.packs, hook) {
@@ -548,7 +561,7 @@ async fn inspect(
 ) -> Result<usize> {
     // Only HEAD is read from the worktree (after checking the agent didn't repoint its .git);
     // everything else runs in the clone on fixed SHAs.
-    stage(ctx, j.id, "checks");
+    stage(ctx, j.id, "checks")?;
     let (clone, wt) = (&w.clone, &w.wt);
     git::verify_gitfile(wt, &w.gitfile)?;
     j.head_after = git::head(wt).await?;
@@ -677,7 +690,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if j.status != JobStatus::Approved {
         bail!("job {id} is {:?}, not approved", j.status);
     }
-    stage(ctx, id, "push");
+    stage(ctx, id, "push")?;
     if j.mode == crate::improve::LEARN {
         return deliver_learn(ctx, &mut j);
     }
@@ -810,7 +823,12 @@ pub fn manual_commands(j: &Job) -> String {
         return String::new();
     }
     // From the clone, by SHA: the worktree may have been reused or cleaned up since.
-    push_command(&j.meta.clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref)
+    let cmd = push_command(&j.meta.clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref);
+    if j.meta.lease.is_empty() {
+        return cmd;
+    }
+    // A fresh rebuild replaces the branch, but only if it's still where the last run left it.
+    cmd.replacen(" push ", &format!(" push --force-with-lease=refs/heads/{}:{} ", shell_quote(&j.meta.push_ref), j.meta.lease), 1)
 }
 
 /// The branch name can come from a fork's author: every part is quoted.

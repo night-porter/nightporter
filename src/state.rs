@@ -4,6 +4,7 @@ use crate::forge::{Event, RepoId, Target};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub struct Db(pub Connection);
@@ -714,13 +715,18 @@ impl Db {
         Ok(())
     }
 
-    /// Read and delete every `kv` entry whose key starts with `prefix`: (rest of key, value).
-    pub fn take_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-        let like = format!("{prefix}%");
+    /// Every `kv` entry whose key starts with `prefix`: rest of key -> value.
+    pub fn prefixed(&self, prefix: &str) -> Result<HashMap<String, String>> {
         let mut st = self.0.prepare("SELECT k, v FROM kv WHERE k LIKE ?1")?;
-        let rows: Vec<(String, String)> = st.query_map([&like], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-        self.0.execute("DELETE FROM kv WHERE k LIKE ?1", [&like])?;
-        Ok(rows.into_iter().map(|(k, v)| (k[prefix.len()..].to_string(), v)).collect())
+        let rows: Vec<(String, String)> =
+            st.query_map([format!("{prefix}%")], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows.into_iter().filter_map(|(k, v)| Some((k.strip_prefix(prefix)?.to_string(), v))).collect())
+    }
+
+    /// Put a queued job first in line (`nightporter run`). Only that one field, and only while
+    /// it's still queued, so a job the daemon just started keeps the meta it saved.
+    pub fn set_front(&self, id: i64) -> Result<bool> {
+        Ok(self.0.execute("UPDATE jobs SET meta=json_set(meta, '$.front', json('true')) WHERE id=?1 AND status='queued'", [id])? == 1)
     }
 
     pub fn del(&self, k: &str) -> Result<()> {
