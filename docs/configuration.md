@@ -62,11 +62,12 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `plan_first` | `[]` | kinds of job that write a plan and wait for you before changing any code, even at `auto`, e.g. `["fix"]` (see [Plan first](/daily-use#plan-first)) |
 | `allow_commands` | `[]` | commands the agent may run (prefix match), e.g. `["npm test"]`. Claude Code and Gemini CLI: Codex has no per-command allow list. `["*"]` (Claude Code) allows any command; the deny list and the sandbox still apply |
 | `level` | `draft` | `observe`, `suggest`, `draft`, `auto` |
+| `levels` | `{}` | a level per kind of job on your own PRs, over `level`: `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict`. E.g. `levels = { ci_failure = "auto", review_comment = "auto", comment = "draft" }`. A job of several kinds gets the lowest. While a schedule window sets a `level`, that level is the default and the most any kind gets |
 | `triggers` | all | `review_comment`, `review`, `comment`, `ci_failure`, `merge_conflict` |
 | `debounce` | `2m` | quiet time before a batch of events becomes a job |
 | `max_concurrent` | unlimited | running jobs for this repo |
 | `max_ci_attempts` | `3` | automatic CI-fix attempts before giving up (reset when CI goes green). Also the number of rounds per PR with a [review bot](/advanced#review-bots) (never reset) |
-| `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text |
+| `ci_auto` | `false` | let CI-failure jobs run at `auto`; by default they stop at `draft`, because CI output is untrusted text. `levels.ci_failure = "auto"` opts in the same way |
 | `timeout` | `30m` | per agent run and per env command |
 | `max_budget_usd` | none | Claude Code only |
 | `sandbox` | `true` | OS sandbox for the agent's shell commands. Claude Code: Seatbelt on macOS; needs `bubblewrap` and `socat` on Linux; fails closed. Codex: its own sandbox (`--sandbox workspace-write`, network off; `danger-full-access` when `false`). Gemini CLI: its tool sandbox (Seatbelt on macOS, bubblewrap on Linux; network off). Set `false` for repos whose tests need Docker/DDEV sockets. OpenCode has no sandbox. |
@@ -80,7 +81,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `attribution` (`footer`: the visible "via Night Porter" line plus a hidden `<!-- nightporter -->` marker; `marker`: the hidden marker only, same as `footer = false`; `none`: no trace at all, replies and status replies read as if you typed them; overrides `footer`; applies to new posts only, old comments keep their marker), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
 | `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
-| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_verdicts` (`[]`: post reviews as a real review with the agent's outcome when it's listed here: `comment`, `request_changes`, `approve`; always waits for your approval; GitLab has no request-changes API, so that one is a comment), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code) |
+| `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft unless `allow_above_draft`), `levels` (a level per verb: `triage`, `reproduce`, `fix`, `review`), `allow_above_draft` (`false`; only in a repo's own file: lets maintainer jobs on that repo go above `draft` through `level` or `levels`), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_verdicts` (`[]`: post reviews as a real review with the agent's outcome when it's listed here: `comment`, `request_changes`, `approve`; always waits for your approval; GitLab has no request-changes API, so that one is a comment), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code) |
 
 Arrays in a repo file replace the default, except the trust lists (`allow_users`,
 `deny_users`, `allow_teams`, `deny_teams`, `allow_bots`) and `checks.protected`, which combine
@@ -90,10 +91,13 @@ global deny.
 ## Limits that config cannot change
 
 - `trust.open = true` caps the level at `suggest`.
-- Maintainer mode is capped at `draft`.
+- Maintainer mode is capped at `draft`, unless the repo's own file sets
+  `maintainer.allow_above_draft = true` (it can't be set in `[defaults]`). A formal review and
+  running someone else's code still wait for you.
 - A schedule window's `level` is checked like `level`: the caps above still apply, CI-failure jobs
-  still stop at `draft` unless `ci_auto`, and a window can lower maintainer jobs but never raise
-  them.
+  still stop at `draft` unless `ci_auto` (or `levels.ci_failure` above `draft`), a window's level
+  caps every `levels` entry while it's active, and a window can lower maintainer jobs but never
+  raise them.
 - The secrets, personal-data (card numbers and IBANs in replies; holds for approval), protected-path, history and Night Porter-file checks always run. Protected paths
   include CI configs, CODEOWNERS, `.env*` (`checks.allow_env_variants = true` frees `.env.*` for one repo; `.env` stays), keys, and the agent instruction files `CLAUDE.md`,
   `AGENTS.md`, `GEMINI.md`, `.claude/`, `.opencode/`, `.codex/`, `.gemini/`, `.cursor/`.

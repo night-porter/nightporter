@@ -12,6 +12,8 @@ All notable changes to Night Porter. The format follows
 - `nightporter run <id>` (TUI `f`) runs a job now: a queued job goes next, past its repo's concurrency; any other is retried and starts past pause, schedule windows, the daily cap and debounce. The one-job-per-PR rule, the disk check and `max_concurrent_jobs` still hold.
 - `nightporter cancel <id>` (TUI `K`) stops a job. A running agent is killed (its whole process group), and the job fails through its normal cleanup: env files restored, teardown run. Between agent runs it stops at its next step, and never pushes.
 - `nightporter burst <duration> [--jobs N] [--concurrency N]` gives more capacity for a while: no daily cap or sweep reserve, schedule windows ignored, twice the jobs at once (overall and per repo). The TUI header counts it down; `burst off` ends it.
+- `levels`: a level per kind of job on your own PRs (`ci_failure`, `review_comment`, `comment`, …) over `level`, e.g. CI fixes at `auto`, comments at `draft`. A job of several kinds gets the lowest; a schedule window's level caps them while it's active.
+- `maintainer.levels` (per verb: `triage`, `fix`, …) and `maintainer.allow_above_draft` (in a repo's own file only) let maintainer jobs on that repo go above `draft`.
 
 ### Changed
 

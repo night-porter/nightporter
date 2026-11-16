@@ -459,6 +459,15 @@ pub struct RepoSettings {
     pub allow_commands: Vec<String>,
     #[serde(default = "draft")]
     pub level: Level,
+    /// A level per kind of job on your own PRs, over `level`, e.g. `{ ci_failure = "auto",
+    /// review_comment = "auto", comment = "draft" }`. A job of several kinds gets the lowest.
+    /// While a schedule window sets a `level`, that's the most any kind gets.
+    #[serde(default)]
+    pub levels: std::collections::BTreeMap<JobKind, Level>,
+    /// The `level` of the schedule window active now, if it sets one: the default and the most
+    /// any kind gets while it's active.
+    #[serde(skip)]
+    window_level: Option<Level>,
     #[serde(default = "all_triggers")]
     pub triggers: Vec<Trigger>,
     #[serde(default = "two_min", with = "dur")]
@@ -469,7 +478,7 @@ pub struct RepoSettings {
     pub max_ci_attempts: u32,
     /// Let CI-failure jobs run at `auto`. CI output is text from builds and tools that may print
     /// anything (including a stranger's test names or logs), so by default those jobs stop at
-    /// `draft` and wait for you.
+    /// `draft` and wait for you. A `levels.ci_failure` entry opts in the same way.
     #[serde(default)]
     pub ci_auto: bool,
     #[serde(default = "thirty_min", with = "dur")]
@@ -676,6 +685,13 @@ pub struct Maintainer {
     /// it. Off: they only read the code and don't wait for that approval (Claude Code, Gemini CLI).
     #[serde(default)]
     pub review_runs_code: bool,
+    /// A level per maintainer verb, over `level`: `{ triage = "auto", fix = "draft" }`.
+    #[serde(default)]
+    pub levels: std::collections::BTreeMap<JobKind, Level>,
+    /// Let maintainer jobs on this repo go above `draft` (`level` or `levels`). Only in a repo's
+    /// own file: a project you maintain and trust its contributors on, not every repo at once.
+    #[serde(default)]
+    pub allow_above_draft: bool,
 }
 
 impl Default for Maintainer {
@@ -733,6 +749,10 @@ impl Config {
         let mut merged = self.defaults.clone();
         // `subscribed` only makes sense per repo.
         merged.remove("subscribed");
+        // So does unlocking maintainer levels: never for every repo at once.
+        if merged.get("maintainer").and_then(|m| m.get("allow_above_draft")).is_some() {
+            bail!("maintainer.allow_above_draft goes in a repo's own file (`nightporter repo <owner/name> edit`), not [defaults]");
+        }
         if let Some(o) = over {
             merge(&mut merged, o);
         }
@@ -740,6 +760,11 @@ impl Config {
         crate::schedule::validate(&s.schedule)?;
         if let Some(k) = s.plan_first.iter().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
             bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
+        }
+        for (name, map) in [("levels", &s.levels), ("maintainer.levels", &s.maintainer.levels)] {
+            if let Some(k) = map.keys().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
+                bail!("{name}: {:?} is a step, not a kind of job", crate::state::enum_str(k));
+            }
         }
         let known = |n: &String| n == "desktop" || self.notifications.targets.iter().any(|t| &t.name == n);
         if let Some(n) = s.notify.iter().chain(s.schedule.iter().filter_map(|w| w.notify.as_ref())).flatten().find(|n| !known(n)) {
@@ -756,7 +781,9 @@ impl RepoSettings {
             self.level = self.level.min(Level::Suggest);
             self.maintainer.level = self.maintainer.level.min(Level::Suggest);
         }
-        self.maintainer.level = self.maintainer.level.min(Level::Draft);
+        if !self.maintainer.allow_above_draft {
+            self.maintainer.level = self.maintainer.level.min(Level::Draft);
+        }
         self
     }
 
@@ -769,6 +796,7 @@ impl RepoSettings {
             if let Some(l) = w.level {
                 self.level = l;
                 self.maintainer.level = self.maintainer.level.min(l);
+                self.window_level = Some(l);
             }
             if let Some(a) = w.agent {
                 self.agent = a;
@@ -778,6 +806,27 @@ impl RepoSettings {
             }
         }
         self.clamped()
+    }
+
+    /// The level for a new job of `kinds` (one kind per event; a maintainer job has its verb's):
+    /// the lowest `levels` entry among them, else `level` (`maintainer.level`), then the caps no
+    /// setting lifts. `ci`: the job carries CI output.
+    pub fn level_for(&self, maintainer: bool, kinds: &[JobKind], ci: bool) -> Level {
+        let (base, map) = if maintainer { (self.maintainer.level, &self.maintainer.levels) } else { (self.level, &self.levels) };
+        // A window's level is the most any kind gets while it's active.
+        let ceiling = self.window_level.unwrap_or(Level::Auto);
+        let mut l = kinds.iter().map(|k| map.get(k).copied().unwrap_or(base)).min().unwrap_or(base).min(ceiling);
+        if self.trust.open {
+            l = l.min(Level::Suggest);
+        }
+        if maintainer && !self.maintainer.allow_above_draft {
+            l = l.min(Level::Draft);
+        }
+        // CI output stops at draft unless you opted in: `ci_auto`, or `ci_failure` set above draft.
+        if ci && !self.ci_auto && self.levels.get(&JobKind::CiFailure).is_none_or(|l| *l <= Level::Draft) {
+            l = l.min(Level::Draft);
+        }
+        l
     }
 
     pub fn concurrency(&self) -> usize {
@@ -1161,6 +1210,40 @@ mod tests {
         let repo = d.path().join("repos/github/o/r.toml");
         assert!(validate(&repo, "notify = [\"phone\"]").is_ok());
         assert!(validate(&repo, "notify = [\"pager\"]").is_err());
+    }
+
+    #[test]
+    fn levels_per_kind_and_their_caps() {
+        use JobKind::{CiFailure, Fix, ReviewComment, Triage};
+        let repo = |file: &str| Config::parse("").unwrap().resolve(Some(&file.parse().unwrap())).unwrap();
+        let mine = repo("level = \"draft\"\nlevels = { review_comment = \"auto\", comment = \"observe\" }");
+        assert_eq!(mine.level_for(false, &[ReviewComment], false), Level::Auto);
+        assert_eq!(mine.level_for(false, &[ReviewComment, JobKind::Comment], false), Level::Observe, "a mixed batch gets the lowest");
+        assert_eq!(mine.level_for(false, &[], false), Level::Draft);
+        assert_eq!(mine.level_for(false, &[CiFailure], true), Level::Draft, "CI output stops at draft");
+        // Maintainer jobs stay at draft unless the repo opts in, and have their own map.
+        let maint = repo("[maintainer]\nlevel = \"auto\"\nlevels = { fix = \"auto\" }");
+        assert_eq!(maint.level_for(true, &[Fix], false), Level::Draft);
+        let maint = repo("[maintainer]\nallow_above_draft = true\nlevels = { fix = \"auto\", triage = \"observe\" }");
+        assert_eq!(maint.level_for(true, &[Fix], false), Level::Auto);
+        assert_eq!(maint.level_for(true, &[Triage], false), Level::Observe);
+        assert_eq!(maint.level_for(false, &[Fix], false), Level::Draft, "maintainer levels don't touch your own PRs' jobs");
+        // A window's level is the default and the ceiling; lower entries stay lower.
+        let mut night = repo("levels = { comment = \"observe\", ci_failure = \"draft\" }");
+        (night.level, night.window_level) = (Level::Auto, Some(Level::Auto));
+        assert_eq!(night.level_for(false, &[ReviewComment], false), Level::Auto);
+        assert_eq!(night.level_for(false, &[JobKind::Comment], false), Level::Observe);
+        assert_eq!(night.level_for(false, &[CiFailure], true), Level::Draft, "ci_failure at draft doesn't lift the CI cap");
+        let mut quiet = repo("levels = { review_comment = \"auto\" }");
+        assert_eq!(quiet.level_for(false, &[ReviewComment], false), Level::Auto);
+        quiet.window_level = Some(Level::Observe);
+        assert_eq!(quiet.level_for(false, &[ReviewComment], false), Level::Observe, "a quiet window caps the map");
+        assert!(Config::parse("[defaults]\nlevels = { plan = \"auto\" }").is_err());
+        // Open trust caps everything at suggest.
+        let open = repo("[trust]\nopen = true\n[levels]\nreview_comment = \"auto\"");
+        assert_eq!(open.level_for(false, &[ReviewComment], false), Level::Suggest);
+        // The opt-in is per repo only.
+        assert!(Config::parse("[defaults.maintainer]\nallow_above_draft = true").is_err());
     }
 
     #[test]
