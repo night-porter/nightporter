@@ -6,6 +6,11 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The agent can read history: before each job the upstream's branches and tags are mirrored under `refs/nightporter/upstream/` (your own tags are untouched), and it may run `git for-each-ref`, `git cat-file`, `git merge-base` and `git ls-tree`, so a triage can say which release has a fix.
+- Replies no longer talk about the agent's own limits (tools, permissions, what it couldn't access). A check it didn't run is noted only as "Not verified locally."; the reason stays in the job log.
+
 ## [0.6.0] - 2026-11-17
 
 ### Added

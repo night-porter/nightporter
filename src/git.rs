@@ -149,6 +149,18 @@ pub fn base_ref(branch: &str) -> String {
     format!("refs/nightporter/base-{}", branch.replace('/', "-"))
 }
 
+/// Where the upstream's branches and tags are mirrored so the agent (no network) can date a fix:
+/// `git for-each-ref --contains <sha> refs/nightporter/upstream/`. Kept out of your own tags.
+pub const UPSTREAM: &str = "refs/nightporter/upstream/";
+
+/// Mirror the upstream's branches and tags into [`UPSTREAM`]. Best effort: a failure only leaves
+/// the agent with less history.
+pub async fn fetch_history(clone: &Path, url: &str) -> Result<()> {
+    let heads = format!("+refs/heads/*:{UPSTREAM}heads/*");
+    let tags = format!("+refs/tags/*:{UPSTREAM}tags/*");
+    git(clone, &["fetch", "--quiet", "--no-tags", "--prune", "--end-of-options", url, &heads, &tags]).await.map(|_| ())
+}
+
 pub async fn remove_worktree(clone: &Path, wt: &Path, branch: &str) -> Result<()> {
     if wt.exists() {
         git(clone, &["worktree", "remove", "--force", &wt.to_string_lossy()]).await.ok();
@@ -396,6 +408,22 @@ pub(crate) mod tests {
         assert_eq!(run(&["rev-parse", &format!("{head}^")]), map[0].1, "re-parented onto the signed commit");
         assert_eq!(run(&["rev-parse", &format!("{head}~2")]), before);
         assert_eq!(run(&["log", "-1", "--format=%s|%an|%T", head]), run(&["log", "-1", "--format=%s|%an|%T", &after]));
+    }
+
+    #[tokio::test]
+    async fn history_is_mirrored_outside_your_own_tags() {
+        let d = tempfile::tempdir().unwrap();
+        let (up, clone) = (d.path().join("up"), d.path().join("clone"));
+        std::fs::create_dir(&up).unwrap();
+        std::fs::create_dir(&clone).unwrap();
+        repo(&up);
+        repo(&clone);
+        git(&up, &["tag", "v2.0.1"]).await.unwrap();
+        fetch_history(&clone, &up.to_string_lossy()).await.unwrap();
+        let sha = git(&up, &["rev-parse", "HEAD"]).await.unwrap();
+        let refs = git(&clone, &["for-each-ref", "--format=%(refname)", "--contains", &sha, UPSTREAM]).await.unwrap();
+        assert!(refs.contains("refs/nightporter/upstream/tags/v2.0.1") && refs.contains("refs/nightporter/upstream/heads/main"));
+        assert!(git(&clone, &["tag", "--list"]).await.unwrap().is_empty(), "your own tags untouched");
     }
 
     #[tokio::test]

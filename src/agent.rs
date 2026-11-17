@@ -21,13 +21,19 @@ pub struct Outcome {
 
 /// Git commands the agent may run. `git log/diff/show/blame/grep` and `git stash show` are
 /// deliberately absent: they accept `--output=<file>`, which would let the agent write anywhere
-/// (e.g. a git config into the clone). It can read files instead.
+/// (e.g. a git config into the clone), and so does `git rev-list`. History is read with the ones
+/// below, which can't write files: `for-each-ref --contains` (which tag/branch has a commit),
+/// `cat-file -p <rev>:<path>` (a file at any version), `merge-base --is-ancestor`, `ls-tree`.
 const GIT_ALLOWED: &[&str] = &[
     "git status",
     "git add",
     "git commit",
     "git rev-parse",
     "git ls-files",
+    "git ls-tree",
+    "git cat-file",
+    "git for-each-ref",
+    "git merge-base",
     "git merge",
     "git checkout --",
     "git restore",

@@ -940,7 +940,7 @@ async fn pr_commands_only_from_my_user_id_once() {
     job::run(ctx, id).await.unwrap();
     assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::AwaitingApproval);
     let prompt = std::fs::read_to_string(ctx.paths.job_dir(id).join("prompt.md")).unwrap();
-    assert!(!prompt.contains("/nightporter"), "a command reached the agent");
+    assert!(!prompt.contains("/nightporter approve") && !prompt.contains("/nightporter retry"), "a command reached the agent");
 
     daemon::pr_commands(ctx, &key).await.unwrap();
     assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Approved);
