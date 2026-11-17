@@ -114,8 +114,11 @@ ruleset bypass lists to non-admins, so a token user on such a list isn't detecte
 - The generated agent settings deny `git push`, `gh`, `glab`, `tea`, `fj` and network commands, deny
   reading credential files (`~/.ssh`, `~/.config/gh`, `~/.config/tea`, `~/.git-credentials`, ...) and Night
   Porter's own config, state database, log and other jobs' files, and only
-  allow git subcommands that can't write outside the repo (`git log/diff/show` and `git stash
-  show` take `--output`; only `git stash push` and `pop` are allowed).
+  allow git subcommands that can't write outside the repo (`git log/diff/show/rev-list` and
+  `git stash show` take `--output`; only `git stash push` and `pop` are allowed). History is
+  read with `for-each-ref`, `cat-file`, `merge-base` and `ls-tree` instead: before each job
+  Night Porter itself fetches the upstream's branches and tags into `refs/nightporter/upstream/`,
+  so the agent needs no network for it.
 - The agent can write to the clone's git dir (it commits there), and Night Porter's own git calls
   read that dir's config outside the sandbox. So the clone's `config` and the worktree's
   `config.worktree`, `commondir` and `gitdir` are compared before and after every agent run; any
@@ -230,7 +233,8 @@ its current head: an interactive agent in that worktree loads the branch's own a
 The exception is a `review` with Claude Code or Gemini CLI (unless `review_runs_code = true`):
 it doesn't wait for that approval because nothing from the branch runs. There are no allowed
 commands and no environment setup or teardown, the agent can't edit files, and its only shell
-commands are read-only git (`status`, `rev-parse`, `ls-files`, with hooks and fsmonitor off).
+commands are read-only git (`status`, `rev-parse`, `ls-files`, `ls-tree`, `cat-file`,
+`for-each-ref`, `merge-base`, with hooks and fsmonitor off).
 Claude Code loads only Night Porter's settings (no project settings, hooks or MCP servers), and
 Gemini CLI refuses a branch that carries its own settings. The branch's `CLAUDE.md` or `GEMINI.md`
 can still steer what the review says, so read it before you approve the reply. Codex can't be
