@@ -370,6 +370,9 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     {
         log(ctx, j.id, "note: branch moved between API read and fetch; using the fetched head");
     }
+    if let Err(e) = git::fetch_history(&clone, &repo_url).await {
+        log(ctx, j.id, &format!("couldn't fetch the upstream's branches and tags: {}", git::redact(&e.to_string())));
+    }
     let step = prompts::step_for(events, verb, j.target == Target::Issue);
     if step == "conflict" {
         git(
@@ -437,7 +440,7 @@ async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Pat
     stage(ctx, j.id, "env")?;
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
     // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
-    // install doesn't stop the job; the agent reports what it couldn't run.
+    // install doesn't stop the job; the job log keeps the error, the reply says "not verified locally".
     for cmd in lockfile_installs(&w.wt).into_iter().filter(|_| s.env.install) {
         log(ctx, j.id, &format!("installing dependencies: {cmd}"));
         if let Err(e) = sh(&w.wt, job_dir, cmd, s).await {
