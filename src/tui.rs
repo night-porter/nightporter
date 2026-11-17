@@ -926,7 +926,8 @@ impl App {
             _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file L learn from your fixes Esc back",
             (false, Tab::Repos | Tab::Settings | Tab::History) if self.filtering => "type to search, Enter keep results, Esc clear search",
             (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over w web Esc",
-            (_, Tab::Queue) => "Enter open a approve e edit m amend r reject x dismiss h take over w web q quit",
+            // m amend and h take over are in the detail footer and ? help.
+            (_, Tab::Queue) => "Enter open a approve e edit r reject x dismiss t retry f force w web ? q quit",
             (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
             (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / search ? q",
