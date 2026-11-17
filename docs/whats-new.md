@@ -1,5 +1,5 @@
 ---
-description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
+description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: release-aware triage, the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
 ---
 
 # What's new
@@ -7,6 +7,17 @@ description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: the merge level,
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
 ## 0.6
+
+### Release-aware triage (0.6.1)
+
+**It checks which release has the fix.** Before each job Night Porter fetches the upstream's
+branches and tags into the clone (under `refs/nightporter/upstream/`, so your own tags are left
+alone), and the agent can now read that history. A triage can say "fixed in `abc1234`, first
+released in v2.0.3" instead of guessing.
+
+**Replies talk about the code, not the agent.** No more "I couldn't read the git history" or
+"I wasn't able to run the tests here". A check the agent didn't run is marked
+"Not verified locally.", and the reason is in the job log.
 
 ### From draft to merge (0.6.0)
 

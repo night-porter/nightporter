@@ -306,8 +306,10 @@ Maintainer mode is capped at `draft`, so you always approve before anything is p
   your `allow_commands` (tests) too, after you approve the run. Codex and OpenCode reviews always
   wait for approval.
 - `triage` first checks whether the code already does what the issue asks. If it does, the reply
-  says so, with the files or commits that show it, and recommends closing the issue. Night Porter
-  never closes it for you.
+  says so, with the files, commits and release tags that show it, and recommends closing the
+  issue. Night Porter never closes it for you.
+- Replies stick to the code. A check the agent didn't run is marked "Not verified locally."; why
+  it didn't is in the job log, not in the comment.
 
 ### Review requests
 

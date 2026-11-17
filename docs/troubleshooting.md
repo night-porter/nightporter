@@ -103,6 +103,12 @@ files) are kept in its clone under `refs/nightporter/trash/`, and `u` or
 (`node_modules`, `.ddev` state) aren't kept; the next job sets them up again. After 7 days the
 trash goes for good.
 
+Night Porter also keeps a copy of each upstream's branches and tags in the clone under
+`refs/nightporter/upstream/`, so the agent can see which release has a fix. They don't show up in
+`git branch` or `git tag`; `git for-each-ref refs/nightporter/upstream/` lists them, and
+`git for-each-ref --format='delete %(refname)' refs/nightporter/upstream/ | git update-ref --stdin`
+removes them (the next job fetches them again).
+
 Worktrees live in Night Porter's data folder (`~/.local/share/nightporter/worktrees`, on macOS
 too), not next to your clone. Inside
 the clone they'd show up as untracked files in your own `git status`, and next to it in your

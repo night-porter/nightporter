@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-17
+
 ### Changed
 
 - The agent can read history: before each job the upstream's branches and tags are mirrored under `refs/nightporter/upstream/` (your own tags are untouched), and it may run `git for-each-ref`, `git cat-file`, `git merge-base` and `git ls-tree`, so a triage can say which release has a fix.
@@ -322,7 +324,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/night-porter/nightporter/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/night-porter/nightporter/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/night-porter/nightporter/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/night-porter/nightporter/compare/v0.4.5...v0.4.6
