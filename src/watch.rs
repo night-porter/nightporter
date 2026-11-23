@@ -54,7 +54,7 @@ impl Follow {
                 out.push(if json {
                     job_json(&j).to_string()
                 } else {
-                    format!("job {} {}#{}: {}  {}", j.id, j.repo, j.number, j.status.label(), j.summary.lines().next().unwrap_or_default())
+                    format!("job {} {}: {}  {}", j.id, j.place(), j.status.label(), j.summary.lines().next().unwrap_or_default())
                 });
             }
         }

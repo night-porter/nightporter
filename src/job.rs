@@ -405,8 +405,8 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     Ok(Some(Work { clone, repo_url, branch, wt, gitfile, me, pr, issue, step }))
 }
 
-/// A Jira job's issue, and whether someone else reported it (their text is untrusted). `None`:
-/// it's done in Jira.
+/// A Jira job's issue, and whether anyone else wrote any of it (then it's all untrusted).
+/// `None`: it's done in Jira.
 async fn jira_issue(ctx: &Ctx, r: &crate::jira::JiraRef) -> Result<Option<(crate::forge::IssueInfo, bool)>> {
     let acli = crate::jira::Acli::new(&ctx.paths);
     let mine = acli.account(&r.site).unwrap_or_default();
@@ -415,11 +415,12 @@ async fn jira_issue(ctx: &Ctx, r: &crate::jira::JiraRef) -> Result<Option<(crate
     if i.done {
         return Ok(None);
     }
-    let theirs = mine.is_empty() || i.reporter != mine;
-    Ok(Some((
-        crate::forge::IssueInfo { title: format!("{}: {}", i.key, i.summary), body: i.text, author: i.reporter_name, open: true },
-        theirs,
-    )))
+    // The creator can't be changed later, unlike the reporter; comments count too.
+    let theirs = mine.is_empty() || i.creator != mine || i.commenters.iter().any(|c| *c != mine);
+    // A display name is free text that sits outside the untrusted fence: keep it a plain name.
+    let author: String =
+        i.creator_name.chars().filter(|c| c.is_alphanumeric() || " .-_".contains(*c)).take(60).collect::<String>().replace(' ', "_");
+    Ok(Some((crate::forge::IssueInfo { title: format!("{}: {}", i.key, i.summary), body: i.text, author, open: true }, theirs)))
 }
 
 /// A review of someone else's code that only reads it, so it needn't wait for run approval.
@@ -774,6 +775,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         open_fix_pr(ctx, &mut j, &s, &f, gate != Some(None)).await?;
     }
     let jira = j.meta.jira.clone().map(|r| (r, crate::jira::Acli::new(&ctx.paths)));
+    let ready = gate == Some(None);
     let merge_note = match gate {
         Some(None) => auto_merge(&j, &f).await,
         Some(Some(why)) => format!("; not set to merge: {why}"),
@@ -794,13 +796,8 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             continue;
         }
         if let Some((jr, acli)) = &jira {
-            let body = if fix_pr {
-                prompts::sign(&format!("Opened a pull request for this: {}", j.meta.pr_url), s.reply.attribution(), s.agent)
-            } else {
-                r.body.clone()
-            };
-            let (site, key) = (jr.site.clone(), jr.key.clone());
-            acli.call(move |a| a.comment(&site, &key, &body)).await.with_context(|| format!("comment on {}", jr.key))?;
+            let pr = fix_pr.then_some((j.meta.pr_url.as_str(), ready));
+            post_jira(ctx, id, &s, jr, acli, pr, &r.body).await?;
         } else if let (0, Some(v)) = (i, j.meta.review) {
             f.review(&j.repo, j.number, v, &r.body).await.with_context(|| format!("post review ({})", crate::state::enum_str(&v)))?;
             log(ctx, id, &format!("posted review: {}", crate::state::enum_str(&v)));
@@ -828,6 +825,35 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let pushed = if has_code { format!("pushed {} and ", crate::git::short(&j.head_after)) } else { String::new() };
     let replies = format!("posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
     note(ctx, &j, Kind::Done, &format!("{pushed}{replies}{merge_note}"));
+    Ok(())
+}
+
+/// A reply on a Jira issue; for an issue fix, `pr` (its URL, and whether it's ready rather than
+/// a draft) instead: Jira doesn't see the PR, so say where it is.
+async fn post_jira(
+    ctx: &Ctx,
+    id: i64,
+    s: &RepoSettings,
+    jr: &crate::jira::JiraRef,
+    acli: &crate::jira::Acli,
+    pr: Option<(&str, bool)>,
+    body: &str,
+) -> Result<()> {
+    let (site, key) = (jr.site.clone(), jr.key.clone());
+    let Some((url, ready)) = pr else {
+        let body = body.to_string();
+        return acli.call(move |a| a.comment(&site, &key, &body)).await.with_context(|| format!("comment on {}", jr.key));
+    };
+    // Only a pointer to the PR, which is open already: failing to say so isn't failing the job.
+    let what = if ready { "a pull request" } else { "a draft pull request" };
+    let body = prompts::sign(
+        &format!("Opened {what} for review: {url}\nThis issue stays open until it's merged."),
+        s.reply.attribution(),
+        s.agent,
+    );
+    if let Err(e) = acli.call(move |a| a.comment(&site, &key, &body)).await {
+        log(ctx, id, &format!("couldn't link the PR on {}: {e:#}", jr.key));
+    }
     Ok(())
 }
 
@@ -900,7 +926,8 @@ pub(crate) fn note(ctx: &Ctx, j: &Job, kind: Kind, summary: &str) {
     let mut ev = if j.mode == crate::improve::LEARN {
         notify::Event::new(kind, &format!("{} (learn)", j.repo), summary)
     } else {
-        notify::Event::about(kind, &j.repo, j.target, j.number, summary)
+        // `place` and `url`: a Jira job's key and issue, not its internal number.
+        notify::Event { title: j.place(), url: Some(j.url()), ..notify::Event::about(kind, &j.repo, j.target, j.number, summary) }
     };
     ev.job = Some(j.id);
     ev.pr_title = Some(j.meta.title.clone()).filter(|t| !t.is_empty());

@@ -220,8 +220,8 @@ pub fn replies_file(db: &Db, id: i64) -> Result<String> {
     }
     let events = db.job_events(id)?;
     let mut out = format!(
-        "<!-- Job {id}, {}#{}. Edit the replies, save and quit. Keep each \"{REPLY_SEP}N\" line; empty a reply to drop it. -->\n",
-        j.repo, j.number
+        "<!-- Job {id}, {}. Edit the replies, save and quit. Keep each \"{REPLY_SEP}N\" line; empty a reply to drop it. -->\n",
+        j.place()
     );
     for (i, r) in j.replies.iter().enumerate() {
         let to = match r.event.as_deref().and_then(|eid| events.iter().find(|e| e.id == eid)) {
@@ -399,7 +399,7 @@ pub fn restore(db: &Db, id: i64) -> Result<JobStatus> {
     let to = j.meta.dismissed_from.take().unwrap_or(JobStatus::Done);
     // Waiting for approval holds the PR; another job may have started on it meanwhile.
     if matches!(to, JobStatus::AwaitingApproval | JobStatus::AwaitingRunApproval) && db.pr_busy(&j.repo, j.number)? {
-        bail!("{}#{} has a newer job; restore that one's history instead", j.repo, j.number);
+        bail!("{} has a newer job; restore that one's history instead", j.place());
     }
     j.status = to;
     db.update_job(&j)?;

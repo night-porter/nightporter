@@ -209,6 +209,14 @@ fn jira_tick(ctx: &Arc<Ctx>, last: &mut Option<Instant>, busy: &Arc<std::sync::a
     *last = Some(Instant::now());
     let (c, busy) = (ctx.clone(), busy.clone());
     tokio::spawn(async move {
+        // Cleared however the pass ends, a panic too, or pickup would stop for good.
+        struct Done(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _done = Done(busy);
         let cfg = c.cfg();
         let err = crate::sweep::jira_pickup(&c, &cfg).await;
         // Shown by `status` and the TUI until a pass goes through.
@@ -216,7 +224,6 @@ fn jira_tick(ctx: &Arc<Ctx>, last: &mut Option<Instant>, busy: &Arc<std::sync::a
             Some(e) => d.set(JIRA_ERROR, e),
             None => d.del(JIRA_ERROR),
         });
-        busy.store(false, std::sync::atomic::Ordering::Release);
     });
 }
 

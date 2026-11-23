@@ -75,7 +75,7 @@ pub async fn pickup(ctx: &Ctx, cfg: &crate::config::Config, key: &(crate::forge:
 }
 
 /// What happens to an issue Night Porter holds.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Claim {
     Hold,
     /// The issue closed, or the work is done with nothing left to wait for.
@@ -86,6 +86,24 @@ enum Claim {
     GiveBack,
 }
 
+/// What a claim comment says Night Porter will do.
+fn will(verb: Verb) -> &'static str {
+    match verb {
+        Verb::Fix => "work on a fix and open a pull request for review",
+        Verb::Reproduce => "try to reproduce this",
+        _ => "triage this",
+    }
+}
+
+/// Why it hands an issue back, when it says so: a triage or reproduction says what it found itself.
+fn why_back(c: Claim, verb: Verb) -> Option<&'static str> {
+    match (c, verb) {
+        (Claim::GiveBack, _) => Some("Night Porter stopped working on this"),
+        (_, Verb::Fix) => Some("Night Porter looked into this and found nothing to change in the code"),
+        _ => None,
+    }
+}
+
 /// `job`: the newest job on the issue since it was claimed. `pending`: its events are waiting
 /// to run (again, e.g. after a restart).
 fn settle(open: bool, job: Option<&crate::state::Job>, pending: bool) -> Claim {
@@ -94,9 +112,10 @@ fn settle(open: bool, job: Option<&crate::state::Job>, pending: bool) -> Claim {
     }
     let Some(j) = job.filter(|_| !pending) else { return Claim::Hold };
     match j.status {
+        // A PR is open for it: held until the issue closes (the PR merging closes it), even if
+        // something after opening it failed.
+        _ if !j.meta.pr_url.is_empty() => Claim::Hold,
         JobStatus::Failed | JobStatus::Rejected | JobStatus::Dismissed => Claim::GiveBack,
-        // A PR is open for it: held until the issue closes (the PR merging closes it).
-        JobStatus::Done if !j.meta.pr_url.is_empty() => Claim::Hold,
         JobStatus::Done => Claim::Finished,
         _ => Claim::Hold,
     }
@@ -120,13 +139,8 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
             Claim::Forget => ctx.db(|d| d.del(&claim_key(n)))?,
             c @ (Claim::Finished | Claim::GiveBack) => {
                 forge.assign(repo, n, false).await?;
-                let why = match (&c, p.verb) {
-                    (Claim::GiveBack, _) => Some("Night Porter couldn't finish this one, so it's free again."),
-                    (_, Verb::Fix) => Some("Night Porter found nothing to change here, so it's free again."),
-                    _ => None, // a triage or reproduction says what it found itself
-                };
-                if let Some(why) = why
-                    && let Err(e) = forge.comment(repo, n, &sign(s, why)).await
+                if let Some(why) = why_back(c, p.verb)
+                    && let Err(e) = forge.comment(repo, n, &sign(s, &format!("{why}, so it's free again."))).await
                 {
                     tracing::warn!("{repo}#{n}: couldn't say it's free again: {e:#}");
                 }
@@ -164,13 +178,9 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
         let now = crate::state::now();
         ctx.db(|d| d.set(&claim_key(i.number), &now.to_string()))?;
         queue_claim(ctx, repo, p.verb, &me, i.number, now)?;
-        let what = match p.verb {
-            Verb::Fix => "work on this and open a PR",
-            Verb::Reproduce => "try to reproduce this",
-            _ => "triage this",
-        };
-        if let Err(e) =
-            forge.comment(repo, i.number, &sign(s, &format!("Night Porter picked this up from the sprint and will {what}."))).await
+        if let Err(e) = forge
+            .comment(repo, i.number, &sign(s, &format!("Night Porter picked this up from the sprint: it will {}.", will(p.verb))))
+            .await
         {
             tracing::warn!("{repo}#{}: claimed, but couldn't say so: {e:#}", i.number);
         }
@@ -191,9 +201,12 @@ pub struct JiraClaim {
     pub since: i64,
     #[serde(flatten)]
     pub issue: crate::jira::JiraRef,
-    /// Handed back: not claimed again.
+    /// Handed back or let go: not claimed again.
     #[serde(default)]
     pub released: bool,
+    /// The `[[jira]]` entry's JQL, so two entries on one repo and site settle only their own.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// The claim behind a `Target::Jira` job's number (`None` for any other number).
@@ -215,21 +228,22 @@ pub async fn jira_pickup(ctx: &Ctx, cfg: &crate::config::Config) -> Option<Strin
     let mut sources: Vec<(RepoId, crate::config::RepoSettings, usize)> =
         ctx.subscribed(cfg).into_iter().flat_map(|(repo, s)| (0..s.jira.len()).map(move |idx| (repo.clone(), s.clone(), idx))).collect();
     sources.sort_by_key(|(repo, s, idx)| (std::cmp::Reverse(s.jira[*idx].priority), repo.key()));
-    let mut err = None;
+    let mut errs = Vec::new();
     for (repo, s, idx) in &sources {
         let src = &s.jira[*idx];
         if let Err(e) = jira_source(ctx, repo, s, src).await {
-            let msg = format!("{repo}: jira {}: {e:#}", src.site);
+            let msg = format!("{repo} ({}): {e:#}", src.site);
             ctx.warn_every(&format!("jira:{}:{idx}", repo.key()), 3600, &msg);
-            err = Some(msg);
+            errs.push(msg);
         }
     }
-    err
+    (!errs.is_empty()).then(|| errs.join("\n"))
 }
 
 async fn jira_source(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, src: &crate::config::JiraSource) -> Result<()> {
     let acli = crate::jira::Acli::new(&ctx.paths);
-    let mine = acli.account(&src.site).with_context(|| format!("acli isn't logged in to {} (acli jira auth login)", src.site))?;
+    let mine =
+        acli.account(&src.site).with_context(|| format!("acli isn't logged in to {0}: acli jira auth login --site {0}", src.site))?;
     let held = settle_jira(ctx, &acli, repo, s, src, &mine).await?;
     if held < src.max_claimed {
         claim_jira(ctx, &acli, repo, s, src, held).await?;
@@ -259,38 +273,50 @@ async fn settle_jira(
     let site = src.site.clone();
     let pending = ctx.db(|d| d.events_with(Disposition::Pending))?;
     let mut held = 0;
-    for (id, mut claim) in jira_claims(ctx, &site)?.into_iter().filter(|(_, c)| c.repo == repo.key() && !c.released) {
+    let mine_only = |c: &JiraClaim| c.repo == repo.key() && c.source == src.jql && !c.released;
+    for (id, mut claim) in jira_claims(ctx, &site)?.into_iter().filter(|(_, c)| mine_only(c)) {
         let (site2, key) = (site.clone(), claim.issue.key.clone());
-        let issue = acli.call(move |a| a.view(&site2, &key)).await?;
+        // One issue that can't be read (deleted, moved out of sight) mustn't stop the rest.
+        let issue = match acli.call(move |a| a.view(&site2, &key)).await {
+            Ok(i) => i,
+            Err(e) => {
+                ctx.warn_every(&format!("jira-view:{site}:{id}"), 86400, &format!("{repo}: can't read {}: {e:#}", claim.issue.key));
+                held += 1;
+                continue;
+            }
+        };
         // Done, or assigned to someone else: not ours any more.
         let open = !issue.done && issue.assignee == mine;
         let job = ctx.db(|d| d.latest_job(repo, Target::Jira, claim.number, claim.since))?;
         let waiting = pending.iter().any(|(e, _)| e.repo == *repo && e.number == claim.number);
-        match settle(open, job.as_ref(), waiting) {
-            Claim::Hold => held += 1,
-            Claim::Forget => ctx.db(|d| d.del(&format!("jclaim:{site}:{id}")))?,
-            how @ (Claim::Finished | Claim::GiveBack) => {
-                let why = match (&how, src.verb) {
-                    (Claim::GiveBack, _) => Some("Night Porter couldn't finish this one."),
-                    (_, Verb::Fix) => Some("Night Porter found nothing to change here."),
-                    _ => None,
-                };
-                // Someone chose you for `assigned` issues: say so, but leave the assignment.
-                let unassign = src.pickup == crate::config::JiraPickup::New;
-                let body = why.map(|w| sign(s, &if unassign { format!("{w} It's free again.") } else { w.to_string() }));
-                let (site2, key) = (site.clone(), claim.issue.key.clone());
-                acli.call(move |a| {
-                    if unassign {
-                        a.assign(&site2, &key, false)?;
-                    }
-                    body.map_or(Ok(()), |b| a.comment(&site2, &key, &b))
-                })
-                .await?;
-                // Either way it stays handed back: it may still match the JQL.
-                claim.released = true;
-                save_claim(ctx, &site, &id, &claim)?;
-                tracing::info!("{repo}: {} handed back", claim.issue.key);
-            }
+        let how = settle(open, job.as_ref(), waiting);
+        if how == Claim::Hold {
+            held += 1;
+            continue;
+        }
+        // Let go for good, before saying so: it may still match the JQL, and a failed comment
+        // mustn't bring it back.
+        claim.released = true;
+        save_claim(ctx, &site, &id, &claim)?;
+        if how == Claim::Forget {
+            continue;
+        }
+        // Someone chose you for `assigned` issues: say so, but leave the assignment.
+        let unassign = src.pickup == crate::config::JiraPickup::New;
+        let body = why_back(how, src.verb)
+            .map(|w| sign(s, &if unassign { format!("{w}, so it's free again.") } else { format!("{w}; it stays with its assignee.") }));
+        let (site2, key) = (site.clone(), claim.issue.key.clone());
+        let said = acli
+            .call(move |a| {
+                if unassign {
+                    a.assign(&site2, &key, false)?;
+                }
+                body.map_or(Ok(()), |b| a.comment(&site2, &key, &b))
+            })
+            .await;
+        match said {
+            Ok(()) => tracing::info!("{repo}: {} handed back", claim.issue.key),
+            Err(e) => tracing::warn!("{repo}: handed {} back, but couldn't say so in Jira: {e:#}", claim.issue.key),
         }
     }
     Ok(held)
@@ -315,14 +341,23 @@ async fn claim_jira(
         ctx.db(|d| d.set(&k, &first.to_string()))?;
         jql = format!("{jql} AND created >= -{}m", (now - first) / 60 + 1);
     }
+    let mut claims = jira_claims(ctx, &site)?;
+    // Not the ones this repo holds or anyone let go, or they'd fill the page before anything new.
+    // Other repos' held ones stay in, for the warning below. ponytail: the newest 200 keys; older
+    // let-go issues still matching are skipped below, but can crowd the page if hundreds pile up.
+    claims.sort_by_key(|(_, c)| std::cmp::Reverse(c.since));
+    let known: Vec<String> =
+        claims.iter().filter(|(_, c)| c.released || c.repo == repo.key()).take(200).map(|(_, c)| c.issue.key.clone()).collect();
+    if !known.is_empty() {
+        jql = format!("{jql} AND key not in ({})", known.join(", "));
+    }
     let (site2, limit) = (site.clone(), src.max_claimed * 5 + 10);
     let found = acli.call(move |a| a.search(&site2, &jql, limit)).await?;
-    let claims = jira_claims(ctx, &site)?;
     let me = match ctx.forge(repo) {
         Ok(f) => f.lock().await.me().to_string(),
         Err(_) => String::new(),
     };
-    for issue in found {
+    for issue in found.into_iter().filter(|i| !i.done) {
         if held >= src.max_claimed {
             break;
         }
@@ -333,27 +368,31 @@ async fn claim_jira(
             }
             continue;
         }
-        if src.pickup == crate::config::JiraPickup::New {
-            let (site2, key) = (site.clone(), issue.key.clone());
-            acli.call(move |a| a.assign(&site2, &key, true)).await?;
-        }
-        // Recorded right after the assignment, so a later failure still leaves it settled.
+        // Recorded before anything else, so whatever fails later still leaves it settled.
         let number = ctx.db(|d| {
             let n = d.get("jnext")?.and_then(|v| v.parse().ok()).unwrap_or(JIRA_NUMBERS);
             d.set("jnext", &(n + 1).to_string())?;
             Ok(n)
         })?;
         let jira = crate::jira::JiraRef { site: site.clone(), key: issue.key.clone(), paths: src.paths.clone() };
-        let claim = JiraClaim { repo: repo.key(), number, since: crate::state::now(), issue: jira, released: false };
-        save_claim(ctx, &site, &issue.id.to_string(), &claim)?;
+        let mut claim =
+            JiraClaim { repo: repo.key(), number, since: crate::state::now(), issue: jira, released: false, source: src.jql.clone() };
+        let id = issue.id.to_string();
+        save_claim(ctx, &site, &id, &claim)?;
+        if src.pickup == crate::config::JiraPickup::New {
+            let (site2, key) = (site.clone(), issue.key.clone());
+            // One issue it may not assign mustn't stop the rest: skip it for good.
+            if let Err(e) = acli.call(move |a| a.assign(&site2, &key, true)).await {
+                tracing::warn!("{repo}: couldn't assign {} to you, skipped: {e:#}", issue.key);
+                claim.released = true;
+                save_claim(ctx, &site, &id, &claim)?;
+                continue;
+            }
+        }
         held += 1;
         queue_jira(ctx, repo, src, &claim, &me)?;
-        let what = match src.verb {
-            Verb::Fix => "work on this and open a pull request",
-            Verb::Reproduce => "try to reproduce this",
-            _ => "triage this",
-        };
-        let (site2, key, body) = (site.clone(), issue.key.clone(), sign(s, &format!("Night Porter picked this up and will {what}.")));
+        let body = sign(s, &format!("Night Porter picked this up: it will {}.", will(src.verb)));
+        let (site2, key) = (site.clone(), issue.key.clone());
         if let Err(e) = acli.call(move |a| a.comment(&site2, &key, &body)).await {
             tracing::warn!("{repo}: claimed {}, but couldn't say so: {e:#}", issue.key);
         }
@@ -609,7 +648,7 @@ mod tests {
         assert!(e.body.contains("frontend/"), "{}", e.body);
         let c = ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().unwrap();
         assert_eq!((c.issue.key.as_str(), c.issue.paths.as_slice()), ("TKF-1", ["frontend/".to_string()].as_slice()));
-        assert!(calls().contains("assignee = currentUser() AND (project = TKF)"), "{}", calls());
+        assert!(calls().contains("assignee = currentUser() AND statusCategory != Done AND (project = TKF)"), "{}", calls());
         assert!(calls().contains("comment create --key TKF-1") && !calls().contains("assign --key"), "{}", calls());
         assert_eq!(std::fs::read_to_string(f.join("site")).unwrap().trim(), "home.jira.com", "acli back where it was");
 
@@ -617,18 +656,21 @@ mod tests {
         assert_eq!(jira_pickup(&ctx, &cfg).await, None);
         assert_eq!(pending().len(), 1);
 
-        // Done in Jira: let go.
+        // Done in Jira: let go for good, and not claimed again in the same pass, even if a search
+        // still returns it.
         std::fs::write(f.join("view-TKF-1.json"), issue(101, "TKF-1", "done", r#"{"accountId":"me1"}"#)).unwrap();
         ctx.db(|d| d.move_event(&e.id, Disposition::Pending, Disposition::Dropped, "test")).unwrap();
-        std::fs::write(f.join("search.json"), "[]").unwrap();
+        std::fs::write(f.join("search.json"), format!("[{}]", issue(101, "TKF-1", "done", r#"{"accountId":"me1"}"#))).unwrap();
         assert_eq!(jira_pickup(&ctx, &cfg).await, None);
-        assert!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().is_none());
+        assert!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().unwrap().released);
+        assert_eq!(pending().len(), 0);
+        assert!(calls().contains("AND key not in (TKF-1)"), "{}", calls());
 
         // `new`: unassigned issues created since the source was first seen, claimed by assigning.
         std::fs::write(&file, toml.replace("paths", "pickup = \"new\"\npaths")).unwrap();
         std::fs::write(f.join("search.json"), format!("[{}]", issue(102, "TKF-2", "new", "null"))).unwrap();
         assert_eq!(jira_pickup(&ctx, &cfg).await, None);
-        assert!(calls().contains("assignee is EMPTY AND (project = TKF) AND created >= -1m"), "{}", calls());
+        assert!(calls().contains("assignee is EMPTY AND statusCategory != Done AND (project = TKF) AND created >= -1m"), "{}", calls());
         assert!(calls().contains("assign --key TKF-2 --yes --assignee @me"), "{}", calls());
         assert_eq!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS + 1)).unwrap().unwrap().issue.key, "TKF-2");
     }

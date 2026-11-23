@@ -260,7 +260,14 @@ impl App {
         self.history.clone_from(&self.history_all);
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
         self.paused = actions::paused(&self.db);
-        self.jira_error = self.db.get(crate::daemon::JIRA_ERROR).ok().flatten();
+        let jira = self.db.get(crate::daemon::JIRA_ERROR).ok().flatten();
+        // A new error is spelled out once in the message line; `nightporter status` has it all.
+        if jira != self.jira_error
+            && let Some(e) = &jira
+        {
+            self.msg = format!("Jira pickup failed: {} (all of it: nightporter status)", e.lines().next().unwrap_or_default());
+        }
+        self.jira_error = jira;
         self.burst = actions::burst(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
@@ -822,18 +829,21 @@ impl App {
             Span::raw(" · "),
             if self.paused { Span::styled("PAUSED", self.style(warn)) } else { Span::styled("active", self.style(good)) },
             Span::raw(self.burst.map_or(String::new(), |b| format!(" · BURST {}m left", (b.until - crate::state::now()).max(0) / 60 + 1))),
+        ];
+        // Alerts before the counts, so a narrow terminal cuts the counts, not the alert.
+        if self.jira_error.is_some() {
+            status.extend([Span::raw(" · "), Span::styled("JIRA ERROR", self.style(bad))]);
+        }
+        status.extend([
             Span::raw(" · "),
             Span::styled(format!("{needs} need you"), count(needs, warn)),
             Span::raw(" · "),
             Span::styled(format!("{failed} failed today"), count(failed, bad)),
             Span::raw(" · "),
             Span::styled(format!("{} in inbox", self.inbox.len()), count(self.inbox.len(), warn)),
-        ];
+        ]);
         if self.update.is_some() {
             status.extend([Span::raw(" · "), Span::styled("update available", self.style(Style::new().fg(Color::Cyan)))]);
-        }
-        if self.jira_error.is_some() {
-            status.extend([Span::raw(" · "), Span::styled("JIRA ERROR (nightporter status)", self.style(bad))]);
         }
         Line::from(status)
     }

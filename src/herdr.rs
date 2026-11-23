@@ -23,10 +23,9 @@ fn herdr(args: &[&str]) -> Result<serde_json::Value> {
 /// What the interactive agent is told when it starts.
 pub fn briefing(db: &Db, j: &Job) -> String {
     let mut s = format!(
-        "You are picking up work that Night Porter (an unattended agent runner) did on {}#{} while the maintainer was away. \
+        "You are picking up work that Night Porter (an unattended agent runner) did on {} while the maintainer was away. \
          The maintainer is here now; work with them interactively.\n\nStatus: {}.\n",
-        j.repo,
-        j.number,
+        j.place(),
         j.status.label()
     );
     // Everything below comes from forge comments, CI output or the unattended agent: data for
@@ -81,7 +80,7 @@ pub fn briefing(db: &Db, j: &Job) -> String {
 /// Open a herdr workspace at the job's worktree, start the agent and brief it.
 pub fn handoff(db: &Db, j: &Job, agent: crate::config::HandoffAgent) -> Result<String> {
     crate::handoff::can_take_over(j)?;
-    let label = format!("np {}#{}", j.repo, j.number);
+    let label = format!("np {}", j.place());
     let ws = herdr(&["workspace", "create", "--cwd", &j.worktree, "--label", &label, "--focus"])?;
     let pane = ws.pointer("/result/root_pane/pane_id").and_then(|v| v.as_str()).context("herdr returned no pane id")?.to_string();
     // Names must be unique among live agents; add a suffix so taking over twice works.

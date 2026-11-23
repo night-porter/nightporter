@@ -35,8 +35,11 @@ pub struct Issue {
     pub done: bool,
     /// Account ids; empty when unassigned.
     pub assignee: String,
-    pub reporter: String,
-    pub reporter_name: String,
+    /// Who created it: unlike the reporter, nobody can change that afterwards.
+    pub creator: String,
+    pub creator_name: String,
+    /// Who wrote its comments (a view only), by account id.
+    pub commenters: Vec<String>,
     /// Description, then the comments (a view only).
     pub text: String,
 }
@@ -46,8 +49,10 @@ impl Issue {
         let f = &v["fields"];
         let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
         let mut text = adf_text(&f["description"]);
+        let mut commenters = Vec::new();
         for c in f["comment"]["comments"].as_array().into_iter().flatten() {
             let _ = write!(text, "\n\n--- comment by {} ---\n{}", s(&c["author"]["displayName"]), adf_text(&c["body"]));
+            commenters.push(s(&c["author"]["accountId"]));
         }
         Ok(Self {
             id: s(&v["id"]).parse().with_context(|| format!("jira issue without a numeric id: {v}"))?,
@@ -55,8 +60,9 @@ impl Issue {
             summary: s(&f["summary"]),
             done: f["status"]["statusCategory"]["key"] == "done",
             assignee: s(&f["assignee"]["accountId"]),
-            reporter: s(&f["reporter"]["accountId"]),
-            reporter_name: s(&f["reporter"]["displayName"]),
+            creator: s(&f["creator"]["accountId"]),
+            creator_name: s(&f["creator"]["displayName"]),
+            commenters,
             text: text.trim().to_string(),
         })
     }
@@ -104,11 +110,12 @@ impl Acli {
 
     /// Your account id on `site`: who `assigned` issues belong to, and whose text isn't a stranger's.
     pub fn account(&self, site: &str) -> Option<String> {
-        profiles_in(&self.config).into_iter().find(|(s, _)| s == site).map(|(_, a)| a)
+        profiles_in(&self.config).into_iter().find(|(s, _)| s == site).map(|(_, a)| a).filter(|a| !a.is_empty())
     }
 
-    /// `acli jira <args>` on `site`. Switches back to the site that was current before, and fails
-    /// if `acli` doesn't end up there (someone else switched meanwhile, or the switch back failed).
+    /// `acli jira <args>` on `site`, then back to the site that was current before. A command that
+    /// went through is never reported as failed: a problem switching back is only logged, so a
+    /// caller doesn't redo (or forget) what it did.
     pub fn run(&self, site: &str, args: &[&str]) -> Result<String> {
         if let Some(d) = self.lock.parent() {
             std::fs::create_dir_all(d)?;
@@ -123,14 +130,28 @@ impl Acli {
         let before = self.current_site()?;
         if before != site {
             self.acli(&["auth", "switch", "--site", site])
-                .with_context(|| format!("acli: switch to {site} (log in: acli jira auth login)"))?;
+                .with_context(|| format!("acli: can't switch to {site}; log in to it: acli jira auth login --site {site}"))?;
+            // ponytail: something outside the lock (your terminal) can still switch in between; an
+            // acli option per command, if it gets one, would close that.
+            let now = self.current_site()?;
+            if now != site {
+                bail!("acli is on {now} right after switching to {site}; did something else switch it?");
+            }
         }
         let out = self.acli(args);
         if before != site {
-            self.acli(&["auth", "switch", "--site", &before]).with_context(|| format!("acli: switch back to {before}"))?;
-            let now = self.current_site()?;
-            if now != before {
-                bail!("acli is on {now}, not {before} as before Night Porter used it; check `acli jira auth status`");
+            let back = self.acli(&["auth", "switch", "--site", &before]).and_then(|_| self.current_site());
+            let problem = match back {
+                Ok(now) if now == before => None,
+                Ok(now) => Some(format!("acli's site changed to {now} while Night Porter used it")),
+                Err(e) => Some(format!("{e:#}")),
+            };
+            if let Some(p) = problem {
+                let msg = format!("{p}; your terminal's acli may not be on {before}: acli jira auth switch --site {before}");
+                match &out {
+                    Ok(_) => tracing::warn!("{msg}"),
+                    Err(e) => bail!("{e:#}; also {msg}"),
+                }
             }
         }
         out
@@ -141,7 +162,7 @@ impl Acli {
         let jql = format!("{jql} ORDER BY created ASC");
         let out = self.run(
             site,
-            &["workitem", "search", "--jql", &jql, "--fields", "summary,status,assignee,reporter", "--limit", &limit.to_string(), "--json"],
+            &["workitem", "search", "--jql", &jql, "--fields", "summary,status,assignee,creator", "--limit", &limit.to_string(), "--json"],
         )?;
         let v: Value = serde_json::from_str(&out).with_context(|| format!("acli search on {site}: not JSON"))?;
         v.as_array().into_iter().flatten().map(Issue::parse).collect()
@@ -150,13 +171,15 @@ impl Acli {
     /// One issue with its description and comments.
     pub fn view(&self, site: &str, key: &str) -> Result<Issue> {
         let out =
-            self.run(site, &["workitem", "view", key, "--fields", "summary,description,comment,status,assignee,reporter", "--json"])?;
+            self.run(site, &["workitem", "view", key, "--fields", "summary,description,comment,status,assignee,creator", "--json"])?;
         Issue::parse(&serde_json::from_str(&out).with_context(|| format!("acli view {key}: not JSON"))?)
     }
 
     /// A comment written in Markdown, sent as Atlassian Document Format so it keeps its layout.
+    /// Jira shows HTML as text, so `sign`'s hidden marker is dropped and its footer kept as words.
     pub fn comment(&self, site: &str, key: &str, markdown: &str) -> Result<()> {
-        self.run(site, &["workitem", "comment", "create", "--key", key, "--body", &md_to_adf(markdown).to_string()]).map(|_| ())
+        let md = markdown.replace(crate::prompts::FOOTER_MARK, "").replace("<sub>", "").replace("</sub>", "");
+        self.run(site, &["workitem", "comment", "create", "--key", key, "--body", &md_to_adf(md.trim_end()).to_string()]).map(|_| ())
     }
 
     /// Assign to you (`on`) or to nobody.
@@ -166,22 +189,60 @@ impl Acli {
     }
 
     fn current_site(&self) -> Result<String> {
-        let out = self.acli(&["auth", "status"]).context("acli: not logged in to Jira (acli jira auth login)")?;
+        let out =
+            self.acli(&["auth", "status"]).context("acli isn't logged in to any Jira site: acli jira auth login --site <your-site>")?;
         out.lines()
             .find_map(|l| l.trim().strip_prefix("Site:").map(|s| s.trim().to_string()))
             .context("acli jira auth status: no Site line")
     }
 
+    /// One `acli jira` command, killed after two minutes: a hung one holds the lock for everyone.
     fn acli(&self, args: &[&str]) -> Result<String> {
-        let o = Command::new(&self.bin).arg("jira").args(args).output().with_context(|| format!("run {}", self.bin.display()))?;
+        let mut child = Command::new(&self.bin)
+            .arg("jira")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("run {}", self.bin.display()))?;
+        let what = args[..args.len().min(2)].join(" ");
+        // Read both pipes while it runs, or a big reply (a view with its comments) fills one and hangs.
+        let read = |p: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = p {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        let out = read(child.stdout.take().map(|p| Box::new(p) as _));
+        let err = read(child.stderr.take().map(|p| Box::new(p) as _));
+        let deadline = std::time::Instant::now() + ACLI_TIMEOUT;
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("acli jira {what}: no answer in {}s", ACLI_TIMEOUT.as_secs());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let join = |h: std::thread::JoinHandle<Vec<u8>>| h.join().unwrap_or_default();
+        let o = std::process::Output { status, stdout: join(out), stderr: join(err) };
         if !o.status.success() {
             // acli prints some errors (`✗ Error: ...`) on stdout.
             let err = [&o.stderr, &o.stdout].map(|b| String::from_utf8_lossy(b).trim().to_string()).join(" ");
-            bail!("acli jira {}: {}", args[..args.len().min(2)].join(" "), err.trim());
+            bail!("acli jira {what}: {}", err.trim().trim_start_matches('✗').trim());
         }
         Ok(String::from_utf8_lossy(&o.stdout).into_owned())
     }
 }
+
+const ACLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// `(site, account_id)` per profile in `acli`'s config (`- site: x` starts one).
 fn profiles_in(file: &Path) -> Vec<(String, String)> {
@@ -201,7 +262,16 @@ fn profiles_in(file: &Path) -> Vec<(String, String)> {
 fn adf_text(v: &Value) -> String {
     fn walk(v: &Value, out: &mut String) {
         match v["type"].as_str().unwrap_or_default() {
-            "text" => out.push_str(v["text"].as_str().unwrap_or_default()),
+            "text" => {
+                out.push_str(v["text"].as_str().unwrap_or_default());
+                // A link's words alone would lose where it goes.
+                let marks = v["marks"].as_array().into_iter().flatten();
+                if let Some(href) = marks.filter(|m| m["type"] == "link").find_map(|m| m["attrs"]["href"].as_str()) {
+                    let _ = write!(out, " ({href})");
+                }
+            }
+            "inlineCard" | "blockCard" | "embedCard" => out.push_str(v["attrs"]["url"].as_str().unwrap_or_default()),
+            "mention" => out.push_str(v["attrs"]["text"].as_str().unwrap_or_default()),
             "hardBreak" => out.push('\n'),
             "listItem" => out.push_str("- "),
             "codeBlock" => out.push_str("```\n"),
@@ -251,7 +321,8 @@ pub fn md_to_adf(md: &str) -> Value {
                 code.push(c);
             }
             let mut b = json!({ "type": "codeBlock", "content": [{ "type": "text", "text": code.join("\n") }] });
-            if code.is_empty() {
+            // ADF refuses an empty text node.
+            if code.iter().all(|l| l.is_empty()) {
                 b["content"] = json!([]);
             }
             if !lang.trim().is_empty() {
@@ -350,7 +421,13 @@ fn inline(s: &str) -> Vec<Value> {
             (Some(t), Some(u), ..) => text(t.as_str(), link(u.as_str())),
             (_, _, Some(code), ..) => text(code.as_str(), json!([{ "type": "code" }])),
             (_, _, _, Some(b), _) => text(b.as_str(), json!([{ "type": "strong" }])),
-            (.., Some(u)) => text(u.as_str(), link(u.as_str())),
+            (.., Some(u)) => {
+                // "see https://x.io/1." links to …/1, and the full stop stays text.
+                let url = u.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+                out.push(text(url, link(url)));
+                at = u.start() + url.len();
+                continue;
+            }
             _ => continue,
         });
         at = m.end();
@@ -400,6 +477,9 @@ mod tests {
         assert_eq!(calls() - n, 2, "status + the command");
         let e = a.run("nowhere", &["workitem", "search"]).unwrap_err();
         assert!(format!("{e:#}").contains("switch to nowhere"), "{e:#}");
+        // A command that went through isn't reported as failed when the switch back fails.
+        std::fs::write(d.path().join("site"), "nowhere\n").unwrap();
+        assert_eq!(a.run("other.atlassian.net", &["workitem", "search"]).unwrap().trim(), "ran on other.atlassian.net");
     }
 
     #[test]
@@ -429,20 +509,26 @@ mod tests {
         assert_eq!(doc["content"][2]["content"].as_array().unwrap().len(), 2);
         assert_eq!(doc["content"][4]["attrs"]["language"], "rust");
         assert_eq!(md_to_adf("see https://a.io/x")["content"][0]["content"][1]["marks"][0]["attrs"]["href"], "https://a.io/x");
+        let end = &md_to_adf("see https://a.io/x.")["content"][0]["content"];
+        assert_eq!((end[1]["text"].as_str(), end[2]["text"].as_str()), (Some("https://a.io/x"), Some(".")));
+        assert_eq!(md_to_adf("```\n\n```")["content"][0]["content"], json!([]), "no empty text node");
     }
 
     #[test]
     fn adf_reads_as_text() {
         let v: Value = serde_json::from_str(
             r#"{"id":"759125","key":"TKF-559","fields":{"summary":"S","status":{"statusCategory":{"key":"done"}},
-               "reporter":{"accountId":"r1","displayName":"Ann"},"assignee":null,
+               "creator":{"accountId":"r1","displayName":"Ann"},"assignee":null,
                "description":{"type":"doc","content":[{"type":"heading","content":[{"type":"text","text":"Problem"}]},
-                 {"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"a"}]}]}]}]},
-               "comment":{"comments":[{"author":{"displayName":"Bob"},"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"hi"}]}]}}]}}}"#,
+                 {"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"a"}]}]}]},
+                 {"type":"paragraph","content":[{"type":"text","text":"see "},{"type":"text","text":"log","marks":[{"type":"link","attrs":{"href":"https://l.io"}}]},
+                   {"type":"text","text":" "},{"type":"inlineCard","attrs":{"url":"https://c.io"}},{"type":"text","text":" "},{"type":"mention","attrs":{"text":"@Cy"}}]}]},
+               "comment":{"comments":[{"author":{"displayName":"Bob","accountId":"b2"},"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"hi"}]}]}}]}}}"#,
         )
         .unwrap();
         let i = Issue::parse(&v).unwrap();
-        assert_eq!((i.id, i.key.as_str(), i.done, i.assignee.as_str(), i.reporter.as_str()), (759_125, "TKF-559", true, "", "r1"));
-        assert_eq!(i.text, "Problem\n- a\n\n\n--- comment by Bob ---\nhi");
+        assert_eq!((i.id, i.key.as_str(), i.done, i.assignee.as_str(), i.creator.as_str()), (759_125, "TKF-559", true, "", "r1"));
+        assert_eq!(i.commenters, ["b2"]);
+        assert_eq!(i.text, "Problem\n- a\nsee log (https://l.io) https://c.io @Cy\n\n\n--- comment by Bob ---\nhi");
     }
 }

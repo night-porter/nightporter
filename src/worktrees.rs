@@ -67,7 +67,7 @@ pub async fn remove(paths: &Paths, cfg: &Config, db: &Db, id: i64) -> Result<Str
         bail!("job {id} has no worktree left");
     }
     if db.pr_busy(&j.repo, j.number)? {
-        bail!("a job on {}#{} is queued, running or waiting for you: finish or dismiss it first", j.repo, j.number);
+        bail!("a job on {} is queued, running or waiting for you: finish or dismiss it first", j.place());
     }
     let kept = crate::job::remove(paths, cfg, &j).await?;
     Ok(match kept {
@@ -81,7 +81,7 @@ pub async fn remove(paths: &Paths, cfg: &Config, db: &Db, id: i64) -> Result<Str
 pub async fn restore(db: &Db, id: i64, which: Option<&str>) -> Result<String> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     if db.pr_busy(&j.repo, j.number)? {
-        bail!("a job on {}#{} is queued or running: it would reset the worktree", j.repo, j.number);
+        bail!("a job on {} is queued or running: it would reset the worktree", j.place());
     }
     let clone = Path::new(&j.meta.clone);
     let slug = j.branch.replace('/', "-");
