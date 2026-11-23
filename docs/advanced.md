@@ -441,6 +441,77 @@ Running the same sweep again only queues items it hasn't queued before.
 For a sweep that only reads, set `level = "suggest"` under `[maintainer]`: triage replies then
 show up in the TUI as copy-paste text and nothing is posted.
 
+### Jira issues
+
+Night Porter can work on Jira Cloud issues too, through Atlassian's
+[`acli`](https://developer.atlassian.com/cloud/acli/). Log `acli` in to each site once
+(`acli jira auth login --site acme.atlassian.net`); Night Porter uses those logins. Map a site's
+issues to a repo with `[[jira]]` in that repo's own file, as many as you need: one project can
+feed several repos, and several projects one repo.
+
+```toml
+# repos/github/acme/web.toml
+[[jira]]
+site = "acme.atlassian.net"
+jql = "project = FE"          # which issues; no ORDER BY
+paths = ["frontend/"]         # optional: the part of the repo they belong in
+pickup = "assigned"           # or "new"
+verb = "fix"                  # triage, reproduce or fix
+max_claimed = 2
+```
+
+- **`pickup = "assigned"`** (the default) works on issues someone assigned to you. Night Porter
+  never assigns or unassigns them; when it hands one back it says so in a comment and leaves it
+  with you.
+- **`pickup = "new"`** claims unassigned issues created after the entry was added, by assigning
+  them to you, but only if nobody took them in the meantime. Handing one back unassigns it only
+  if it's still yours.
+
+`creators = ["<account id>", …]` limits either mode to issues those people created (the
+creator, unlike the reporter, can't be changed later). Issues in a Done status are never picked
+up, and an issue Night Porter let go of (handed back, done, its PR merged) isn't claimed again.
+
+Every `sweep_interval` it settles what it holds, then claims more up to `max_claimed`, with a
+comment on each. The job works on a `nightporter/jira/<site>/ABC-123` branch (`<site>`: the
+first part of its address, e.g. `acme`) and opens a PR titled
+`ABC-123: …`, so Jira's GitHub or GitLab app links them; it also comments the PR's link on the
+issue. Replies go to the issue as Jira comments. The issue's text and comments are
+[untrusted](/threat-model) unless you created the issue and wrote every comment, and jobs follow
+the maintainer level like any other.
+
+**Status.** While the PR is a draft the issue moves to In Progress; once it's ready for review,
+to In Review. Night Porter never moves an issue to Done, and an issue someone already moved on
+is left where it is. It lets go of the issue when the PR merges or closes. Workflows name their
+statuses differently, so it tries these in order and remembers, per project, the one that
+worked:
+
+- In Progress: `In Progress`, `Doing`, `In Development`
+- In Review: `In Review`, `Code Review`, `Review`, `Testing`, `QA`
+
+Name your own for a whole site in `config.toml`, or for one entry:
+
+```toml
+# config.toml
+[jira_sites."acme.atlassian.net"]
+in_progress = ["Doing"]
+in_review = ["Reviewing"]
+```
+
+If no name works, the log says so once, with the issue's status.
+
+**Several repos, one issue.** When entries in different repos match the same issue, the one
+with the highest `priority` (default `0`) claims it, then repo names in order; the others log a
+warning. `paths` tells the agent where the work belongs, and changes outside them need your
+approval. `nightporter doctor` checks `acli`'s logins, runs each entry's JQL, and warns about
+entries that overlap.
+
+**One `acli`.** `acli` has one current site. Night Porter takes a lock, switches to the site it
+needs, checks it got there, and switches back. The lock (`~/.config/acli/nightporter.lock`) is
+shared by every Night Porter on the machine, but your terminal's `acli` doesn't take it, so
+avoid switching sites by hand while the daemon is busy with Jira; if the switch back goes wrong,
+the log says which site to switch to. When pickup fails, `nightporter status` lists each failing
+entry and the TUI header shows JIRA ERROR.
+
 ## Replies
 
 ```toml

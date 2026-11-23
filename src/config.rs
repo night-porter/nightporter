@@ -57,6 +57,9 @@ pub struct Config {
     /// Raw `[defaults]` table; resolved per repo by [`Config::settings_for`].
     #[serde(default)]
     pub defaults: toml::Table,
+    /// `[jira_sites."acme.atlassian.net"]`: the status names a site's projects use.
+    #[serde(default)]
+    pub jira_sites: std::collections::BTreeMap<String, JiraStatuses>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -554,6 +557,30 @@ pub struct JiraSource {
     /// can't be changed later). Empty: anyone's.
     #[serde(default)]
     pub creators: Vec<String>,
+    /// Status names to move its issues to, tried in order. Empty: the site's, then the defaults.
+    #[serde(default)]
+    pub in_progress: Vec<String>,
+    #[serde(default)]
+    pub in_review: Vec<String>,
+}
+
+/// Status names Night Porter moves issues to: In Progress once it opens a draft PR, In Review
+/// once the PR is ready. Never Done.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JiraStatuses {
+    #[serde(default)]
+    pub in_progress: Vec<String>,
+    #[serde(default)]
+    pub in_review: Vec<String>,
+}
+
+/// Where a Jira issue's PR is: a draft, or ready for review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraStage {
+    InProgress,
+    InReview,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -567,6 +594,21 @@ pub enum JiraPickup {
 }
 
 impl JiraSource {
+    /// The status names to try for `stage`: this entry's, else the site's, else the usual ones.
+    pub fn statuses(&self, cfg: &Config, stage: JiraStage) -> Vec<String> {
+        let site = cfg.jira_sites.get(&self.site);
+        let (own, site, usual): (&[String], &[String], &[&str]) = match stage {
+            JiraStage::InProgress => (&self.in_progress, site.map_or(&[], |s| &s.in_progress), &["In Progress", "Doing", "In Development"]),
+            JiraStage::InReview => {
+                (&self.in_review, site.map_or(&[], |s| &s.in_review), &["In Review", "Code Review", "Review", "Testing", "QA"])
+            }
+        };
+        match [own, site].into_iter().find(|v| !v.is_empty()) {
+            Some(v) => v.to_vec(),
+            None => usual.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
     /// The JQL `acli` runs: `jql` narrowed to the pickup mode's assignee, never a Done issue.
     pub fn query(&self) -> String {
         let who = match self.pickup {
@@ -1418,6 +1460,12 @@ mod tests {
             assert!(src(bad).is_err(), "{bad}");
         }
         assert!(Config::parse("[[defaults.jira]]\nsite = \"a.atlassian.net\"\njql = \"project = FE\"").is_err(), "per repo only");
+        // Status names: the entry's, else the site's, else the usual ones.
+        let site = Config::parse("[jira_sites.\"a.atlassian.net\"]\nin_review = [\"Reviewing\"]").unwrap();
+        let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\nin_progress = [\"Doing\"]").unwrap();
+        assert_eq!(j.statuses(&site, JiraStage::InProgress), ["Doing"]);
+        assert_eq!(j.statuses(&site, JiraStage::InReview), ["Reviewing"]);
+        assert_eq!(j.statuses(&cfg, JiraStage::InReview)[0], "In Review");
     }
 
     #[test]

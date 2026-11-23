@@ -8,6 +8,10 @@ All notable changes to Night Porter. The format follows
 
 ### Added
 
+- Jira Cloud issues, through `acli` and its logins: `[[jira]]` in a repo's own file maps a site and JQL to the repo (`paths` for the part of the repo, `priority` when several repos match). `pickup = "assigned"` works on issues assigned to you and never changes the assignee; `pickup = "new"` claims new unassigned issues (optionally only from `creators`) by assigning them to you. Jobs open `ABC-123: …` PRs on `nightporter/jira/<site>/ABC-123` branches, comment the PR link and replies on the issue, move it to In Progress (draft PR) and In Review (ready PR), never Done, and let go when the PR merges or closes. Status names are tried from built-in defaults, `[jira_sites."<site>"]` or the entry, and the one that works is remembered per project. `doctor` checks `acli`'s logins, each entry's JQL and overlapping entries. See [Jira issues](docs/advanced.md#jira-issues).
+
+### Added
+
 - `o` in the Queue and History tabs orders jobs by creation or by last update; each row shows the date the list is ordered by. `nightporter status` shows when each job was last updated.
 
 ### Fixed

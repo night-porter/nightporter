@@ -2,6 +2,7 @@
 //! picked by label and age. The jobs go through the normal queue (debounce, schedule, caps) and
 //! stop at maintainer mode's level (at most draft), so you review each one.
 
+use crate::config::JiraStage;
 use crate::daemon::Ctx;
 use crate::forge::{Event, Listed, Pick, RepoId, Role, Target, Trigger, Verb};
 use crate::state::{Disposition, JobStatus};
@@ -207,6 +208,9 @@ pub struct JiraClaim {
     /// The `[[jira]]` entry's JQL, so two entries on one repo and site settle only their own.
     #[serde(default)]
     pub source: String,
+    /// The furthest status move made for its PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<JiraStage>,
 }
 
 /// The claim behind a `Target::Jira` job's number (`None` for any other number).
@@ -231,7 +235,7 @@ pub async fn jira_pickup(ctx: &Ctx, cfg: &crate::config::Config) -> Option<Strin
     let mut errs = Vec::new();
     for (repo, s, idx) in &sources {
         let src = &s.jira[*idx];
-        if let Err(e) = jira_source(ctx, repo, s, src).await {
+        if let Err(e) = jira_source(ctx, cfg, repo, s, src).await {
             let msg = format!("{repo} ({}): {e:#}", src.site);
             ctx.warn_every(&format!("jira:{}:{idx}", repo.key()), 3600, &msg);
             errs.push(msg);
@@ -240,11 +244,17 @@ pub async fn jira_pickup(ctx: &Ctx, cfg: &crate::config::Config) -> Option<Strin
     (!errs.is_empty()).then(|| errs.join("\n"))
 }
 
-async fn jira_source(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, src: &crate::config::JiraSource) -> Result<()> {
+async fn jira_source(
+    ctx: &Ctx,
+    cfg: &crate::config::Config,
+    repo: &RepoId,
+    s: &crate::config::RepoSettings,
+    src: &crate::config::JiraSource,
+) -> Result<()> {
     let acli = crate::jira::Acli::new(&ctx.paths);
     let mine =
         acli.account(&src.site).with_context(|| format!("acli isn't logged in to {0}: acli jira auth login --site {0}", src.site))?;
-    let held = settle_jira(ctx, &acli, repo, s, src, &mine).await?;
+    let held = settle_jira(ctx, cfg, &acli, repo, s, src, &mine).await?;
     if held < src.max_claimed {
         claim_jira(ctx, &acli, repo, s, src, &mine, held).await?;
     }
@@ -264,6 +274,7 @@ fn save_claim(ctx: &Ctx, site: &str, id: &str, claim: &JiraClaim) -> Result<()> 
 /// The source's claims: kept, let go, or handed back. Returns how many it still holds.
 async fn settle_jira(
     ctx: &Ctx,
+    cfg: &crate::config::Config,
     acli: &crate::jira::Acli,
     repo: &RepoId,
     s: &crate::config::RepoSettings,
@@ -296,7 +307,14 @@ async fn settle_jira(
         let waiting = pending.iter().any(|(e, _)| e.repo == *repo && e.number == claim.number);
         let how = settle(open, job.as_ref(), waiting);
         if how == Claim::Hold {
-            held += 1;
+            // With a PR: follow it in Jira's status, and let go once it merges or closes.
+            let pr = job.map(|j| j.meta.pr_url).filter(|u| !u.is_empty());
+            let keep = match pr {
+                Some(url) => follow_pr(ctx, cfg, acli, repo, src, &issue, &url, &mut claim).await?,
+                None => true,
+            };
+            held += usize::from(keep);
+            save_claim(ctx, &site, &id, &claim)?;
             continue;
         }
         // Let go for good, before saying so: it may still match the JQL, and a failed comment
@@ -325,6 +343,88 @@ async fn settle_jira(
         }
     }
     Ok(held)
+}
+
+/// A held issue's PR: let go once it merges or closes (Done is people's call), else move the
+/// issue to In Progress while the PR is a draft and In Review once it's ready, once each.
+/// Returns whether it's still held.
+#[allow(clippy::too_many_arguments, reason = "the sweep's context, passed down")]
+async fn follow_pr(
+    ctx: &Ctx,
+    cfg: &crate::config::Config,
+    acli: &crate::jira::Acli,
+    repo: &RepoId,
+    src: &crate::config::JiraSource,
+    issue: &crate::jira::Issue,
+    url: &str,
+    claim: &mut JiraClaim,
+) -> Result<bool> {
+    let n = url.rsplit('/').next().and_then(|n| n.parse().ok()).with_context(|| format!("no PR number in {url}"))?;
+    let pr = ctx.forge(repo)?.lock().await.pr(repo, n).await?;
+    if pr.state != crate::forge::PrState::Open {
+        claim.released = true;
+        tracing::info!("{repo}: {} let go: its PR is {}", issue.key, crate::state::enum_str(&pr.state));
+        return Ok(false);
+    }
+    let stage = if pr.draft { JiraStage::InProgress } else { JiraStage::InReview };
+    if claim.moved >= Some(stage) {
+        return Ok(true);
+    }
+    // Recorded whatever happens: a workflow without the status shouldn't be retried every sweep.
+    claim.moved = Some(stage);
+    match move_issue(ctx, cfg, acli, src, issue, stage).await {
+        Ok(Some(to)) => tracing::info!("{repo}: moved {} to {to}", issue.key),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("{repo}: {e:#}"),
+    }
+    Ok(true)
+}
+
+/// Move `issue` to the first of `stage`'s status names its workflow takes, starting with the
+/// one that worked last time in its project. `None`: it's there already, or (In Progress)
+/// someone moved it on.
+async fn move_issue(
+    ctx: &Ctx,
+    cfg: &crate::config::Config,
+    acli: &crate::jira::Acli,
+    src: &crate::config::JiraSource,
+    issue: &crate::jira::Issue,
+    stage: JiraStage,
+) -> Result<Option<String>> {
+    let mut names = src.statuses(cfg, stage);
+    let is = |n: &str| names.iter().any(|x| x.eq_ignore_ascii_case(n));
+    if is(&issue.status) || (stage == JiraStage::InProgress && !issue.todo) {
+        return Ok(None);
+    }
+    let project = issue.key.split('-').next().unwrap_or_default();
+    let k = format!("jstatus:{}:{project}:{}", src.site, crate::state::enum_str(&stage));
+    if let Some(known) = ctx.db(|d| d.get(&k))?.filter(|n| is(n)) {
+        names.retain(|n| *n != known);
+        names.insert(0, known);
+    }
+    let (site, key, tried) = (src.site.clone(), issue.key.clone(), names.join(", "));
+    // A move it can't make may still exit 0: believe the issue's status, not the exit code.
+    let moved = acli
+        .call(move |a| {
+            for n in names {
+                if a.transition(&site, &key, &n).is_ok() && a.view(&site, &key)?.status.eq_ignore_ascii_case(&n) {
+                    return Ok(Some(n));
+                }
+            }
+            Ok(None)
+        })
+        .await?;
+    let Some(to) = moved else {
+        let field = crate::state::enum_str(&stage);
+        bail!(
+            "couldn't move {} from {:?} to any of: {tried}. Name the status its workflow uses as {field} in the [[jira]] entry or [jira_sites.\"{}\"]",
+            issue.key,
+            issue.status,
+            src.site
+        );
+    };
+    ctx.db(|d| d.set(&k, &to))?;
+    Ok(Some(to))
 }
 
 /// Claim and queue new matches until the source holds `max_claimed`.
@@ -375,8 +475,15 @@ async fn claim_jira(
             Ok(n)
         })?;
         let jira = crate::jira::JiraRef { site: site.clone(), key: issue.key.clone(), paths: src.paths.clone() };
-        let mut claim =
-            JiraClaim { repo: repo.key(), number, since: crate::state::now(), issue: jira, released: false, source: src.jql.clone() };
+        let mut claim = JiraClaim {
+            repo: repo.key(),
+            number,
+            since: crate::state::now(),
+            issue: jira,
+            released: false,
+            source: src.jql.clone(),
+            moved: None,
+        };
         let id = issue.id.to_string();
         save_claim(ctx, &site, &id, &claim)?;
         if src.pickup == crate::config::JiraPickup::New {
@@ -600,12 +707,11 @@ mod tests {
     use super::*;
     use crate::forge::ForgeKind;
 
-    #[tokio::test]
-    async fn jira_pickup_claims_queues_and_settles() {
-        let d = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths::at(&d.path().join("c"), &d.path().join("d"));
+    /// A fake `acli` logged in to s.atlassian.net as `me1`, recording its calls in `calls`. Its
+    /// workflows take one move: to "Doing"; any other move exits 0 and changes nothing.
+    fn fake_acli(dir: &std::path::Path, paths: &crate::paths::Paths) -> std::path::PathBuf {
         paths.ensure().unwrap();
-        let f = d.path().join("fake");
+        let f = dir.join("fake");
         std::fs::create_dir_all(&f).unwrap();
         let bin = f.join("acli");
         std::fs::write(
@@ -616,7 +722,8 @@ mod tests {
                  'auth switch') echo \"$5\" > $d/site ;;\n\
                  'workitem search') cat $d/search.json ;;\n\
                  'workitem view') cat $d/view-$4.json ;;\n\
-                 esac\n",
+                 'workitem transition') [ \"$7\" = Doing ] && sed 's/\"name\":\"[^\"]*\"/\"name\":\"Doing\"/' $d/view-$5.json > $d/t && mv $d/t $d/view-$5.json ;;\n\
+                 esac\nexit 0\n",
                 f.display()
             ),
         )
@@ -626,6 +733,50 @@ mod tests {
         std::fs::write(f.join("site"), "home.jira.com\n").unwrap();
         std::fs::write(f.join("jira_config.yaml"), "profiles:\n    - site: s.atlassian.net\n      account_id: me1\n").unwrap();
         crate::jira::install_fake(&paths.data_dir, bin, f.join("jira_config.yaml"));
+        f
+    }
+
+    #[tokio::test]
+    async fn jira_moves_to_a_status_its_workflow_takes_and_remembers_it() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(&d.path().join("c"), &d.path().join("d"));
+        let f = fake_acli(d.path(), &paths);
+        let view = |status: &str, cat: &str| {
+            format!(
+                r#"{{"id":"1","key":"TKF-1","fields":{{"summary":"S","status":{{"name":"{status}","statusCategory":{{"key":"{cat}"}}}}}}}}"#
+            )
+        };
+        let cfg = crate::config::Config::parse("").unwrap();
+        let ctx = crate::daemon::test_ctx(paths, cfg.clone(), crate::repos::CloneMap::new());
+        let acli = crate::jira::Acli::new(&ctx.paths);
+        let src: crate::config::JiraSource = toml::from_str("site = \"s.atlassian.net\"\njql = \"project = TKF\"").unwrap();
+        let calls = || std::fs::read_to_string(f.join("calls")).unwrap_or_default();
+        let issue = |v: &str| {
+            std::fs::write(f.join("view-TKF-1.json"), v).unwrap();
+            acli.view("s.atlassian.net", "TKF-1").unwrap()
+        };
+
+        // "In Progress" isn't a move here; "Doing" is, and is remembered for TKF.
+        let todo = issue(&view("To Do", "new"));
+        assert_eq!(move_issue(&ctx, &cfg, &acli, &src, &todo, JiraStage::InProgress).await.unwrap().as_deref(), Some("Doing"));
+        assert!(calls().contains("--status In Progress --yes") && calls().contains("--status Doing --yes"), "{}", calls());
+        let todo = issue(&view("To Do", "new"));
+        std::fs::remove_file(f.join("calls")).unwrap();
+        assert_eq!(move_issue(&ctx, &cfg, &acli, &src, &todo, JiraStage::InProgress).await.unwrap().as_deref(), Some("Doing"));
+        assert!(!calls().contains("--status In Progress"), "the remembered name goes first: {}", calls());
+
+        // Already moved on by someone: left alone. No review status at all: an error that says how to fix it.
+        let blocked = issue(&view("Blocked", "indeterminate"));
+        assert_eq!(move_issue(&ctx, &cfg, &acli, &src, &blocked, JiraStage::InProgress).await.unwrap(), None);
+        let e = move_issue(&ctx, &cfg, &acli, &src, &blocked, JiraStage::InReview).await.unwrap_err().to_string();
+        assert!(e.contains("in_review") && e.contains("jira_sites"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn jira_pickup_claims_queues_and_settles() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(&d.path().join("c"), &d.path().join("d"));
+        let f = fake_acli(d.path(), &paths);
         let issue = |id: u32, key: &str, status: &str, assignee: &str| {
             format!(
                 r#"{{"id":"{id}","key":"{key}","fields":{{"summary":"Broken","status":{{"statusCategory":{{"key":"{status}"}}}},

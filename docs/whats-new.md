@@ -6,6 +6,15 @@ description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: release-aware tr
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
+## Next
+
+### Jira issues
+
+**It works on Jira Cloud issues.** Map a Jira project to a repo with `[[jira]]` and Night Porter
+picks up the issues assigned to you (or new ones, if you let it), opens a PR named after the
+issue key, comments the link, and moves the issue to In Progress and then In Review. It uses
+`acli`'s logins, so several sites work side by side. See [Jira issues](/advanced#jira-issues).
+
 ## 0.6
 
 ### Release-aware triage (0.6.1)
