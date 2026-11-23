@@ -12,6 +12,7 @@ mod handoff;
 mod herdr;
 mod http;
 mod improve;
+mod jira;
 mod job;
 mod notify;
 mod packs;

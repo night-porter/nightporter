@@ -522,6 +522,75 @@ pub struct RepoSettings {
     pub env: Env,
     #[serde(default)]
     pub maintainer: Maintainer,
+    /// Jira Cloud issues this repo works on (only in a repo's own file).
+    #[serde(default)]
+    pub jira: Vec<JiraSource>,
+}
+
+/// `[[jira]]` in a repo's own file: Jira Cloud issues this repo works on, read through `acli`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JiraSource {
+    /// The site as `acli` knows it, e.g. `"acme.atlassian.net"`.
+    pub site: String,
+    /// Which issues, e.g. `"project = ABC AND component = api"`. `pickup` adds the assignee part.
+    pub jql: String,
+    /// The part of the repo these issues belong in, e.g. `["frontend/"]`. Empty: all of it.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub pickup: JiraPickup,
+    /// What to do with each: `triage`, `reproduce` or `fix` (default).
+    #[serde(default = "fix_verb")]
+    pub verb: crate::forge::Verb,
+    /// Most issues held at once.
+    #[serde(default = "two")]
+    pub max_claimed: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraPickup {
+    /// Issues someone assigned to you; Night Porter never assigns or unassigns.
+    #[default]
+    Assigned,
+    /// New unassigned issues, claimed by assigning them to you.
+    New,
+}
+
+impl JiraSource {
+    /// The JQL `acli` runs: `jql` narrowed to the pickup mode's assignee.
+    pub fn query(&self) -> String {
+        let who = match self.pickup {
+            JiraPickup::Assigned => "assignee = currentUser()",
+            JiraPickup::New => "assignee is EMPTY",
+        };
+        format!("{who} AND ({})", self.jql)
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.site.is_empty() && !self.site.contains(['/', ':', ' ']),
+            "jira.site is the bare site name, e.g. \"acme.atlassian.net\" (got {:?})",
+            self.site
+        );
+        anyhow::ensure!(!self.jql.trim().is_empty(), "jira.jql is empty ({})", self.site);
+        // Wrapped in parentheses by `query`, where an ORDER BY isn't valid JQL.
+        anyhow::ensure!(!self.jql.to_lowercase().contains("order by"), "jira.jql: leave out ORDER BY ({})", self.site);
+        // Compared with `Path::starts_with` against the diff's paths, so no `./` either.
+        if let Some(p) =
+            self.paths.iter().find(|p| p.is_empty() || Path::new(p).is_absolute() || p.split('/').any(|c| c == ".." || c == "."))
+        {
+            bail!("jira.paths: {p:?} must be a folder inside the repo, written from its root, e.g. \"frontend/\" ({})", self.site);
+        }
+        anyhow::ensure!(
+            self.verb != crate::forge::Verb::Review,
+            "jira.verb: review is for PRs; use triage, reproduce or fix ({})",
+            self.site
+        );
+        anyhow::ensure!(self.max_claimed > 0, "jira.max_claimed must be at least 1");
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -798,12 +867,21 @@ impl Config {
         merged.remove("subscribed");
         // So does unlocking maintainer levels: never for every repo at once.
         if merged.get("maintainer").and_then(|m| m.get("allow_above_draft")).is_some() {
-            bail!("maintainer.allow_above_draft goes in a repo's own file (`nightporter repo <owner/name> edit`), not [defaults]");
+            bail!(
+                "maintainer.allow_above_draft goes in a repo's own file (repos/<forge>/<owner>/<name>.toml next to config.toml), not [defaults]"
+            );
+        }
+        // Every repo claiming the same issues would make no sense either.
+        if merged.contains_key("jira") {
+            bail!("[[jira]] goes in a repo's own file (repos/<forge>/<owner>/<name>.toml next to config.toml), not [defaults]");
         }
         if let Some(o) = over {
             merge(&mut merged, o);
         }
         let s: RepoSettings = merged.try_into()?;
+        for j in &s.jira {
+            j.validate()?;
+        }
         crate::schedule::validate(&s.schedule)?;
         if let Some(k) = s.plan_first.iter().find(|k| matches!(k, JobKind::Plan | JobKind::Learn)) {
             bail!("plan_first: {:?} is a step, not a kind of job", crate::state::enum_str(k));
@@ -1306,6 +1384,25 @@ mod tests {
         assert_eq!(open.level_for(false, &[ReviewComment], false), Level::Suggest);
         // The opt-in is per repo only.
         assert!(Config::parse("[defaults.maintainer]\nallow_above_draft = true").is_err());
+    }
+
+    #[test]
+    fn jira_sources() {
+        let cfg = Config::parse("").unwrap();
+        let src = |t: &str| cfg.resolve(Some(&format!("[[jira]]\n{t}").parse().unwrap())).map(|s| s.jira[0].clone());
+        let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npaths = [\"frontend/\"]").unwrap();
+        assert_eq!(j.query(), "assignee = currentUser() AND (project = FE)", "assigned is the default");
+        let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npickup = \"new\"").unwrap();
+        assert_eq!(j.query(), "assignee is EMPTY AND (project = FE)");
+        for bad in [
+            "site = \"https://a.atlassian.net\"\njql = \"project = FE\"",
+            "site = \"a.atlassian.net\"\njql = \"project = FE ORDER BY created\"",
+            "site = \"a.atlassian.net\"\njql = \"project = FE\"\npaths = [\"../x\"]",
+            "site = \"a.atlassian.net\"\njql = \"project = FE\"\nverb = \"review\"",
+        ] {
+            assert!(src(bad).is_err(), "{bad}");
+        }
+        assert!(Config::parse("[[defaults.jira]]\nsite = \"a.atlassian.net\"\njql = \"project = FE\"").is_err(), "per repo only");
     }
 
     #[test]
