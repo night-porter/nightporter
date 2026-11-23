@@ -3,6 +3,7 @@
 use crate::config::{AgentKind, Config, TokenSource};
 use crate::forge::ForgeKind;
 use crate::paths::Paths;
+use std::path::Path;
 use std::process::Command;
 
 pub struct Check {
@@ -103,6 +104,7 @@ pub fn run(paths: &Paths) -> bool {
     let mut checks = collect(paths, tools, claude_user_settings_check());
     if let Ok(cfg) = Config::load(paths) {
         checks.extend(token_checks(&cfg, uses_projects(paths, &cfg)));
+        checks.extend(jira_checks(paths, &cfg));
     }
     print(&checks);
     checks.iter().all(|c| c.ok || c.optional)
@@ -136,6 +138,90 @@ fn uses_projects(paths: &Paths, cfg: &Config) -> bool {
             .and_then(|t| cfg.resolve(Some(&t)).ok())
             .is_some_and(|s| s.maintainer.pickup.is_some_and(|p| p.project.is_some()))
     })
+}
+
+/// Every repo's `[[jira]]` sources: `acli` is installed and logged in to their sites, each JQL
+/// runs (so it's online), and where sources may fight over an issue or a folder.
+fn jira_checks(paths: &Paths, cfg: &Config) -> Vec<Check> {
+    let dir = paths.repos_dir();
+    let sources: Vec<(String, crate::config::JiraSource)> = walk_repo_files(&dir)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|f| {
+            let s = cfg.resolve(Some(&std::fs::read_to_string(f).ok()?.parse().ok()?)).ok()?;
+            let name = f.strip_prefix(&dir).unwrap_or(f).with_extension("").display().to_string();
+            Some(s.jira.into_iter().map(move |j| (name.clone(), j)))
+        })
+        .flatten()
+        .collect();
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let acli = tool("acli", "--version", "install Atlassian's acli: https://developer.atlassian.com/cloud/acli/", false);
+    if !acli.ok {
+        return vec![acli];
+    }
+    let mut out = vec![acli];
+    let logged_in = crate::jira::sites();
+    let mut sites: Vec<&str> = sources.iter().map(|(_, j)| j.site.as_str()).collect();
+    sites.sort_unstable();
+    sites.dedup();
+    for site in sites.iter().filter(|s| !logged_in.iter().any(|l| l == *s)) {
+        out.push(Check {
+            name: format!("acli ({site})"),
+            ok: false,
+            optional: false,
+            detail: "not logged in".into(),
+            fix: format!("acli jira auth login --site {site}"),
+        });
+    }
+    let client = crate::jira::Acli::new(paths);
+    for (repo, j) in sources.iter().filter(|(_, j)| logged_in.contains(&j.site)) {
+        let r = client.run(&j.site, &["workitem", "search", "--jql", &j.query(), "--count"]);
+        out.push(Check {
+            name: format!("jira {repo} ({})", j.site),
+            ok: r.is_ok(),
+            optional: false,
+            detail: match &r {
+                Ok(o) => o.lines().last().unwrap_or_default().trim_start_matches('✓').trim().to_string(),
+                Err(e) => format!("{e:#}"),
+            },
+            fix: format!("check the jql in {repo}'s [[jira]] (nightporter repo {repo} edit)"),
+        });
+    }
+    out.extend(jira_overlaps(&sources));
+    out
+}
+
+/// Warnings: the same JQL on two repos (the first to claim an issue gets it), and two sources on
+/// one repo and site whose `paths` overlap (the agent can't tell which part an issue is for).
+fn jira_overlaps(sources: &[(String, crate::config::JiraSource)]) -> Vec<Check> {
+    let covers = |a: &[String], b: &[String]| {
+        a.is_empty() || b.is_empty() || a.iter().any(|x| b.iter().any(|y| Path::new(x).starts_with(y) || Path::new(y).starts_with(x)))
+    };
+    let mut out = Vec::new();
+    for (i, (ra, a)) in sources.iter().enumerate() {
+        for (rb, b) in &sources[i + 1..] {
+            if a.site != b.site {
+                continue;
+            }
+            let detail = if ra != rb && a.jql.trim() == b.jql.trim() {
+                format!("{ra} and {rb} use the same JQL; whichever claims an issue first gets it")
+            } else if ra == rb && covers(&a.paths, &b.paths) {
+                format!("two sources cover the same folders ({:?} and {:?})", a.paths, b.paths)
+            } else {
+                continue;
+            };
+            out.push(Check {
+                name: format!("jira overlap ({})", a.site),
+                ok: false,
+                optional: true,
+                detail,
+                fix: "narrow a jql (component, label) or set distinct paths".into(),
+            });
+        }
+    }
+    out
 }
 
 /// Each account's token scopes against [`GITHUB`] / [`GITLAB`]. Logs in, so it's online.
@@ -417,6 +503,28 @@ mod tests {
 
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn jira_overlaps_warn() {
+        let j = |site: &str, jql: &str, paths: &[&str]| crate::config::JiraSource {
+            site: site.into(),
+            jql: jql.into(),
+            paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            pickup: crate::config::JiraPickup::Assigned,
+            verb: crate::forge::Verb::Fix,
+            max_claimed: 2,
+        };
+        let found = |s: &[(String, crate::config::JiraSource)]| jira_overlaps(s).into_iter().map(|c| c.detail).collect::<Vec<_>>();
+        // FE and BE projects, one folder each: fine.
+        let split = [("x".to_string(), j("a", "project = FE", &["frontend/"])), ("x".to_string(), j("a", "project = BE", &["backend"]))];
+        assert_eq!(found(&split), Vec::<String>::new());
+        let nested = [("x".to_string(), j("a", "project = FE", &["web/"])), ("x".to_string(), j("a", "project = BE", &["web/api"]))];
+        assert!(found(&nested)[0].contains("same folders"));
+        let twice = [("x".to_string(), j("a", "project = FE", &[])), ("y".to_string(), j("a", "project = FE", &[]))];
+        assert!(found(&twice)[0].contains("first gets it"));
+        let sites = [("x".to_string(), j("a", "project = FE", &[])), ("x".to_string(), j("b", "project = FE", &[]))];
+        assert_eq!(found(&sites), Vec::<String>::new(), "different sites never overlap");
+    }
 
     fn check(name: &str, ok: bool, optional: bool) -> Check {
         Check { name: name.into(), ok, optional, detail: format!("{name} detail"), fix: format!("fix {name}") }
