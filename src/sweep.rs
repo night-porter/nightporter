@@ -246,7 +246,7 @@ async fn jira_source(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
         acli.account(&src.site).with_context(|| format!("acli isn't logged in to {0}: acli jira auth login --site {0}", src.site))?;
     let held = settle_jira(ctx, &acli, repo, s, src, &mine).await?;
     if held < src.max_claimed {
-        claim_jira(ctx, &acli, repo, s, src, held).await?;
+        claim_jira(ctx, &acli, repo, s, src, &mine, held).await?;
     }
     Ok(())
 }
@@ -274,10 +274,15 @@ async fn settle_jira(
     let pending = ctx.db(|d| d.events_with(Disposition::Pending))?;
     let mut held = 0;
     let mine_only = |c: &JiraClaim| c.repo == repo.key() && c.source == src.jql && !c.released;
-    for (id, mut claim) in jira_claims(ctx, &site)?.into_iter().filter(|(_, c)| mine_only(c)) {
-        let (site2, key) = (site.clone(), claim.issue.key.clone());
+    let claims: Vec<(String, JiraClaim)> = jira_claims(ctx, &site)?.into_iter().filter(|(_, c)| mine_only(c)).collect();
+    if claims.is_empty() {
+        return Ok(0);
+    }
+    let (site2, keys) = (site.clone(), claims.iter().map(|(_, c)| c.issue.key.clone()).collect::<Vec<_>>());
+    let issues = acli.call(move |a| Ok(a.issues(&site2, &keys))).await?;
+    for ((id, mut claim), issue) in claims.into_iter().zip(issues) {
         // One issue that can't be read (deleted, moved out of sight) mustn't stop the rest.
-        let issue = match acli.call(move |a| a.view(&site2, &key)).await {
+        let issue = match issue {
             Ok(i) => i,
             Err(e) => {
                 ctx.warn_every(&format!("jira-view:{site}:{id}"), 86400, &format!("{repo}: can't read {}: {e:#}", claim.issue.key));
@@ -329,6 +334,7 @@ async fn claim_jira(
     repo: &RepoId,
     s: &crate::config::RepoSettings,
     src: &crate::config::JiraSource,
+    mine: &str,
     mut held: usize,
 ) -> Result<()> {
     let site = src.site.clone();
@@ -341,17 +347,11 @@ async fn claim_jira(
         ctx.db(|d| d.set(&k, &first.to_string()))?;
         jql = format!("{jql} AND created >= -{}m", (now - first) / 60 + 1);
     }
-    let mut claims = jira_claims(ctx, &site)?;
-    // Not the ones this repo holds or anyone let go, or they'd fill the page before anything new.
-    // Other repos' held ones stay in, for the warning below. ponytail: the newest 200 keys; older
-    // let-go issues still matching are skipped below, but can crowd the page if hundreds pile up.
-    claims.sort_by_key(|(_, c)| std::cmp::Reverse(c.since));
-    let known: Vec<String> =
-        claims.iter().filter(|(_, c)| c.released || c.repo == repo.key()).take(200).map(|(_, c)| c.issue.key.clone()).collect();
-    if !known.is_empty() {
-        jql = format!("{jql} AND key not in ({})", known.join(", "));
-    }
-    let (site2, limit) = (site.clone(), src.max_claimed * 5 + 10);
+    let claims = jira_claims(ctx, &site)?;
+    // Issues it holds or let go still match, so the page is big enough to see past them. (Not
+    // `key not in (…)`: one deleted key fails the whole search.) ponytail: past this many
+    // matching open issues, newer ones wait until older ones close.
+    let (site2, limit) = (site.clone(), 500);
     let found = acli.call(move |a| a.search(&site2, &jql, limit)).await?;
     let me = match ctx.forge(repo) {
         Ok(f) => f.lock().await.me().to_string(),
@@ -362,7 +362,7 @@ async fn claim_jira(
             break;
         }
         if let Some((_, other)) = claims.iter().find(|(id, _)| *id == issue.id.to_string()) {
-            if other.repo != repo.key() {
+            if other.repo != repo.key() && !other.released {
                 let msg = format!("{} matches {repo}'s [[jira]] too; {} has it", issue.key, other.repo);
                 ctx.warn_every(&format!("jira-dup:{site}:{}", issue.id), 86400, &msg);
             }
@@ -381,9 +381,16 @@ async fn claim_jira(
         save_claim(ctx, &site, &id, &claim)?;
         if src.pickup == crate::config::JiraPickup::New {
             let (site2, key) = (site.clone(), issue.key.clone());
-            // One issue it may not assign mustn't stop the rest: skip it for good.
-            if let Err(e) = acli.call(move |a| a.assign(&site2, &key, true)).await {
-                tracing::warn!("{repo}: couldn't assign {} to you, skipped: {e:#}", issue.key);
+            // Only if still unassigned, then checked: someone may have taken it since the search.
+            // One it can't assign mustn't stop the rest: skipped for good.
+            let got = acli.call(move |a| a.assign(&site2, &key, true).and_then(|()| a.view(&site2, &key))).await;
+            let why = match got {
+                Ok(i) if i.assignee == mine => None,
+                Ok(i) => Some(format!("someone else took it ({})", i.assignee)),
+                Err(e) => Some(format!("{e:#}")),
+            };
+            if let Some(why) = why {
+                tracing::warn!("{repo}: didn't claim {}: {why}", issue.key);
                 claim.released = true;
                 save_claim(ctx, &site, &id, &claim)?;
                 continue;
@@ -649,7 +656,7 @@ mod tests {
         let c = ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().unwrap();
         assert_eq!((c.issue.key.as_str(), c.issue.paths.as_slice()), ("TKF-1", ["frontend/".to_string()].as_slice()));
         assert!(calls().contains("assignee = currentUser() AND statusCategory != Done AND (project = TKF)"), "{}", calls());
-        assert!(calls().contains("comment create --key TKF-1") && !calls().contains("assign --key"), "{}", calls());
+        assert!(calls().contains("comment create --key TKF-1") && !calls().contains("workitem assign"), "{}", calls());
         assert_eq!(std::fs::read_to_string(f.join("site")).unwrap().trim(), "home.jira.com", "acli back where it was");
 
         // Held: the same match isn't queued twice.
@@ -664,15 +671,21 @@ mod tests {
         assert_eq!(jira_pickup(&ctx, &cfg).await, None);
         assert!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().unwrap().released);
         assert_eq!(pending().len(), 0);
-        assert!(calls().contains("AND key not in (TKF-1)"), "{}", calls());
 
         // `new`: unassigned issues created since the source was first seen, claimed by assigning.
         std::fs::write(&file, toml.replace("paths", "pickup = \"new\"\npaths")).unwrap();
-        std::fs::write(f.join("search.json"), format!("[{}]", issue(102, "TKF-2", "new", "null"))).unwrap();
+        // Someone took TKF-3 between the search and the assignment: skipped for good, not queued.
+        let found = [issue(102, "TKF-2", "new", "null"), issue(103, "TKF-3", "new", "null")].join(",");
+        std::fs::write(f.join("search.json"), format!("[{found}]")).unwrap();
+        std::fs::write(f.join("view-TKF-2.json"), issue(102, "TKF-2", "new", r#"{"accountId":"me1"}"#)).unwrap();
+        std::fs::write(f.join("view-TKF-3.json"), issue(103, "TKF-3", "new", r#"{"accountId":"pat"}"#)).unwrap();
         assert_eq!(jira_pickup(&ctx, &cfg).await, None);
         assert!(calls().contains("assignee is EMPTY AND statusCategory != Done AND (project = TKF) AND created >= -1m"), "{}", calls());
-        assert!(calls().contains("assign --key TKF-2 --yes --assignee @me"), "{}", calls());
+        assert!(calls().contains("assign --jql key = TKF-2 AND assignee is EMPTY --yes --assignee @me"), "{}", calls());
         assert_eq!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS + 1)).unwrap().unwrap().issue.key, "TKF-2");
+        let taken = ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS + 2)).unwrap().unwrap();
+        assert!(taken.issue.key == "TKF-3" && taken.released);
+        assert_eq!(pending().len(), 1, "only TKF-2 queued");
     }
 
     #[test]

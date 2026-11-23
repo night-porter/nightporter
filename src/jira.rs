@@ -23,6 +23,13 @@ impl JiraRef {
     pub fn url(&self) -> String {
         format!("https://{}/browse/{}", self.site, self.key)
     }
+
+    /// `nightporter/jira/acme/ABC-123`: the key links it in Jira (its GitHub/GitLab app finds it
+    /// anywhere in the name), and the site keeps two sites' ABC-123 on one repo apart.
+    pub fn branch(&self) -> String {
+        let site = self.site.split('.').next().unwrap_or_default().to_lowercase();
+        format!("nightporter/jira/{site}/{}", self.key)
+    }
 }
 
 /// One issue from a search or a view.
@@ -94,7 +101,11 @@ impl Acli {
             return a.clone();
         }
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        Self { bin: "acli".into(), lock: paths.data_dir.join("acli.lock"), config: home.join(".config/acli/jira_config.yaml") }
+        let dir = home.join(".config/acli");
+        // Next to acli's own config, not in the data dir: Night Porters with other homes
+        // (`NIGHTPORTER_HOME`) share one acli, so they share the lock too. `paths` only picks a test fake.
+        let _ = paths;
+        Self { bin: "acli".into(), lock: dir.join("nightporter.lock"), config: dir.join("jira_config.yaml") }
     }
 
     /// Run `f` with this client off the async runtime (`acli` calls block, and wait on the lock).
@@ -182,10 +193,32 @@ impl Acli {
         self.run(site, &["workitem", "comment", "create", "--key", key, "--body", &md_to_adf(md.trim_end()).to_string()]).map(|_| ())
     }
 
-    /// Assign to you (`on`) or to nobody.
+    /// Assign to you (`on`) if it's still unassigned, or unassign it if it's still yours: never
+    /// over someone who took it meanwhile. Check the issue afterwards to see which happened.
     pub fn assign(&self, site: &str, key: &str, on: bool) -> Result<()> {
-        let who: &[&str] = if on { &["--assignee", "@me"] } else { &["--remove-assignee"] };
-        self.run(site, &[&["workitem", "assign", "--key", key, "--yes"], who].concat()).map(|_| ())
+        // It goes into JQL: only a real issue key.
+        anyhow::ensure!(is_key(key), "not a Jira issue key: {key:?}");
+        let (jql, who) = if on {
+            (format!("key = {key} AND assignee is EMPTY"), ["--assignee", "@me"].as_slice())
+        } else {
+            (format!("key = {key} AND assignee = currentUser()"), ["--remove-assignee"].as_slice())
+        };
+        self.run(site, &[&["workitem", "assign", "--jql", jql.as_str(), "--yes"], who].concat()).map(|_| ())
+    }
+
+    /// The issues with these keys, for settling: one search when it can, else one view each (a
+    /// key Jira no longer shows fails the whole search). An issue it can't read is left out.
+    pub fn issues(&self, site: &str, keys: &[String]) -> Vec<Result<Issue>> {
+        if keys.iter().all(|k| is_key(k)) {
+            let jql = format!("key in ({})", keys.join(", "));
+            if let Ok(found) = self.search(site, &jql, keys.len()) {
+                return keys
+                    .iter()
+                    .map(|k| found.iter().find(|i| i.key == *k).cloned().with_context(|| format!("{k} isn't in Jira's answer")))
+                    .collect();
+            }
+        }
+        keys.iter().map(|k| self.view(site, k)).collect()
     }
 
     fn current_site(&self) -> Result<String> {
@@ -243,6 +276,16 @@ impl Acli {
 }
 
 const ACLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `ABC-123`: a project key, a dash, a number.
+fn is_key(k: &str) -> bool {
+    k.split_once('-').is_some_and(|(p, n)| {
+        p.starts_with(|c: char| c.is_ascii_alphabetic())
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+    })
+}
 
 /// `(site, account_id)` per profile in `acli`'s config (`- site: x` starts one).
 fn profiles_in(file: &Path) -> Vec<(String, String)> {
@@ -512,6 +555,14 @@ mod tests {
         let end = &md_to_adf("see https://a.io/x.")["content"][0]["content"];
         assert_eq!((end[1]["text"].as_str(), end[2]["text"].as_str()), (Some("https://a.io/x"), Some(".")));
         assert_eq!(md_to_adf("```\n\n```")["content"][0]["content"], json!([]), "no empty text node");
+    }
+
+    #[test]
+    fn keys_and_branches() {
+        assert!(is_key("ABC-123") && is_key("A_1-9"));
+        assert!(!is_key("ABC") && !is_key("1BC-2") && !is_key("ABC-1 OR x") && !is_key("ABC-"));
+        let r = JiraRef { site: "Acme.atlassian.net".into(), key: "ABC-12".into(), paths: vec![] };
+        assert_eq!(r.branch(), "nightporter/jira/acme/ABC-12");
     }
 
     #[test]

@@ -300,7 +300,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     let forge = ctx.forge(&j.repo)?;
     let me = forge.lock().await.me().to_string();
     let repo_url = git::remote_url(&clone, &j.repo, accounts)?;
-    let branch = j.meta.jira.as_ref().map_or_else(|| git::branch_name(j.target, j.number), |r| format!("nightporter/{}", r.key));
+    let branch = j.meta.jira.as_ref().map_or_else(|| git::branch_name(j.target, j.number), crate::jira::JiraRef::branch);
     let wt = worktree_path(ctx, j);
     j.worktree = wt.to_string_lossy().into();
     j.branch.clone_from(&branch);

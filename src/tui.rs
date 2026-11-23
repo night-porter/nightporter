@@ -92,6 +92,8 @@ struct App {
     history_all: Vec<Job>,
     /// `o`: list jobs by last update instead of by creation (id).
     by_updated: bool,
+    /// Width of the widest `repo#n` / `repo ABC-123` in the lists, so their columns line up.
+    place_w: usize,
     /// Enter on the Repos tab: that repo's settings, shown in the detail pane.
     repo_view: Option<crate::forge::RepoId>,
     /// This session's dismissals and ignores, newest last, for `u` (undo).
@@ -167,6 +169,7 @@ impl App {
             filtering: false,
             history_all: vec![],
             by_updated: false,
+            place_w: 0,
             repo_view: None,
             undo_jobs: vec![],
             stages: std::collections::HashMap::default(),
@@ -225,9 +228,9 @@ impl App {
         match self.live_stage(j) {
             Some((st, since)) => {
                 let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
-                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated))
+                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated, self.place_w))
             }
-            None => job_line(j, self.by_updated),
+            None => job_line(j, self.by_updated, self.place_w),
         }
     }
 
@@ -256,6 +259,7 @@ impl App {
                 })
                 .unwrap_or_else(|e| format!("error: {e:#}"));
         }
+        self.place_w = jobs.iter().map(|j| j.place().chars().count()).max().unwrap_or(0).min(60);
         self.history_all = jobs;
         self.history.clone_from(&self.history_all);
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
@@ -310,7 +314,7 @@ impl App {
         self.repos =
             self.repos_all.iter().filter(|r| format!("{}/{}", r.id.host, r.id.path).to_lowercase().contains(&f)).cloned().collect();
         self.settings = self.settings_all.iter().filter(|r| r.setting.key.contains(&f)).cloned().collect();
-        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated).to_lowercase().contains(&f)).cloned().collect();
+        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated, 0).to_lowercase().contains(&f)).cloned().collect();
         if self.sel.selected().is_some_and(|i| i >= self.len()) {
             self.sel.select(Some(0));
         }
@@ -1124,13 +1128,11 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
 }
 
 /// The date shown is the one the list is ordered by: created, or `by_updated` last updated.
-fn job_line(j: &Job, by_updated: bool) -> String {
+/// `w`: the width its place is padded to.
+fn job_line(j: &Job, by_updated: bool, w: usize) -> String {
     let when = crate::state::local_time(if by_updated { j.updated_at } else { j.created_at }, "%m-%d %H:%M");
-    let on = if j.mode == crate::improve::LEARN {
-        format!("{} learn", j.repo)
-    } else {
-        format!("{:<w$}", j.place(), w = j.repo.to_string().len() + 6)
-    };
+    let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { j.place() };
+    let on = format!("{on:<w$}");
     format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
 }
 
