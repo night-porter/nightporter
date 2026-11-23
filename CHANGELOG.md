@@ -6,6 +6,14 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `o` in the Queue and History tabs orders jobs by creation or by last update; each row shows the date the list is ordered by. `nightporter status` shows when each job was last updated.
+
+### Fixed
+
+- Times in the TUI and `nightporter status` are in your local time zone, not UTC.
+
 ## [0.6.1] - 2026-11-17
 
 ### Changed

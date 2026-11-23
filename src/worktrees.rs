@@ -24,7 +24,7 @@ pub struct Wt {
 impl Wt {
     /// One line for the TUI and `nightporter worktrees`.
     pub fn line(&self) -> String {
-        let day = |t: i64| jiff::Timestamp::from_second(t).map(|t| t.strftime("%m-%d %H:%M").to_string()).unwrap_or_default();
+        let day = |t: i64| crate::state::local_time(t, "%m-%d %H:%M");
         let state = if let Some((at, _)) = &self.trashed {
             format!("KEPT {}, restorable until {}", day(*at), day(at + KEEP_SECS))
         } else {

@@ -343,6 +343,11 @@ pub struct JobMeta {
 /// The inbox reason of an event you let in once (`nightporter inbox allow-once`).
 pub const ALLOWED_ONCE: &str = "allowed once";
 
+/// A unix time as local wall-clock text for display (`strftime` format).
+pub fn local_time(t: i64, fmt: &str) -> String {
+    jiff::Timestamp::from_second(t).map(|t| t.to_zoned(jiff::tz::TimeZone::system()).strftime(fmt).to_string()).unwrap_or_default()
+}
+
 pub fn now() -> i64 {
     jiff::Timestamp::now().as_second()
 }

@@ -90,6 +90,8 @@ struct App {
     filter: String,
     filtering: bool,
     history_all: Vec<Job>,
+    /// `o`: list jobs by last update instead of by creation (id).
+    by_updated: bool,
     /// Enter on the Repos tab: that repo's settings, shown in the detail pane.
     repo_view: Option<crate::forge::RepoId>,
     /// This session's dismissals and ignores, newest last, for `u` (undo).
@@ -162,6 +164,7 @@ impl App {
             filter: String::new(),
             filtering: false,
             history_all: vec![],
+            by_updated: false,
             repo_view: None,
             undo_jobs: vec![],
             stages: std::collections::HashMap::default(),
@@ -219,20 +222,24 @@ impl App {
         match self.live_stage(j) {
             Some((st, since)) => {
                 let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
-                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j))
+                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated))
             }
-            None => job_line(j),
+            None => job_line(j, self.by_updated),
         }
     }
 
     fn refresh(&mut self, repos: bool) {
-        let jobs = self.db.recent_jobs(500).unwrap_or_default();
+        let mut jobs = self.db.recent_jobs(500).unwrap_or_default();
+        if self.by_updated {
+            jobs.sort_by_key(|j| std::cmp::Reverse((j.updated_at, j.id)));
+        }
         self.stages = self.db.stages().unwrap_or_default();
         let day_ago = crate::state::now() - 86400;
         let recent_failure = |j: &Job| j.status == JobStatus::Failed && j.updated_at > day_ago;
         self.queue = jobs.iter().filter(|j| j.status.needs_user() || j.status.is_active() || recent_failure(j)).cloned().collect();
         // Needs-you first, then today's failures, then running.
-        self.queue.sort_by_key(|j| (!j.status.needs_user(), j.status != JobStatus::Failed, j.id));
+        let key = |j: &Job| if self.by_updated { j.updated_at } else { j.id };
+        self.queue.sort_by_key(|j| (!j.status.needs_user(), j.status != JobStatus::Failed, key(j)));
         if let Some(id) = self.detail {
             self.detail_text = self.db.job(id).ok().flatten().map_or_else(|| "job not found".into(), |j| job_text(&self.db, &j));
         } else if let Some(r) = &self.repo_view {
@@ -292,7 +299,7 @@ impl App {
         self.repos =
             self.repos_all.iter().filter(|r| format!("{}/{}", r.id.host, r.id.path).to_lowercase().contains(&f)).cloned().collect();
         self.settings = self.settings_all.iter().filter(|r| r.setting.key.contains(&f)).cloned().collect();
-        self.history = self.history_all.iter().filter(|j| job_line(j).to_lowercase().contains(&f)).cloned().collect();
+        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated).to_lowercase().contains(&f)).cloned().collect();
         if self.sel.selected().is_some_and(|i| i >= self.len()) {
             self.sel.select(Some(0));
         }
@@ -549,6 +556,12 @@ impl App {
     }
 
     fn job_key(&mut self, k: KeyEvent) {
+        if k.code == KeyCode::Char('o') && self.detail.is_none() {
+            self.by_updated = !self.by_updated;
+            self.refresh(false);
+            self.msg = if self.by_updated { "ordered by last update" } else { "ordered by creation" }.into();
+            return;
+        }
         // u still works with an empty list: it brings back the last dismissed job.
         let Some(id) = self.current_job_id().or_else(|| self.undo_jobs.last().copied()) else { return };
         let r = match k.code {
@@ -887,7 +900,8 @@ impl App {
                 }
                 Tab::Queue => " Needs you / running (x dismiss what you don't want to act on) ",
                 Tab::Inbox => " Unknown authors waiting ",
-                Tab::History => " History: every job, newest first (/ search, e.g. dismissed or a repo) ",
+                Tab::History if self.by_updated => " History: every job, last updated first (o by created, / search) ",
+                Tab::History => " History: every job, newest first (o by last update, / search) ",
                 Tab::Repos => {
                     let on = self.repos_all.iter().filter(|r| r.subscribed).count();
                     &format!(" Repos: {on} watched of {} (Enter details, space subscribe, / search) ", self.repos_all.len())
@@ -928,7 +942,7 @@ impl App {
             (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over w web Esc",
             // m amend and h take over are in the detail footer and ? help.
             (_, Tab::Queue) => "Enter open a approve e edit r reject x dismiss t retry f force w web ? q quit",
-            (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search ? q quit",
+            (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search o order ? q quit",
             (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
             (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / search ? q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
@@ -1092,8 +1106,9 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
     format!("{} {stage} {t}", FRAMES[(frame % 10) as usize])
 }
 
-fn job_line(j: &Job) -> String {
-    let when = jiff::Timestamp::from_second(j.updated_at).map(|t| t.strftime("%m-%d %H:%M").to_string()).unwrap_or_default();
+/// The date shown is the one the list is ordered by: created, or `by_updated` last updated.
+fn job_line(j: &Job, by_updated: bool) -> String {
+    let when = crate::state::local_time(if by_updated { j.updated_at } else { j.created_at }, "%m-%d %H:%M");
     let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { format!("{}#{:<5}", j.repo, j.number) };
     format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
 }
@@ -1102,7 +1117,7 @@ fn job_line(j: &Job) -> String {
 pub fn job_text(db: &Db, j: &Job) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    let when = |t: i64| jiff::Timestamp::from_second(t).map(|t| t.strftime("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+    let when = |t: i64| crate::state::local_time(t, "%Y-%m-%d %H:%M");
     let _ = writeln!(
         s,
         "Job {} — {} — {}#{} ({}) — level {} — attempt {}",
@@ -1184,7 +1199,7 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     if !log.is_empty() {
         let _ = writeln!(s, "\nLog:");
         for (ts, l) in log {
-            let t = jiff::Timestamp::from_second(ts).map(|t| t.strftime("%H:%M:%S").to_string()).unwrap_or_default();
+            let t = crate::state::local_time(ts, "%H:%M:%S");
             let _ = writeln!(s, "  {t} {l}");
         }
     }
@@ -1241,6 +1256,7 @@ Tabs
   6 Worktrees the job worktrees still on disk, and removed ones you can bring back for 7 days
 
 Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ switch tab, p pause, q quit
+       o  Queue and History: order jobs by creation or by last update (the date shown follows)
        /  search the Repos, Settings or History list (Esc clears)
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
@@ -1487,6 +1503,27 @@ mod tests {
         app.key(key('u'));
         assert_eq!(std::fs::read_to_string(wt.join("mine.txt")).unwrap(), "handoff edit", "{}", app.msg);
         assert!(app.worktrees.len() == 1 && app.worktrees[0].trashed.is_none());
+    }
+
+    #[test]
+    fn o_orders_history_by_last_update() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let mut db = Db::open(&paths.db()).unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let old = db.create_job(&repo, Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        let new = db.create_job(&repo, Target::Pr, 2, "my_prs", "draft", &[]).unwrap();
+        db.0.execute("UPDATE jobs SET created_at=0, updated_at=?2 WHERE id=?1", rusqlite::params![old, 2_000_000_000]).unwrap();
+        db.0.execute("UPDATE jobs SET created_at=0, updated_at=1 WHERE id=?1", [new]).unwrap();
+        let mut app = App::new(&paths, db);
+        app.refresh(true);
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.history.iter().map(|j| j.id).collect::<Vec<_>>(), [new, old], "newest created first");
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.history.iter().map(|j| j.id).collect::<Vec<_>>(), [old, new], "last updated first");
+        assert!(screen(&mut app).contains("last updated first"), "{}", screen(&mut app));
+        assert!(screen_at(&mut app, 80, 24).contains("q quit"), "History footer fits 80 columns");
     }
 
     #[test]

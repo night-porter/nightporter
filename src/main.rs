@@ -831,9 +831,10 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
         any = true;
         writeln!(
             out,
-            "job {:>4}  {:<22} {}#{}  {}",
+            "job {:>4}  {:<22} {}  {}#{}  {}",
             j.id,
             j.status.label(),
+            state::local_time(j.updated_at, "%m-%d %H:%M"),
             j.repo,
             j.number,
             printable(j.summary.lines().next().unwrap_or_default())
