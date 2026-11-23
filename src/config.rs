@@ -577,10 +577,17 @@ impl JiraSource {
         anyhow::ensure!(!self.jql.trim().is_empty(), "jira.jql is empty ({})", self.site);
         // Wrapped in parentheses by `query`, where an ORDER BY isn't valid JQL.
         anyhow::ensure!(!self.jql.to_lowercase().contains("order by"), "jira.jql: leave out ORDER BY ({})", self.site);
-        if let Some(p) = self.paths.iter().find(|p| p.is_empty() || Path::new(p).is_absolute() || p.split('/').any(|c| c == "..")) {
-            bail!("jira.paths: {p:?} must be a folder inside the repo, e.g. \"frontend/\"");
+        // Compared with `Path::starts_with` against the diff's paths, so no `./` either.
+        if let Some(p) =
+            self.paths.iter().find(|p| p.is_empty() || Path::new(p).is_absolute() || p.split('/').any(|c| c == ".." || c == "."))
+        {
+            bail!("jira.paths: {p:?} must be a folder inside the repo, written from its root, e.g. \"frontend/\" ({})", self.site);
         }
-        anyhow::ensure!(self.verb != crate::forge::Verb::Review, "jira works on issues: verb triage, reproduce or fix");
+        anyhow::ensure!(
+            self.verb != crate::forge::Verb::Review,
+            "jira.verb: review is for PRs; use triage, reproduce or fix ({})",
+            self.site
+        );
         anyhow::ensure!(self.max_claimed > 0, "jira.max_claimed must be at least 1");
         Ok(())
     }
@@ -860,11 +867,13 @@ impl Config {
         merged.remove("subscribed");
         // So does unlocking maintainer levels: never for every repo at once.
         if merged.get("maintainer").and_then(|m| m.get("allow_above_draft")).is_some() {
-            bail!("maintainer.allow_above_draft goes in a repo's own file (`nightporter repo <owner/name> edit`), not [defaults]");
+            bail!(
+                "maintainer.allow_above_draft goes in a repo's own file (repos/<forge>/<owner>/<name>.toml next to config.toml), not [defaults]"
+            );
         }
         // Every repo claiming the same issues would make no sense either.
         if merged.contains_key("jira") {
-            bail!("[[jira]] goes in a repo's own file (`nightporter repo <owner/name> edit`), not [defaults]");
+            bail!("[[jira]] goes in a repo's own file (repos/<forge>/<owner>/<name>.toml next to config.toml), not [defaults]");
         }
         if let Some(o) = over {
             merge(&mut merged, o);

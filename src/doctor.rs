@@ -144,24 +144,33 @@ fn uses_projects(paths: &Paths, cfg: &Config) -> bool {
 /// runs (so it's online), and where sources may fight over an issue or a folder.
 fn jira_checks(paths: &Paths, cfg: &Config) -> Vec<Check> {
     let dir = paths.repos_dir();
-    let sources: Vec<(String, crate::config::JiraSource)> = walk_repo_files(&dir)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|f| {
-            let s = cfg.resolve(Some(&std::fs::read_to_string(f).ok()?.parse().ok()?)).ok()?;
-            let name = f.strip_prefix(&dir).unwrap_or(f).with_extension("").display().to_string();
-            Some(s.jira.into_iter().map(move |j| (name.clone(), j)))
-        })
-        .flatten()
-        .collect();
+    let mut broken = Vec::new();
+    let mut sources: Vec<(String, crate::config::JiraSource)> = Vec::new();
+    for f in walk_repo_files(&dir).unwrap_or_default() {
+        let name = f.strip_prefix(&dir).unwrap_or(&f).with_extension("").display().to_string();
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        // A repo file that doesn't load leaves the repo unwatched: say why, not just for Jira.
+        match text.parse().map_err(anyhow::Error::from).and_then(|t| cfg.resolve(Some(&t))) {
+            Ok(s) => sources.extend(s.jira.into_iter().map(|j| (name.clone(), j))),
+            Err(e) => broken.push(Check {
+                name: format!("repo file {name}"),
+                ok: false,
+                optional: false,
+                detail: format!("{e:#}; the repo isn't watched until it's fixed"),
+                fix: format!("edit {}", f.display()),
+            }),
+        }
+    }
     if sources.is_empty() {
-        return Vec::new();
+        return broken;
     }
     let acli = tool("acli", "--version", "install Atlassian's acli: https://developer.atlassian.com/cloud/acli/", false);
     if !acli.ok {
-        return vec![acli];
+        broken.push(acli);
+        return broken;
     }
-    let mut out = vec![acli];
+    let mut out = broken;
+    out.push(acli);
     let logged_in = crate::jira::sites();
     let mut sites: Vec<&str> = sources.iter().map(|(_, j)| j.site.as_str()).collect();
     sites.sort_unstable();
@@ -186,7 +195,10 @@ fn jira_checks(paths: &Paths, cfg: &Config) -> Vec<Check> {
                 Ok(o) => o.lines().last().unwrap_or_default().trim_start_matches('✓').trim().to_string(),
                 Err(e) => format!("{e:#}"),
             },
-            fix: format!("check the jql in {repo}'s [[jira]] (nightporter repo {repo} edit)"),
+            fix: match &r {
+                Err(e) if format!("{e:#}").contains("switch") => format!("acli jira auth login --site {}", j.site),
+                _ => format!("check the jql of its [[jira]] in {}", dir.join(repo).with_extension("toml").display()),
+            },
         });
     }
     out.extend(jira_overlaps(&sources));
@@ -208,7 +220,8 @@ fn jira_overlaps(sources: &[(String, crate::config::JiraSource)]) -> Vec<Check> 
             let detail = if ra != rb && a.jql.trim() == b.jql.trim() {
                 format!("{ra} and {rb} use the same JQL; whichever claims an issue first gets it")
             } else if ra == rb && covers(&a.paths, &b.paths) {
-                format!("two sources cover the same folders ({:?} and {:?})", a.paths, b.paths)
+                let show = |p: &[String]| if p.is_empty() { "the whole repo".to_string() } else { p.join(", ") };
+                format!("{ra}: two [[jira]] sources cover the same folders ({} and {})", show(&a.paths), show(&b.paths))
             } else {
                 continue;
             };
@@ -503,6 +516,18 @@ mod tests {
 
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn a_repo_file_that_does_not_load_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(&d.path().join("c"), &d.path().join("d"));
+        let f = paths.repos_dir().join("github/o/r.toml");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "[[jira]]\nsite = \"https://a.atlassian.net\"\njql = \"project = FE\"\n").unwrap();
+        let c = jira_checks(&paths, &Config::parse("").unwrap());
+        assert_eq!(c.len(), 1);
+        assert!(!c[0].ok && c[0].name == "repo file github/o/r" && c[0].detail.contains("bare site name"), "{:?}", c[0].detail);
+    }
 
     #[test]
     fn jira_overlaps_warn() {
