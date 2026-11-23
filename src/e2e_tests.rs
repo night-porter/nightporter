@@ -216,6 +216,8 @@ async fn draft_flow_end_to_end() {
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].1, "/repos/o/r/pulls/1/comments/5/replies");
     assert!(posts[0].2.contains("via Night Porter"));
+    let undo = format!("git revert --no-edit {}..{}", crate::git::short(&j.head_before), crate::git::short(&j.head_after));
+    assert!(posts[0].2.contains(&undo), "the reply says how to undo the push: {}", posts[0].2);
     // Nothing from Night Porter left in the worktree.
     assert!(!std::path::Path::new(&j.worktree).join(".nightporter").exists());
 
