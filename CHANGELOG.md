@@ -6,17 +6,21 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-23
+
 ### Added
 
 - Jira Cloud issues, through `acli` and its logins: `[[jira]]` in a repo's own file maps a site and JQL to the repo (`paths` for the part of the repo, `priority` when several repos match). `pickup = "assigned"` works on issues assigned to you and never changes the assignee; `pickup = "new"` claims new unassigned issues (optionally only from `creators`) by assigning them to you. Jobs open `ABC-123: …` PRs on `nightporter/jira/<site>/ABC-123` branches, comment the PR link and replies on the issue, move it to In Progress (draft PR) and In Review (ready PR), never Done, and let go when the PR merges or closes. Status names are tried from built-in defaults, `[jira_sites."<site>"]` or the entry, and the one that works is remembered per project. `doctor` checks `acli`'s logins, each entry's JQL and overlapping entries. See [Jira issues](docs/advanced.md#jira-issues).
-
-### Added
-
 - `o` in the Queue and History tabs orders jobs by creation or by last update; each row shows the date the list is ordered by. `nightporter status` shows when each job was last updated.
+
+### Changed
+
+- CI-fix jobs on GitHub get the end of each failed Actions job's log (up to three jobs, the 60 lines before the last error), read once per pushed commit, so the agent sees the actual errors instead of only the check names.
 
 ### Fixed
 
 - Times in the TUI and `nightporter status` are in your local time zone, not UTC.
+- PR command polling skips Jira jobs, which have no PR of their own number to read.
 
 ## [0.6.1] - 2026-11-17
 
@@ -336,7 +340,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/night-porter/nightporter/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/night-porter/nightporter/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/night-porter/nightporter/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/night-porter/nightporter/compare/v0.4.6...v0.5.0

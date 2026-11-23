@@ -1,19 +1,25 @@
 ---
-description: "What's new in Night Porter 0.6, 0.5, 0.4 and 0.3: release-aware triage, the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
+description: "What's new in Night Porter 0.7, 0.6, 0.5, 0.4 and 0.3: Jira issues, release-aware triage, the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
 ---
 
 # What's new
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
-## Next
+## 0.7
 
-### Jira issues
+### Jira issues (0.7.0)
 
 **It works on Jira Cloud issues.** Map a Jira project to a repo with `[[jira]]` and Night Porter
 picks up the issues assigned to you (or new ones, if you let it), opens a PR named after the
 issue key, comments the link, and moves the issue to In Progress and then In Review. It uses
 `acli`'s logins, so several sites work side by side. See [Jira issues](/advanced#jira-issues).
+
+**CI fixes see the errors.** On GitHub, a CI-fix job now gets the end of each failed Actions
+job's log, so the agent starts from the real compiler or test output instead of a check name.
+
+**Order the queue your way.** `o` in the Queue and History tabs switches between newest created
+and last updated, and times are in your own time zone.
 
 ## 0.6
 
