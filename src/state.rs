@@ -224,13 +224,15 @@ pub struct Job {
     pub meta: JobMeta,
 }
 
+/// `repo#n`, or `repo ABC-123` for a Jira issue: never a Jira job's internal number.
+pub fn place(repo: &RepoId, n: u64, jira: Option<&crate::jira::JiraRef>) -> String {
+    jira.map_or_else(|| format!("{repo}#{n}"), |r| format!("{repo} {}", r.key))
+}
+
 impl Job {
     /// What it works on, for people: `o/r#12`, or `o/r ABC-123` for a Jira issue.
     pub fn place(&self) -> String {
-        match &self.meta.jira {
-            Some(r) => format!("{} {}", self.repo, r.key),
-            None => format!("{}#{}", self.repo, self.number),
-        }
+        place(&self.repo, self.number, self.meta.jira.as_ref())
     }
     /// Its PR/issue in the browser (the Jira issue for a Jira job).
     pub fn url(&self) -> String {

@@ -612,7 +612,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         if !flags.is_empty() {
             ctx.db(|d| d.del(&crate::actions::retry_key(&repo, n)))?;
         }
-        tracing::info!("job {id}: {repo}#{n} ({} event(s), {})", ids.len(), level.as_str());
+        tracing::info!("job {id}: {} ({} event(s), {})", crate::state::place(&repo, n, meta.jira.as_ref()), ids.len(), level.as_str());
     }
     Ok(())
 }

@@ -59,8 +59,13 @@ fn level(j: &Job) -> Level {
 }
 
 pub fn worktree_path(ctx: &Ctx, j: &Job) -> PathBuf {
-    let kind = if j.target == Target::Pr { "pr" } else { "issue" };
-    ctx.paths.worktrees_dir().join(j.repo.forge.as_str()).join(&j.repo.host).join(&j.repo.path).join(format!("{kind}-{}", j.number))
+    let name = match (&j.meta.jira, j.target) {
+        // Named after the branch's last parts: `jira-acme-ABC-123`.
+        (Some(r), _) => r.branch().trim_start_matches("nightporter/").replace('/', "-"),
+        (None, Target::Pr) => format!("pr-{}", j.number),
+        (None, _) => format!("issue-{}", j.number),
+    };
+    ctx.paths.worktrees_dir().join(j.repo.forge.as_str()).join(&j.repo.host).join(&j.repo.path).join(name)
 }
 
 /// Stop here if `nightporter cancel` asked for it (see `daemon::cancel_jobs`).
@@ -1261,13 +1266,28 @@ pub(crate) fn truncate(s: &str, n: usize) -> &str {
     &s[..i]
 }
 
+/// The first line, up to 72 characters, cut at a word with "…" when it's longer.
 pub(crate) fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or_default().chars().take(72).collect()
+    let l = s.lines().next().unwrap_or_default().trim();
+    if l.chars().count() <= 72 {
+        return l.to_string();
+    }
+    let cut: String = l.chars().take(71).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).trim_end_matches([',', ';', ':', '-', ' ']);
+    format!("{cut}…")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_line_cuts_at_a_word() {
+        assert_eq!(first_line("Short title\nmore"), "Short title");
+        let long = "Made the zero-retention class depend on a stored per-provider/model attestation list";
+        assert_eq!(first_line(long), "Made the zero-retention class depend on a stored per-provider/model…");
+        assert!(first_line(long).chars().count() <= 72);
+    }
 
     #[test]
     fn plan_first_covers_mixed_jobs() {
