@@ -114,6 +114,18 @@ impl Api {
         Ok(Got::Fresh(v, headers))
     }
 
+    /// Where a GET redirects to on another server (GitHub's signed log URLs), without following
+    /// it, so the token never goes there. `None` when the answer isn't a redirect to https.
+    pub async fn location(&self, path: &str) -> Result<Option<String>> {
+        let resp = self.req(Method::GET, path).send().await.with_context(|| format!("GET {path}"))?;
+        if !resp.status().is_redirection() {
+            check(resp, path).await?;
+            return Ok(None);
+        }
+        let to = resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok());
+        Ok(to.filter(|u| u.starts_with("https://")).map(String::from))
+    }
+
     pub async fn send(&self, m: Method, path: &str, body: &Value) -> Result<Value> {
         let resp = self.req(m.clone(), path).json(body).send().await.with_context(|| format!("{m} {path}"))?;
         let resp = check(resp, path).await?;
