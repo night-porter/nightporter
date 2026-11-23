@@ -159,7 +159,7 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
     let mut pick = Pick { labels: p.label.iter().cloned().collect(), milestone: p.milestone.clone(), unassigned: true, ..Pick::default() };
     resolve_milestone(&mut pick, &items)?;
     if let (Some(project), Some(iteration)) = (&p.project, &p.iteration) {
-        let today = jiff::Zoned::now().date().to_string();
+        let today = jiff::ZonedDateTime::now().date().to_string();
         pick.numbers = Some(forge.iteration_issues(repo, project, iteration, &today).await?);
     }
     let released = ctx.db(|d| d.prefixed(&format!("released:{}#", repo.key())))?;
