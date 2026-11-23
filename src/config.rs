@@ -757,6 +757,10 @@ pub struct Checks {
     /// Extra protected globs, added to the built-in list (which can't be removed).
     #[serde(default)]
     pub protected: Vec<String>,
+    /// Path globs a job may change, but never past you: a job touching one waits for your
+    /// approval whatever its level (`["src/auth/**", "migrations/**"]`).
+    #[serde(default)]
+    pub hold: Vec<String>,
     #[serde(default = "default_escalations")]
     pub escalate_on: Vec<Escalation>,
     #[serde(default = "five_hundred")]
@@ -1032,7 +1036,7 @@ impl RepoSettings {
 /// Arrays that combine (global ∪ repo) instead of being replaced: a repo file adding one trusted
 /// user must not drop the global lists, and must never be able to drop a global deny.
 const UNION: &[&str] =
-    &["trust.allow_users", "trust.deny_users", "trust.allow_teams", "trust.deny_teams", "trust.allow_bots", "checks.protected"];
+    &["trust.allow_users", "trust.deny_users", "trust.allow_teams", "trust.deny_teams", "trust.allow_bots", "checks.protected", "checks.hold"];
 
 /// Deep-merge `over` into `base`: tables merge, [`UNION`] arrays combine, everything else
 /// (including other arrays) replaces.

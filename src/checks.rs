@@ -249,8 +249,12 @@ pub fn protected_globs(c: &Checks) -> impl Iterator<Item = &str> {
 }
 
 fn globs(c: &Checks) -> GlobSet {
+    glob_set(protected_globs(c))
+}
+
+fn glob_set<'a>(all: impl Iterator<Item = &'a str>) -> GlobSet {
     let mut b = GlobSetBuilder::new();
-    for g in protected_globs(c) {
+    for g in all {
         // Case-insensitive: on macOS `Claude.md` *is* `CLAUDE.md`.
         if let Ok(g) = GlobBuilder::new(g).case_insensitive(true).build() {
             b.add(g);
@@ -292,6 +296,12 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
     let mut prot: Vec<&str> = d.paths().filter(|p| set.is_match(p)).collect();
     prot.dedup();
     push("protected paths", prot.is_empty(), true, prot.join(", "));
+
+    // Allowed, but never past you: the job waits for your approval at any level.
+    let held_set = glob_set(cfg.hold.iter().map(String::as_str));
+    let mut held: Vec<&str> = d.paths().filter(|p| held_set.is_match(p)).collect();
+    held.dedup();
+    push("held paths", held.is_empty(), false, held.join(", "));
 
     let np: Vec<&str> = d.paths().filter(|p| p.split('/').any(|seg| seg.starts_with(".nightporter"))).collect();
     push("night porter files", np.is_empty(), true, np.join(", "));
@@ -514,6 +524,16 @@ mod tests {
         let mut c = cfg();
         c.protected = vec!["migrations/**".into()];
         assert_eq!(failed(&run(&c, &diff(&[("migrations/001.sql", 1)], ""), None, &[])), vec!["protected paths"]);
+    }
+
+    #[test]
+    fn held_paths_wait_for_you_without_blocking() {
+        let mut c = cfg();
+        c.hold = vec!["src/auth/**".into()];
+        let r = run(&c, &diff(&[("src/auth/login.rs", 1), ("src/ui.rs", 1)], ""), None, &[]);
+        assert_eq!(failed(&r), vec!["held paths"]);
+        assert!(!blocking_failed(&r), "you can still approve it");
+        assert!(all_ok(&run(&c, &diff(&[("src/ui.rs", 1)], ""), None, &[])));
     }
 
     #[test]
