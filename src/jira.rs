@@ -40,6 +40,10 @@ pub struct Issue {
     pub summary: String,
     /// Its status is in the Done category.
     pub done: bool,
+    /// Its status is in the To Do category.
+    pub todo: bool,
+    /// The status's name, e.g. "In Progress".
+    pub status: String,
     /// Account ids; empty when unassigned.
     pub assignee: String,
     /// Who created it: unlike the reporter, nobody can change that afterwards.
@@ -66,6 +70,8 @@ impl Issue {
             key: s(&v["key"]),
             summary: s(&f["summary"]),
             done: f["status"]["statusCategory"]["key"] == "done",
+            todo: f["status"]["statusCategory"]["key"] == "new",
+            status: s(&f["status"]["name"]),
             assignee: s(&f["assignee"]["accountId"]),
             creator: s(&f["creator"]["accountId"]),
             creator_name: s(&f["creator"]["displayName"]),
@@ -219,6 +225,11 @@ impl Acli {
             }
         }
         keys.iter().map(|k| self.view(site, k)).collect()
+    }
+
+    /// Move to the status called `status`; fails if the workflow has no such transition here.
+    pub fn transition(&self, site: &str, key: &str, status: &str) -> Result<()> {
+        self.run(site, &["workitem", "transition", "--key", key, "--status", status, "--yes"]).map(|_| ())
     }
 
     fn current_site(&self) -> Result<String> {

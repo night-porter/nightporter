@@ -540,6 +540,8 @@ mod tests {
             max_claimed: 2,
             priority: 0,
             creators: vec![],
+            in_progress: vec![],
+            in_review: vec![],
         };
         let found = |s: &[(String, crate::config::JiraSource)]| jira_overlaps(s).into_iter().map(|c| c.detail).collect::<Vec<_>>();
         // FE and BE projects, one folder each: fine.
