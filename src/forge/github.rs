@@ -398,8 +398,10 @@ impl GitHub {
             if !self.subscribed.contains(&repo.path) {
                 continue;
             }
-            let r = self.sweep_pr(&repo, n).await;
-            cur.record(format!("{}#{n}", repo.key()), r, &mut out);
+            let key = format!("{}#{n}", repo.key());
+            let prev = cur.seen_status.get(&key).cloned().unwrap_or_default();
+            let r = self.sweep_pr(&repo, n, &prev).await;
+            cur.record(key, r, &mut out);
             if let Some(since) = catch_up
                 && let Err(e) = self.pr_events(&repo, n, since, &mut out).await
             {
@@ -429,13 +431,16 @@ impl GitHub {
         Ok(out)
     }
 
-    async fn sweep_pr(&self, repo: &RepoId, n: u64) -> Result<(Vec<Event>, String)> {
+    /// `prev` is last sweep's status: a failed job's log is only read the first time a head is red.
+    async fn sweep_pr(&self, repo: &RepoId, n: u64, prev: &str) -> Result<(Vec<Event>, String)> {
         #[derive(Deserialize)]
         struct Runs {
             check_runs: Vec<Run>,
         }
         #[derive(Deserialize)]
         struct Run {
+            #[serde(default)]
+            id: u64,
             name: String,
             conclusion: Option<String>,
             #[serde(default)]
@@ -471,8 +476,11 @@ impl GitHub {
                     status.push("green".into());
                 }
             } else {
-                status.push("red".into());
+                let red = format!("red@{}", p.head.sha);
+                let fresh = !prev.split(',').any(|s| s == red);
+                status.push(red);
                 let mut body = String::from("CI failed:\n");
+                let mut logs = 0;
                 for f in failed {
                     let o = f.output.as_ref();
                     let _ = writeln!(
@@ -483,11 +491,40 @@ impl GitHub {
                         o.and_then(|o| o.title.clone()).unwrap_or_default(),
                         o.and_then(|o| o.summary.clone()).unwrap_or_default().chars().take(800).collect::<String>()
                     );
+                    // ponytail: the first 3 Actions jobs only; other CI apps keep just their summary.
+                    if fresh && f.html_url.contains("/actions/runs/") && logs < 3 {
+                        logs += 1;
+                        let tail = self.job_log(r, f.id).await;
+                        if !tail.is_empty() {
+                            let _ = writeln!(body, "  End of its log:\n```\n{}\n```", tail.replace("```", "'''"));
+                        }
+                    }
                 }
                 out.push(self.state_event(&repo, n, Trigger::CiFailure, &p.head.sha, body));
             }
             Ok((out, status.join(",")))
         }
+    }
+
+    /// The end of a GitHub Actions job's log; empty when it can't be read (expired, no access).
+    async fn job_log(&self, r: &str, id: u64) -> String {
+        let url = match self.api.location(&format!("/repos/{r}/actions/jobs/{id}/logs")).await {
+            Ok(Some(u)) => u,
+            Ok(None) => return String::new(),
+            Err(e) => {
+                tracing::warn!("log of {r} job {id}: {e:#}");
+                return String::new();
+            }
+        };
+        // The signed URL needs no token: fetch it with the client that has none.
+        let got = async { crate::http::plain().get(&url).send().await?.error_for_status()?.text().await }.await;
+        got.map_or_else(
+            |e| {
+                tracing::warn!("log of {r} job {id}: {e}");
+                String::new()
+            },
+            |t| super::log_tail(&t),
+        )
     }
 
     fn state_event(&self, repo: &RepoId, n: u64, trigger: Trigger, sha: &str, body: String) -> Event {

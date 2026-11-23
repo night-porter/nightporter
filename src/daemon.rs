@@ -319,7 +319,8 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
     // ponytail: newest job per PR, waiting or touched in 3 days; one API call each per poll.
     let jobs = ctx.db(|d| d.command_jobs(crate::state::now() - 3 * 86400))?;
     let forge = ctx.forges[key].lock().await;
-    for j in jobs.iter().filter(|j| j.repo.forge == key.0 && j.repo.host == key.1) {
+    // A Jira job has no PR/MR of its own number to read commands from.
+    for j in jobs.iter().filter(|j| j.repo.forge == key.0 && j.repo.host == key.1 && j.target != crate::forge::Target::Jira) {
         let since = jiff::Timestamp::from_second(j.created_at)?.strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
         let cmds = match forge.controls(&j.repo, j.target, j.number, &since).await {
             Ok(c) => c,

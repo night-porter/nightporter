@@ -256,6 +256,24 @@ impl Event {
 const REVIEW_REQUEST: &str = "review-request-";
 
 /// Current time as `YYYY-MM-DDTHH:MM:SSZ` (what both forge APIs accept in queries).
+/// The end of a failed CI job's log, for the CI-fix prompt: up to 60 lines before its last
+/// `##[error]`, without timestamps or group markers, cut to the last 4000 characters.
+pub fn log_tail(log: &str) -> String {
+    let lines: Vec<&str> = log
+        .lines()
+        .map(|l| match l.split_once(' ') {
+            Some((ts, rest)) if ts.len() > 20 && ts.ends_with('Z') && ts.starts_with(|c: char| c.is_ascii_digit()) => rest,
+            _ => l,
+        })
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty() && !l.starts_with("##[group]") && !l.starts_with("##[endgroup]"))
+        .collect();
+    let end = lines.iter().rposition(|l| l.contains("##[error]")).map_or(lines.len(), |i| i + 1);
+    let text = lines[end.saturating_sub(60)..end].join("\n");
+    let cut = text.char_indices().rev().nth(3999).map_or(0, |(i, _)| i);
+    text[cut..].to_string()
+}
+
 pub fn now_iso() -> String {
     jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -778,6 +796,19 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_tail_keeps_the_errors_before_the_last_error_marker() {
+        let log = "2026-11-23T13:39:44.4259246Z ##[group]Run pnpm typecheck\n\
+                   2026-11-23T13:39:44.4278973Z src/a.tsx(11,7): error TS2741: Property 'UNVERIFIED' is missing\n\
+                   2026-11-23T13:39:44.4514469Z ##[error]Process completed with exit code 2.\n\
+                   2026-11-23T13:39:45.0000000Z Post job cleanup.\n";
+        assert_eq!(
+            log_tail(log),
+            "src/a.tsx(11,7): error TS2741: Property 'UNVERIFIED' is missing\n##[error]Process completed with exit code 2."
+        );
+        assert_eq!(log_tail(&format!("{}\n", "x".repeat(100)).repeat(70)).len(), 4000, "cut to the end");
+    }
 
     #[test]
     fn sweep_bookkeeping_records_first_then_fires() {
