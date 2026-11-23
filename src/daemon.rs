@@ -1,7 +1,7 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
 use crate::config::Config;
-use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
+use crate::forge::{Control, Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
 use crate::paths::Paths;
@@ -335,7 +335,17 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
                 continue;
             }
             ctx.db(|d| d.set(&done_key, "1"))?;
-            let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
+            let res = match &c.control {
+                // Your own request, taken in like a review comment you'd want acted on.
+                Control::Do(what) => {
+                    let e = Event::state(format!("do-{}", c.id), &j.repo, j.number, Trigger::Comment, forge.me(), what.clone());
+                    ctx.db(|d| {
+                        d.del(&crate::actions::stop_key(&j.repo, j.number))?;
+                        d.add_event(&e, Disposition::Pending, "asked with /nightporter do").map(|_| None)
+                    })
+                }
+                other => ctx.db(|d| crate::actions::pr_command(d, j.id, other)),
+            };
             tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
             // The command already ran: a broken repo file must not cost it its reply.
             let s = ctx.cfg().settings_for(&ctx.paths, &j.repo).ok();
@@ -391,6 +401,9 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     // they are never requests or review feedback.
     if crate::forge::parse_control(&e.body).is_some() {
         return drop("job command");
+    }
+    if ctx.db(|d| d.get(&crate::actions::stop_key(&e.repo, e.number)))?.is_some() {
+        return drop("stopped with /nightporter stop");
     }
     match e.mode() {
         Mode::MyPrs => {
@@ -486,7 +499,12 @@ type Group = ((RepoId, u64), Vec<(Event, i64)>, String);
 /// quarter of the daily cap, so a few hundred queued issues can't crowd out tonight's review comments.
 fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
     let mut groups: BTreeMap<(RepoId, u64), Vec<(Event, i64)>> = BTreeMap::new();
+    let stopped = ctx.db(|d| d.prefixed("stopped:"))?;
     for (e, seen) in ctx.db(|d| d.events_with(Disposition::Pending))? {
+        // Held by `/nightporter stop`; they go ahead after `/nightporter resume`.
+        if stopped.contains_key(crate::actions::stop_key(&e.repo, e.number).trim_start_matches("stopped:")) {
+            continue;
+        }
         groups.entry((e.repo.clone(), e.number)).or_default().push((e, seen));
     }
     let mut flags = ctx.db(|d| d.prefixed("retry:"))?;
