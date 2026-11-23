@@ -1,5 +1,6 @@
 # Keeps SHA-pinned actions and crates current. Dependabot updates the pin and the
-# `# vX.Y.Z` comment together.
+# `# vX.Y.Z` comment together. A release must be out for a few days (cooldown) before it is
+# proposed; security updates skip the wait. Patch and minor updates merge once CI passes (ci.yml).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -9,6 +10,8 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    cooldown:
+      default-days: 7
   - package-ecosystem: npm
     directory: /docs
     schedule:
@@ -16,6 +19,11 @@ updates:
     groups:
       docs:
         patterns: ["*"]
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -23,3 +31,8 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
