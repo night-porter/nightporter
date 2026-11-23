@@ -546,6 +546,14 @@ pub struct JiraSource {
     /// Most issues held at once.
     #[serde(default = "two")]
     pub max_claimed: usize,
+    /// Repos whose sources match the same issue: the highest priority claims it first, then
+    /// repo names in order.
+    #[serde(default)]
+    pub priority: i64,
+    /// Only issues these people created (Jira account ids; the creator, unlike the reporter,
+    /// can't be changed later). Empty: anyone's.
+    #[serde(default)]
+    pub creators: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -559,13 +567,18 @@ pub enum JiraPickup {
 }
 
 impl JiraSource {
-    /// The JQL `acli` runs: `jql` narrowed to the pickup mode's assignee.
+    /// The JQL `acli` runs: `jql` narrowed to the pickup mode's assignee, never a Done issue.
     pub fn query(&self) -> String {
         let who = match self.pickup {
             JiraPickup::Assigned => "assignee = currentUser()",
             JiraPickup::New => "assignee is EMPTY",
         };
-        format!("{who} AND ({})", self.jql)
+        let mut q = format!("{who} AND statusCategory != Done AND ({})", self.jql);
+        if !self.creators.is_empty() {
+            let ids: Vec<String> = self.creators.iter().map(|r| format!("\"{}\"", r.replace('"', ""))).collect();
+            q = format!("{q} AND creator in ({})", ids.join(", "));
+        }
+        q
     }
 
     fn validate(&self) -> Result<()> {
@@ -1391,9 +1404,11 @@ mod tests {
         let cfg = Config::parse("").unwrap();
         let src = |t: &str| cfg.resolve(Some(&format!("[[jira]]\n{t}").parse().unwrap())).map(|s| s.jira[0].clone());
         let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npaths = [\"frontend/\"]").unwrap();
-        assert_eq!(j.query(), "assignee = currentUser() AND (project = FE)", "assigned is the default");
+        assert_eq!(j.query(), "assignee = currentUser() AND statusCategory != Done AND (project = FE)", "assigned is the default");
         let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npickup = \"new\"").unwrap();
-        assert_eq!(j.query(), "assignee is EMPTY AND (project = FE)");
+        assert_eq!(j.query(), "assignee is EMPTY AND statusCategory != Done AND (project = FE)");
+        let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npickup = \"new\"\ncreators = [\"7:a\", \"7:b\"]").unwrap();
+        assert_eq!(j.query(), "assignee is EMPTY AND statusCategory != Done AND (project = FE) AND creator in (\"7:a\", \"7:b\")");
         for bad in [
             "site = \"https://a.atlassian.net\"\njql = \"project = FE\"",
             "site = \"a.atlassian.net\"\njql = \"project = FE ORDER BY created\"",

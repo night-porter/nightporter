@@ -92,12 +92,16 @@ struct App {
     history_all: Vec<Job>,
     /// `o`: list jobs by last update instead of by creation (id).
     by_updated: bool,
+    /// Width of the widest `repo#n` / `repo ABC-123` in the lists, so their columns line up.
+    place_w: usize,
     /// Enter on the Repos tab: that repo's settings, shown in the detail pane.
     repo_view: Option<crate::forge::RepoId>,
     /// This session's dismissals and ignores, newest last, for `u` (undo).
     undo_jobs: Vec<i64>,
     undo_events: Vec<String>,
     update: Option<String>,
+    /// The daemon's last Jira pickup error (see `daemon::JIRA_ERROR`).
+    jira_error: Option<String>,
     /// Loaded on opening the tab and after a change (one git call per clone).
     worktrees: Vec<crate::worktrees::Wt>,
 }
@@ -165,12 +169,14 @@ impl App {
             filtering: false,
             history_all: vec![],
             by_updated: false,
+            place_w: 0,
             repo_view: None,
             undo_jobs: vec![],
             stages: std::collections::HashMap::default(),
             started: Instant::now(),
             undo_events: vec![],
             update: None,
+            jira_error: None,
             worktrees: vec![],
         }
     }
@@ -222,9 +228,9 @@ impl App {
         match self.live_stage(j) {
             Some((st, since)) => {
                 let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
-                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated))
+                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated, self.place_w))
             }
-            None => job_line(j, self.by_updated),
+            None => job_line(j, self.by_updated, self.place_w),
         }
     }
 
@@ -253,10 +259,19 @@ impl App {
                 })
                 .unwrap_or_else(|e| format!("error: {e:#}"));
         }
+        self.place_w = jobs.iter().map(|j| j.place().chars().count()).max().unwrap_or(0).min(60);
         self.history_all = jobs;
         self.history.clone_from(&self.history_all);
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
         self.paused = actions::paused(&self.db);
+        let jira = self.db.get(crate::daemon::JIRA_ERROR).ok().flatten();
+        // A new error is spelled out once in the message line; `nightporter status` has it all.
+        if jira != self.jira_error
+            && let Some(e) = &jira
+        {
+            self.msg = format!("Jira pickup failed: {} (all of it: nightporter status)", e.lines().next().unwrap_or_default());
+        }
+        self.jira_error = jira;
         self.burst = actions::burst(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
@@ -299,7 +314,7 @@ impl App {
         self.repos =
             self.repos_all.iter().filter(|r| format!("{}/{}", r.id.host, r.id.path).to_lowercase().contains(&f)).cloned().collect();
         self.settings = self.settings_all.iter().filter(|r| r.setting.key.contains(&f)).cloned().collect();
-        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated).to_lowercase().contains(&f)).cloned().collect();
+        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated, 0).to_lowercase().contains(&f)).cloned().collect();
         if self.sel.selected().is_some_and(|i| i >= self.len()) {
             self.sel.select(Some(0));
         }
@@ -627,7 +642,7 @@ impl App {
             }
             KeyCode::Char('w') => match self.db.job(id) {
                 Ok(Some(j)) if j.mode == crate::improve::LEARN => open_url(&crate::notify::repo_url(&j.repo)),
-                Ok(Some(j)) => open_url(&crate::notify::web_url(&j.repo, j.target, j.number)),
+                Ok(Some(j)) => open_url(&j.url()),
                 _ => Ok("job not found".into()),
             },
             KeyCode::Char('y') => {
@@ -818,13 +833,19 @@ impl App {
             Span::raw(" · "),
             if self.paused { Span::styled("PAUSED", self.style(warn)) } else { Span::styled("active", self.style(good)) },
             Span::raw(self.burst.map_or(String::new(), |b| format!(" · BURST {}m left", (b.until - crate::state::now()).max(0) / 60 + 1))),
+        ];
+        // Alerts before the counts, so a narrow terminal cuts the counts, not the alert.
+        if self.jira_error.is_some() {
+            status.extend([Span::raw(" · "), Span::styled("JIRA ERROR", self.style(bad))]);
+        }
+        status.extend([
             Span::raw(" · "),
             Span::styled(format!("{needs} need you"), count(needs, warn)),
             Span::raw(" · "),
             Span::styled(format!("{failed} failed today"), count(failed, bad)),
             Span::raw(" · "),
             Span::styled(format!("{} in inbox", self.inbox.len()), count(self.inbox.len(), warn)),
-        ];
+        ]);
         if self.update.is_some() {
             status.extend([Span::raw(" · "), Span::styled("update available", self.style(Style::new().fg(Color::Cyan)))]);
         }
@@ -1107,9 +1128,11 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
 }
 
 /// The date shown is the one the list is ordered by: created, or `by_updated` last updated.
-fn job_line(j: &Job, by_updated: bool) -> String {
+/// `w`: the width its place is padded to.
+fn job_line(j: &Job, by_updated: bool, w: usize) -> String {
     let when = crate::state::local_time(if by_updated { j.updated_at } else { j.created_at }, "%m-%d %H:%M");
-    let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { format!("{}#{:<5}", j.repo, j.number) };
+    let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { j.place() };
+    let on = format!("{on:<w$}");
     format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
 }
 
@@ -1118,23 +1141,13 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     let when = |t: i64| crate::state::local_time(t, "%Y-%m-%d %H:%M");
-    let _ = writeln!(
-        s,
-        "Job {} — {} — {}#{} ({}) — level {} — attempt {}",
-        j.id,
-        j.status.label(),
-        j.repo,
-        j.number,
-        j.mode,
-        j.level,
-        j.attempt
-    );
+    let _ = writeln!(s, "Job {} — {} — {} ({}) — level {} — attempt {}", j.id, j.status.label(), j.place(), j.mode, j.level, j.attempt);
     let _ = writeln!(s, "Created {}, updated {}", when(j.created_at), when(j.updated_at));
     if j.mode == crate::improve::LEARN {
         let _ = writeln!(s, "Proposed instructions for {}: {}", j.repo, j.meta.prompt_path);
         let _ = writeln!(s, "a writes it (jobs on this repo use it from then on), e edits it first, r rejects.");
     } else {
-        let _ = writeln!(s, "{}", crate::notify::web_url(&j.repo, j.target, j.number));
+        let _ = writeln!(s, "{}", j.url());
     }
     if !j.summary.is_empty() {
         let _ = writeln!(s, "\nSummary: {}", j.summary);

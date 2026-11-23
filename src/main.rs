@@ -827,17 +827,21 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     if let Some(b) = update::banner(&db) {
         writeln!(out, "{b}")?;
     }
+    if let Some(e) = db.get(daemon::JIRA_ERROR)? {
+        // Each failing [[jira]] entry on its own line; the others keep going.
+        let every = config::Config::load(paths).map_or(10, |c| c.sweep_interval.as_secs() / 60);
+        writeln!(out, "Jira pickup failing (tried again every {every} min):\n  {}", e.replace('\n', "\n  "))?;
+    }
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
         writeln!(
             out,
-            "job {:>4}  {:<22} {}  {}#{}  {}",
+            "job {:>4}  {:<22} {}  {}  {}",
             j.id,
             j.status.label(),
             state::local_time(j.updated_at, "%m-%d %H:%M"),
-            j.repo,
-            j.number,
+            j.place(),
             printable(j.summary.lines().next().unwrap_or_default())
         )?;
     }

@@ -56,6 +56,8 @@ pub fn repo_url(repo: &RepoId) -> String {
 /// The browser URL of a PR/MR or issue.
 pub fn web_url(repo: &RepoId, target: Target, n: u64) -> String {
     let what = match (repo.forge, target) {
+        // Its address needs the site and key (`JiraRef::url`); the repo is the next best thing.
+        (_, Target::Jira) => return repo_url(repo),
         (ForgeKind::GitHub, Target::Pr) => "pull",
         (ForgeKind::GitLab, Target::Pr) => "-/merge_requests",
         (ForgeKind::GitLab, Target::Issue) => "-/issues",

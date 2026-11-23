@@ -224,7 +224,20 @@ pub struct Job {
     pub meta: JobMeta,
 }
 
+/// `repo#n`, or `repo ABC-123` for a Jira issue: never a Jira job's internal number.
+pub fn place(repo: &RepoId, n: u64, jira: Option<&crate::jira::JiraRef>) -> String {
+    jira.map_or_else(|| format!("{repo}#{n}"), |r| format!("{repo} {}", r.key))
+}
+
 impl Job {
+    /// What it works on, for people: `o/r#12`, or `o/r ABC-123` for a Jira issue.
+    pub fn place(&self) -> String {
+        place(&self.repo, self.number, self.meta.jira.as_ref())
+    }
+    /// Its PR/issue in the browser (the Jira issue for a Jira job).
+    pub fn url(&self) -> String {
+        self.meta.jira.as_ref().map_or_else(|| crate::notify::web_url(&self.repo, self.target, self.number), crate::jira::JiraRef::url)
+    }
     /// Someone else's code you haven't approved running at this head: nothing of yours (agent
     /// commands, env hooks, a take-over) may run on it.
     pub fn unapproved_code(&self) -> bool {
@@ -241,6 +254,9 @@ impl Job {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // stored JSON, one flag per fact
 pub struct JobMeta {
+    /// A `Target::Jira` job's issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira: Option<crate::jira::JiraRef>,
     #[serde(default)]
     pub push_url: String,
     #[serde(default)]
@@ -657,7 +673,7 @@ impl Db {
     /// waiting for you, or updated since `since` (bounds the API calls per poll).
     pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!(
-            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs WHERE mode != 'learn' GROUP BY repo, target, number)
+            "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs WHERE mode != 'learn' AND target != 'jira' GROUP BY repo, target, number)
                AND (status IN ({}) OR updated_at >= ?1) ORDER BY id",
             JobStatus::sql(JobStatus::needs_user)
         ))?;
@@ -814,7 +830,11 @@ fn row_job(r: &rusqlite::Row) -> rusqlite::Result<Job> {
     Ok(Job {
         id: r.get(0)?,
         repo: RepoId::parse_key(&repo).ok_or(rusqlite::Error::InvalidQuery)?,
-        target: if target == "issue" { Target::Issue } else { Target::Pr },
+        target: match target.as_str() {
+            "issue" => Target::Issue,
+            "jira" => Target::Jira,
+            _ => Target::Pr,
+        },
         // Written with cast_signed: the bit-exact inverse.
         number: r.get::<_, i64>(3)?.cast_unsigned(),
         mode: r.get(4)?,

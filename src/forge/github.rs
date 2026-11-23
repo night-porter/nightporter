@@ -561,6 +561,7 @@ impl GitHub {
         let path = match target {
             Target::Issue => format!("/repos/{}/issues?state=open&per_page=100", repo.path),
             Target::Pr => format!("/repos/{}/pulls?state=open&per_page=100", repo.path),
+            Target::Jira => anyhow::bail!("a Jira issue isn't on the forge"),
         };
         let items: Vec<ListItem> = self.api.get_all(&path, super::LIST_PAGES).await?;
         Ok(items.into_iter().filter(|i| target == Target::Pr || i.pull_request.is_none()).map(ListItem::listed).collect())

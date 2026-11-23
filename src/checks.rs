@@ -317,6 +317,22 @@ pub fn run(cfg: &Checks, d: &Diff, gitleaks: Option<&str>, texts: &[&str]) -> Ve
     out
 }
 
+/// A Jira source's `paths`: files changed outside them wait for your OK (a frontend issue may
+/// rightly touch shared config, so it never blocks).
+pub fn outside_paths(d: &Diff, paths: &[String]) -> Option<CheckResult> {
+    if paths.is_empty() {
+        return None;
+    }
+    let mut out: Vec<&str> = d.paths().filter(|p| !paths.iter().any(|dir| std::path::Path::new(p).starts_with(dir))).collect();
+    out.dedup();
+    Some(CheckResult {
+        name: "outside paths".into(),
+        ok: out.is_empty(),
+        blocking: false,
+        detail: if out.is_empty() { String::new() } else { format!("outside {}: {}", paths.join(", "), out.join(", ")) },
+    })
+}
+
 const PII: &str = "personal data";
 const REPLY_HIT: &str = "in a reply: ";
 
@@ -434,6 +450,16 @@ mod tests {
     }
     fn failed(r: &[CheckResult]) -> Vec<&str> {
         r.iter().filter(|c| !c.ok).map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn changes_outside_a_jira_sources_paths_ask() {
+        let d = diff(&[("frontend/app.ts", 3), ("frontendish/x", 1), ("package.json", 1)], "");
+        assert!(outside_paths(&d, &[]).is_none(), "no paths: no check");
+        let r = outside_paths(&d, &["frontend/".into()]).unwrap();
+        assert!(!r.ok && !r.blocking);
+        assert_eq!(r.detail, "outside frontend/: frontendish/x, package.json");
+        assert!(outside_paths(&diff(&[("frontend/a", 1)], ""), &["frontend".into()]).unwrap().ok);
     }
 
     #[test]
