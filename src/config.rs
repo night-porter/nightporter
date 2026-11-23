@@ -546,6 +546,13 @@ pub struct JiraSource {
     /// Most issues held at once.
     #[serde(default = "two")]
     pub max_claimed: usize,
+    /// Repos whose sources match the same issue: the highest priority claims it first, then
+    /// repo names in order.
+    #[serde(default)]
+    pub priority: i64,
+    /// Only issues these people reported (Jira account ids). Empty: anyone's.
+    #[serde(default)]
+    pub reporters: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -565,7 +572,12 @@ impl JiraSource {
             JiraPickup::Assigned => "assignee = currentUser()",
             JiraPickup::New => "assignee is EMPTY",
         };
-        format!("{who} AND ({})", self.jql)
+        let mut q = format!("{who} AND ({})", self.jql);
+        if !self.reporters.is_empty() {
+            let ids: Vec<String> = self.reporters.iter().map(|r| format!("\"{}\"", r.replace('"', ""))).collect();
+            q = format!("{q} AND reporter in ({})", ids.join(", "));
+        }
+        q
     }
 
     fn validate(&self) -> Result<()> {
@@ -1394,6 +1406,8 @@ mod tests {
         assert_eq!(j.query(), "assignee = currentUser() AND (project = FE)", "assigned is the default");
         let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npickup = \"new\"").unwrap();
         assert_eq!(j.query(), "assignee is EMPTY AND (project = FE)");
+        let j = src("site = \"a.atlassian.net\"\njql = \"project = FE\"\npickup = \"new\"\nreporters = [\"7:a\", \"7:b\"]").unwrap();
+        assert_eq!(j.query(), "assignee is EMPTY AND (project = FE) AND reporter in (\"7:a\", \"7:b\")");
         for bad in [
             "site = \"https://a.atlassian.net\"\njql = \"project = FE\"",
             "site = \"a.atlassian.net\"\njql = \"project = FE ORDER BY created\"",

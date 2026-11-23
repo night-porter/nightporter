@@ -38,6 +38,8 @@ pub fn branch_name(target: crate::forge::Target, n: u64) -> String {
     match target {
         crate::forge::Target::Pr => format!("nightporter/pr-{n}"),
         crate::forge::Target::Issue => format!("nightporter/issue-{n}"),
+        // Jobs name it after the key (`nightporter/ABC-123`), which links it in Jira.
+        crate::forge::Target::Jira => format!("nightporter/jira-{n}"),
     }
 }
 

@@ -146,6 +146,8 @@ pub async fn run(paths: Paths) -> Result<()> {
     let mut next_poll: HashMap<(ForgeKind, String), Instant> = HashMap::new();
     let mut last_scan = Instant::now();
     let mut last_housekeeping = Instant::now().checked_sub(Duration::from_secs(3600)).unwrap();
+    let mut last_jira: Option<Instant> = None;
+    let jira_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -171,6 +173,7 @@ pub async fn run(paths: Paths) -> Result<()> {
             };
             next_poll.insert(key.clone(), Instant::now() + wait);
         }
+        jira_tick(&ctx, &mut last_jira, &jira_busy, cfg.sweep_interval);
         if let Err(e) = cancel_jobs(&ctx) {
             tracing::error!("cancel: {e:#}");
         }
@@ -197,6 +200,28 @@ pub async fn run(paths: Paths) -> Result<()> {
         }
     }
 }
+
+/// Jira pickup every `interval`: off the loop (each `acli` call takes a moment), one pass at a time.
+fn jira_tick(ctx: &Arc<Ctx>, last: &mut Option<Instant>, busy: &Arc<std::sync::atomic::AtomicBool>, interval: Duration) {
+    if last.is_some_and(|t| t.elapsed() < interval) || busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let (c, busy) = (ctx.clone(), busy.clone());
+    tokio::spawn(async move {
+        let cfg = c.cfg();
+        let err = crate::sweep::jira_pickup(&c, &cfg).await;
+        // Shown by `status` and the TUI until a pass goes through.
+        let _ = c.db(|d| match &err {
+            Some(e) => d.set(JIRA_ERROR, e),
+            None => d.del(JIRA_ERROR),
+        });
+        busy.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
+/// `kv` key: the last Jira pickup error (an `acli` site left wrong, a login gone, a bad JQL).
+pub const JIRA_ERROR: &str = "jira_error";
 
 pub(crate) fn reload(ctx: &Ctx) {
     match Config::load(&ctx.paths) {
@@ -564,9 +589,9 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         let ci = evs.iter().any(|(e, _)| e.trigger == Trigger::CiFailure);
         let level = s.level_for(matches!(mode, Mode::Maintainer), &kinds, ci);
         let target = evs[0].0.target;
-        let mode_s = crate::state::enum_str(&mode);
-        let id = ctx.db(|d| d.create_job(&repo, target, n, &mode_s, level.as_str(), &ids))?;
+        let id = ctx.db(|d| d.create_job(&repo, target, n, &crate::state::enum_str(&mode), level.as_str(), &ids))?;
         let meta = JobMeta {
+            jira: ctx.db(|d| crate::sweep::jira_claim(d, &repo, n))?.map(|c| c.issue),
             verb,
             front: now_,
             fresh: fresh_over.is_some(),

@@ -300,7 +300,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     let forge = ctx.forge(&j.repo)?;
     let me = forge.lock().await.me().to_string();
     let repo_url = git::remote_url(&clone, &j.repo, accounts)?;
-    let branch = git::branch_name(j.target, j.number);
+    let branch = j.meta.jira.as_ref().map_or_else(|| git::branch_name(j.target, j.number), |r| format!("nightporter/{}", r.key));
     let wt = worktree_path(ctx, j);
     j.worktree = wt.to_string_lossy().into();
     j.branch.clone_from(&branch);
@@ -328,15 +328,29 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
             let head_ref = format!("refs/heads/{}", pr.head_ref);
             (Some(pr), url, head_ref)
         }
-        Target::Issue => {
+        Target::Issue | Target::Jira => {
             let base = default_branch(&clone, &repo_url).await.unwrap_or_else(|_| "main".into());
             j.meta.push_url.clone_from(&repo_url);
             j.meta.push_ref.clone_from(&branch);
             j.meta.base.clone_from(&base);
-            let i = forge.lock().await.issue(&j.repo, j.number).await?;
+            let (i, theirs) = match j.meta.jira.clone() {
+                Some(r) => {
+                    let Some(found) = jira_issue(ctx, &r).await? else {
+                        finish(ctx, j, format!("{} is done in Jira; nothing to do", r.key))?;
+                        return Ok(None);
+                    };
+                    found
+                }
+                None if j.target == Target::Jira => bail!("no Jira issue recorded for job {}", j.id),
+                None => {
+                    let i = forge.lock().await.issue(&j.repo, j.number).await?;
+                    let theirs = !i.author.eq_ignore_ascii_case(&me);
+                    (i, theirs)
+                }
+            };
             j.meta.title.clone_from(&i.title);
             // A request on someone else's issue: their text shaped the job.
-            j.meta.untrusted_input |= verb.is_some() && !i.author.eq_ignore_ascii_case(&me);
+            j.meta.untrusted_input |= verb.is_some() && theirs;
             issue = Some(i);
             // A later request on the same issue continues the branch from earlier work; a fresh
             // retry rebuilds it from the base and force-pushes over exactly the head seen here.
@@ -373,7 +387,7 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
     if let Err(e) = git::fetch_history(&clone, &repo_url).await {
         log(ctx, j.id, &format!("couldn't fetch the upstream's branches and tags: {}", git::redact(&e.to_string())));
     }
-    let step = prompts::step_for(events, verb, j.target == Target::Issue);
+    let step = prompts::step_for(events, verb, j.target.is_issue());
     if step == "conflict" {
         git(
             &clone,
@@ -389,6 +403,23 @@ async fn prepare(ctx: &Ctx, j: &mut Job, accounts: &[crate::config::Account], s:
         .await?;
     }
     Ok(Some(Work { clone, repo_url, branch, wt, gitfile, me, pr, issue, step }))
+}
+
+/// A Jira job's issue, and whether someone else reported it (their text is untrusted). `None`:
+/// it's done in Jira.
+async fn jira_issue(ctx: &Ctx, r: &crate::jira::JiraRef) -> Result<Option<(crate::forge::IssueInfo, bool)>> {
+    let acli = crate::jira::Acli::new(&ctx.paths);
+    let mine = acli.account(&r.site).unwrap_or_default();
+    let (site, key) = (r.site.clone(), r.key.clone());
+    let i = acli.call(move |a| a.view(&site, &key)).await?;
+    if i.done {
+        return Ok(None);
+    }
+    let theirs = mine.is_empty() || i.reporter != mine;
+    Ok(Some((
+        crate::forge::IssueInfo { title: format!("{}: {}", i.key, i.summary), body: i.text, author: i.reporter_name, open: true },
+        theirs,
+    )))
 }
 
 /// A review of someone else's code that only reads it, so it needn't wait for run approval.
@@ -498,7 +529,7 @@ async fn run_agent(ctx: &Ctx, j: &mut Job, s: &RepoSettings, w: &Work, job_dir: 
         untrusted_head: j.meta.untrusted_code,
         events,
         verb,
-        is_issue: j.target == Target::Issue,
+        is_issue: j.target.is_issue(),
         me: &w.me,
         pack_prompts: &pack_prompts,
         planning,
@@ -597,6 +628,7 @@ async fn inspect(
     // The summary becomes a draft PR title/body for issue fixes: scan it like a reply.
     let reply_texts: Vec<&str> = outcome.replies.iter().map(|r| r.body.as_str()).chain([outcome.summary.as_str()]).collect();
     let mut results = checks::run(&s.checks, &diff, leaks.as_deref(), &reply_texts);
+    results.extend(j.meta.jira.as_ref().and_then(|r| checks::outside_paths(&diff, &r.paths)));
     if let Some(detail) = sign_error {
         results.push(CheckResult { name: "signing".into(), ok: false, blocking: false, detail });
     }
@@ -712,7 +744,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             bail!("history rewrite detected; not pushing");
         }
         let remote = git::remote_head(&clone, &j.meta.push_url, &j.meta.push_ref).await?;
-        let fresh_branch = j.target == Target::Issue && remote.is_none();
+        let fresh_branch = j.target.is_issue() && remote.is_none();
         let already = remote.as_deref() == Some(j.head_after.as_str());
         let lease = (!j.meta.lease.is_empty()).then_some(j.meta.lease.as_str());
         let replaces = lease.is_some() && remote.as_deref() == lease;
@@ -738,9 +770,10 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     // `merge`: the branch's rules are checked before anything is opened, so a PR that won't be
     // set to merge opens as a draft, as at `auto`.
     let gate = if level(&j) == Level::Merge && has_code { Some(merge_gate(&j, &f).await) } else { None };
-    if j.target == Target::Issue && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
+    if j.target.is_issue() && has_code && verb == Some(Verb::Fix) && j.meta.pr_url.is_empty() {
         open_fix_pr(ctx, &mut j, &s, &f, gate != Some(None)).await?;
     }
+    let jira = j.meta.jira.clone().map(|r| (r, crate::jira::Acli::new(&ctx.paths)));
     let merge_note = match gate {
         Some(None) => auto_merge(&j, &f).await,
         Some(Some(why)) => format!("; not set to merge: {why}"),
@@ -754,11 +787,21 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             continue;
         }
         let ev: Option<&Event> = r.event.as_deref().and_then(|eid| events.iter().find(|e| e.id == eid));
-        // For issue fixes, the general reply became the PR body; post only event replies.
-        if j.target == Target::Issue && has_code && ev.is_none() && verb == Some(Verb::Fix) {
+        // For issue fixes, the general reply became the PR body; post only event replies. On
+        // Jira, which doesn't see the PR, say where it is instead.
+        let fix_pr = j.target.is_issue() && has_code && ev.is_none() && verb == Some(Verb::Fix);
+        if fix_pr && jira.is_none() {
             continue;
         }
-        if let (0, Some(v)) = (i, j.meta.review) {
+        if let Some((jr, acli)) = &jira {
+            let body = if fix_pr {
+                prompts::sign(&format!("Opened a pull request for this: {}", j.meta.pr_url), s.reply.attribution(), s.agent)
+            } else {
+                r.body.clone()
+            };
+            let (site, key) = (jr.site.clone(), jr.key.clone());
+            acli.call(move |a| a.comment(&site, &key, &body)).await.with_context(|| format!("comment on {}", jr.key))?;
+        } else if let (0, Some(v)) = (i, j.meta.review) {
             f.review(&j.repo, j.number, v, &r.body).await.with_context(|| format!("post review ({})", crate::state::enum_str(&v)))?;
             log(ctx, id, &format!("posted review: {}", crate::state::enum_str(&v)));
         } else {
@@ -776,18 +819,8 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             log(ctx, id, &format!("could not resolve thread {t}: {e:#}"));
         }
     }
-    // New commits went up on a bot's findings: ask it to look again (once per bot).
     if has_code {
-        let mut asked = Vec::new();
-        for cmd in events.iter().filter(|e| e.is_bot).filter_map(|e| retrigger(&e.author)) {
-            if !asked.contains(&cmd) {
-                asked.push(cmd);
-                match f.reply(&j.repo, j.target, j.number, None, &prompts::sign(cmd, s.reply.attribution().quiet(), s.agent)).await {
-                    Ok(()) => log(ctx, id, &format!("asked for a new review: {cmd}")),
-                    Err(e) => log(ctx, id, &format!("could not ask for a new review ({cmd}): {e:#}")),
-                }
-            }
-        }
+        ask_bots_again(ctx, &j, &s, &f, &events).await;
     }
     drop(f);
     j.status = JobStatus::Done;
@@ -798,6 +831,20 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// New commits went up on a bot's findings: ask it to look again (once per bot).
+async fn ask_bots_again(ctx: &Ctx, j: &Job, s: &RepoSettings, f: &crate::forge::Forge, events: &[Event]) {
+    let mut asked = Vec::new();
+    for cmd in events.iter().filter(|e| e.is_bot).filter_map(|e| retrigger(&e.author)) {
+        if !asked.contains(&cmd) {
+            asked.push(cmd);
+            match f.reply(&j.repo, j.target, j.number, None, &prompts::sign(cmd, s.reply.attribution().quiet(), s.agent)).await {
+                Ok(()) => log(ctx, j.id, &format!("asked for a new review: {cmd}")),
+                Err(e) => log(ctx, j.id, &format!("could not ask for a new review ({cmd}): {e:#}")),
+            }
+        }
+    }
+}
+
 /// An issue fix's PR, with the general reply as its body. A draft, unless it's set to merge.
 async fn open_fix_pr(ctx: &Ctx, j: &mut Job, s: &RepoSettings, f: &crate::forge::Forge, draft: bool) -> Result<()> {
     let id = j.id;
@@ -806,11 +853,16 @@ async fn open_fix_pr(ctx: &Ctx, j: &mut Job, s: &RepoSettings, f: &crate::forge:
         .iter()
         .find(|r| r.event.is_none())
         .map_or_else(|| prompts::sign(&j.summary, s.reply.attribution(), s.agent), |r| r.body.clone());
-    let title = match first_line(&j.summary) {
-        l if l.trim().is_empty() => format!("Fix #{}", j.number),
-        l => format!("Fix #{}: {l}", j.number),
+    // A Jira key in the title and branch links the PR in Jira (with its GitHub/GitLab app).
+    let (name, closes) = match &j.meta.jira {
+        Some(r) => (r.key.clone(), format!("Jira: {}", r.url())),
+        None => (format!("Fix #{}", j.number), format!("Closes #{}", j.number)),
     };
-    let url = f.open_pr(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\nCloses #{}", j.number), draft).await?;
+    let title = match first_line(&j.summary) {
+        l if l.trim().is_empty() => name,
+        l => format!("{name}: {l}"),
+    };
+    let url = f.open_pr(&j.repo, &j.meta.push_ref, &j.meta.base, &title, &format!("{pr_body}\n\n{closes}"), draft).await?;
     log(ctx, id, &format!("opened {}{url}", if draft { "draft " } else { "" }));
     j.meta.pr_url = url;
     ctx.db(|d| d.update_job(j))
@@ -826,7 +878,7 @@ async fn merge_gate(j: &Job, f: &crate::forge::Forge) -> Option<String> {
 async fn auto_merge(j: &Job, f: &crate::forge::Forge) -> String {
     let n = match j.target {
         Target::Pr => Some(j.number),
-        Target::Issue => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
+        Target::Issue | Target::Jira => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
     };
     let Some(n) = n else { return "; couldn't tell the PR's number, left open".into() };
     match f.enable_auto_merge(&j.repo, n, &j.head_after).await {

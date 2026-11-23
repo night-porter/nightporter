@@ -827,17 +827,19 @@ fn status(paths: &Paths, out: &mut dyn Write) -> Result<()> {
     if let Some(b) = update::banner(&db) {
         writeln!(out, "{b}")?;
     }
+    if let Some(e) = db.get(daemon::JIRA_ERROR)? {
+        writeln!(out, "Jira: {e}")?;
+    }
     let mut any = false;
     for j in db.recent_jobs(200)?.into_iter().filter(|j| j.status.needs_user() || j.status.is_active() || j.status == JobStatus::Failed) {
         any = true;
         writeln!(
             out,
-            "job {:>4}  {:<22} {}  {}#{}  {}",
+            "job {:>4}  {:<22} {}  {}  {}",
             j.id,
             j.status.label(),
             state::local_time(j.updated_at, "%m-%d %H:%M"),
-            j.repo,
-            j.number,
+            j.place(),
             printable(j.summary.lines().next().unwrap_or_default())
         )?;
     }

@@ -179,6 +179,201 @@ async fn pickup_repo(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, 
     Ok(())
 }
 
+/// Jira issue numbers start here, so they never meet a forge PR/issue number in the per-PR
+/// bookkeeping (one job at a time, retries, caps), whichever site they come from.
+pub const JIRA_NUMBERS: u64 = 1 << 48;
+
+/// A Jira issue a repo holds, under `jclaim:{site}:{id}`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct JiraClaim {
+    pub repo: String,
+    pub number: u64,
+    pub since: i64,
+    #[serde(flatten)]
+    pub issue: crate::jira::JiraRef,
+    /// Handed back: not claimed again.
+    #[serde(default)]
+    pub released: bool,
+}
+
+/// The claim behind a `Target::Jira` job's number (`None` for any other number).
+pub fn jira_claim(db: &crate::state::Db, repo: &RepoId, number: u64) -> Result<Option<JiraClaim>> {
+    if number < JIRA_NUMBERS {
+        return Ok(None);
+    }
+    Ok(db
+        .prefixed("jclaim:")?
+        .into_values()
+        .filter_map(|v| serde_json::from_str::<JiraClaim>(&v).ok())
+        .find(|c| c.repo == repo.key() && c.number == number))
+}
+
+/// `[[jira]]`, every `sweep_interval`: per source, settle the issues it holds, then claim new
+/// matches up to `max_claimed`. Repos go by `priority`, then name; an issue another repo holds
+/// is skipped with a warning. Returns the last `acli` error, if any, for `status`.
+pub async fn jira_pickup(ctx: &Ctx, cfg: &crate::config::Config) -> Option<String> {
+    let mut sources: Vec<(RepoId, crate::config::RepoSettings, usize)> =
+        ctx.subscribed(cfg).into_iter().flat_map(|(repo, s)| (0..s.jira.len()).map(move |idx| (repo.clone(), s.clone(), idx))).collect();
+    sources.sort_by_key(|(repo, s, idx)| (std::cmp::Reverse(s.jira[*idx].priority), repo.key()));
+    let mut err = None;
+    for (repo, s, idx) in &sources {
+        let src = &s.jira[*idx];
+        if let Err(e) = jira_source(ctx, repo, s, src).await {
+            let msg = format!("{repo}: jira {}: {e:#}", src.site);
+            ctx.warn_every(&format!("jira:{}:{idx}", repo.key()), 3600, &msg);
+            err = Some(msg);
+        }
+    }
+    err
+}
+
+async fn jira_source(ctx: &Ctx, repo: &RepoId, s: &crate::config::RepoSettings, src: &crate::config::JiraSource) -> Result<()> {
+    let acli = crate::jira::Acli::new(&ctx.paths);
+    let mine = acli.account(&src.site).with_context(|| format!("acli isn't logged in to {} (acli jira auth login)", src.site))?;
+    let held = settle_jira(ctx, &acli, repo, s, src, &mine).await?;
+    if held < src.max_claimed {
+        claim_jira(ctx, &acli, repo, s, src, held).await?;
+    }
+    Ok(())
+}
+
+/// Every claim on `site`, by Jira issue id.
+fn jira_claims(ctx: &Ctx, site: &str) -> Result<Vec<(String, JiraClaim)>> {
+    let all = ctx.db(|d| d.prefixed(&format!("jclaim:{site}:")))?;
+    Ok(all.into_iter().filter_map(|(id, v)| Some((id, serde_json::from_str(&v).ok()?))).collect())
+}
+
+fn save_claim(ctx: &Ctx, site: &str, id: &str, claim: &JiraClaim) -> Result<()> {
+    ctx.db(|d| d.set_json(&format!("jclaim:{site}:{id}"), claim))
+}
+
+/// The source's claims: kept, let go, or handed back. Returns how many it still holds.
+async fn settle_jira(
+    ctx: &Ctx,
+    acli: &crate::jira::Acli,
+    repo: &RepoId,
+    s: &crate::config::RepoSettings,
+    src: &crate::config::JiraSource,
+    mine: &str,
+) -> Result<usize> {
+    let site = src.site.clone();
+    let pending = ctx.db(|d| d.events_with(Disposition::Pending))?;
+    let mut held = 0;
+    for (id, mut claim) in jira_claims(ctx, &site)?.into_iter().filter(|(_, c)| c.repo == repo.key() && !c.released) {
+        let (site2, key) = (site.clone(), claim.issue.key.clone());
+        let issue = acli.call(move |a| a.view(&site2, &key)).await?;
+        // Done, or assigned to someone else: not ours any more.
+        let open = !issue.done && issue.assignee == mine;
+        let job = ctx.db(|d| d.latest_job(repo, Target::Jira, claim.number, claim.since))?;
+        let waiting = pending.iter().any(|(e, _)| e.repo == *repo && e.number == claim.number);
+        match settle(open, job.as_ref(), waiting) {
+            Claim::Hold => held += 1,
+            Claim::Forget => ctx.db(|d| d.del(&format!("jclaim:{site}:{id}")))?,
+            how @ (Claim::Finished | Claim::GiveBack) => {
+                let why = match (&how, src.verb) {
+                    (Claim::GiveBack, _) => Some("Night Porter couldn't finish this one."),
+                    (_, Verb::Fix) => Some("Night Porter found nothing to change here."),
+                    _ => None,
+                };
+                // Someone chose you for `assigned` issues: say so, but leave the assignment.
+                let unassign = src.pickup == crate::config::JiraPickup::New;
+                let body = why.map(|w| sign(s, &if unassign { format!("{w} It's free again.") } else { w.to_string() }));
+                let (site2, key) = (site.clone(), claim.issue.key.clone());
+                acli.call(move |a| {
+                    if unassign {
+                        a.assign(&site2, &key, false)?;
+                    }
+                    body.map_or(Ok(()), |b| a.comment(&site2, &key, &b))
+                })
+                .await?;
+                // Either way it stays handed back: it may still match the JQL.
+                claim.released = true;
+                save_claim(ctx, &site, &id, &claim)?;
+                tracing::info!("{repo}: {} handed back", claim.issue.key);
+            }
+        }
+    }
+    Ok(held)
+}
+
+/// Claim and queue new matches until the source holds `max_claimed`.
+async fn claim_jira(
+    ctx: &Ctx,
+    acli: &crate::jira::Acli,
+    repo: &RepoId,
+    s: &crate::config::RepoSettings,
+    src: &crate::config::JiraSource,
+    mut held: usize,
+) -> Result<()> {
+    let site = src.site.clone();
+    let mut jql = src.query();
+    if src.pickup == crate::config::JiraPickup::New {
+        // Only issues created since this source was first seen, not the backlog.
+        let k = format!("jsrc:{}:{site}:{}", repo.key(), src.jql);
+        let now = crate::state::now();
+        let first = ctx.db(|d| d.get(&k))?.and_then(|v| v.parse().ok()).unwrap_or(now);
+        ctx.db(|d| d.set(&k, &first.to_string()))?;
+        jql = format!("{jql} AND created >= -{}m", (now - first) / 60 + 1);
+    }
+    let (site2, limit) = (site.clone(), src.max_claimed * 5 + 10);
+    let found = acli.call(move |a| a.search(&site2, &jql, limit)).await?;
+    let claims = jira_claims(ctx, &site)?;
+    let me = match ctx.forge(repo) {
+        Ok(f) => f.lock().await.me().to_string(),
+        Err(_) => String::new(),
+    };
+    for issue in found {
+        if held >= src.max_claimed {
+            break;
+        }
+        if let Some((_, other)) = claims.iter().find(|(id, _)| *id == issue.id.to_string()) {
+            if other.repo != repo.key() {
+                let msg = format!("{} matches {repo}'s [[jira]] too; {} has it", issue.key, other.repo);
+                ctx.warn_every(&format!("jira-dup:{site}:{}", issue.id), 86400, &msg);
+            }
+            continue;
+        }
+        if src.pickup == crate::config::JiraPickup::New {
+            let (site2, key) = (site.clone(), issue.key.clone());
+            acli.call(move |a| a.assign(&site2, &key, true)).await?;
+        }
+        // Recorded right after the assignment, so a later failure still leaves it settled.
+        let number = ctx.db(|d| {
+            let n = d.get("jnext")?.and_then(|v| v.parse().ok()).unwrap_or(JIRA_NUMBERS);
+            d.set("jnext", &(n + 1).to_string())?;
+            Ok(n)
+        })?;
+        let jira = crate::jira::JiraRef { site: site.clone(), key: issue.key.clone(), paths: src.paths.clone() };
+        let claim = JiraClaim { repo: repo.key(), number, since: crate::state::now(), issue: jira, released: false };
+        save_claim(ctx, &site, &issue.id.to_string(), &claim)?;
+        held += 1;
+        queue_jira(ctx, repo, src, &claim, &me)?;
+        let what = match src.verb {
+            Verb::Fix => "work on this and open a pull request",
+            Verb::Reproduce => "try to reproduce this",
+            _ => "triage this",
+        };
+        let (site2, key, body) = (site.clone(), issue.key.clone(), sign(s, &format!("Night Porter picked this up and will {what}.")));
+        if let Err(e) = acli.call(move |a| a.comment(&site2, &key, &body)).await {
+            tracing::warn!("{repo}: claimed {}, but couldn't say so: {e:#}", issue.key);
+        }
+        tracing::info!("{repo}: claimed {}", issue.key);
+    }
+    Ok(())
+}
+
+/// The claim's event: yours (trusted), naming the part of the repo the work belongs in.
+fn queue_jira(ctx: &Ctx, repo: &RepoId, src: &crate::config::JiraSource, claim: &JiraClaim, me: &str) -> Result<()> {
+    use std::fmt::Write;
+    let base = event(repo, Target::Jira, src.verb, claim.number, me);
+    let mut body = format!("(claimed from Jira {}: {})", claim.issue.key, crate::state::enum_str(&src.verb));
+    if !src.paths.is_empty() {
+        let _ = write!(body, "\nThis issue belongs in this part of the repository: {}. Keep the work there.", src.paths.join(", "));
+    }
+    let e = Event { id: format!("{}-jira-{}", base.id, claim.since), body, url: claim.issue.url(), ..base };
+    ctx.db(|d| d.add_event(&e, Disposition::Pending, "jira")).map(|_| ())
+}
+
 /// The claim's own event (its id carries the claim time), so an issue swept or claimed before
 /// still gets a new job.
 fn queue_claim(ctx: &Ctx, repo: &RepoId, verb: Verb, me: &str, n: u64, at: i64) -> Result<()> {
@@ -358,6 +553,85 @@ pub fn is_sweep(e: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::forge::ForgeKind;
+
+    #[tokio::test]
+    async fn jira_pickup_claims_queues_and_settles() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(&d.path().join("c"), &d.path().join("d"));
+        paths.ensure().unwrap();
+        let f = d.path().join("fake");
+        std::fs::create_dir_all(&f).unwrap();
+        let bin = f.join("acli");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nd={}\necho \"$*\" >> $d/calls\ncase \"$2 $3\" in\n\
+                 'auth status') echo \"  Site: $(cat $d/site)\" ;;\n\
+                 'auth switch') echo \"$5\" > $d/site ;;\n\
+                 'workitem search') cat $d/search.json ;;\n\
+                 'workitem view') cat $d/view-$4.json ;;\n\
+                 esac\n",
+                f.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(f.join("site"), "home.jira.com\n").unwrap();
+        std::fs::write(f.join("jira_config.yaml"), "profiles:\n    - site: s.atlassian.net\n      account_id: me1\n").unwrap();
+        crate::jira::install_fake(&paths.data_dir, bin, f.join("jira_config.yaml"));
+        let issue = |id: u32, key: &str, status: &str, assignee: &str| {
+            format!(
+                r#"{{"id":"{id}","key":"{key}","fields":{{"summary":"Broken","status":{{"statusCategory":{{"key":"{status}"}}}},
+                   "assignee":{assignee},"reporter":{{"accountId":"pm","displayName":"PM"}}}}}}"#
+            )
+        };
+        std::fs::write(f.join("search.json"), format!("[{}]", issue(101, "TKF-1", "new", r#"{"accountId":"me1"}"#))).unwrap();
+        std::fs::write(f.join("view-TKF-1.json"), issue(101, "TKF-1", "indeterminate", r#"{"accountId":"me1"}"#)).unwrap();
+
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let file = paths.repo_file(&repo);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let toml = "subscribed = true\n[[jira]]\nsite = \"s.atlassian.net\"\njql = \"project = TKF\"\npaths = [\"frontend/\"]\n";
+        std::fs::write(&file, toml).unwrap();
+        let cfg = crate::config::Config::parse("").unwrap();
+        let clones = crate::repos::CloneMap::from([(repo.clone(), d.path().join("clone"))]);
+        let ctx = crate::daemon::test_ctx(paths, cfg.clone(), clones);
+        let calls = || std::fs::read_to_string(f.join("calls")).unwrap_or_default();
+        let pending = || ctx.db(|d| d.events_with(Disposition::Pending)).unwrap();
+
+        // Assigned to you: claimed without assigning, queued with the paths hint, said on Jira.
+        assert_eq!(jira_pickup(&ctx, &cfg).await, None);
+        let evs = pending();
+        assert_eq!(evs.len(), 1);
+        let e = &evs[0].0;
+        assert_eq!((e.target, e.number, e.url.as_str()), (Target::Jira, JIRA_NUMBERS, "https://s.atlassian.net/browse/TKF-1"));
+        assert!(e.body.contains("frontend/"), "{}", e.body);
+        let c = ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().unwrap();
+        assert_eq!((c.issue.key.as_str(), c.issue.paths.as_slice()), ("TKF-1", ["frontend/".to_string()].as_slice()));
+        assert!(calls().contains("assignee = currentUser() AND (project = TKF)"), "{}", calls());
+        assert!(calls().contains("comment create --key TKF-1") && !calls().contains("assign --key"), "{}", calls());
+        assert_eq!(std::fs::read_to_string(f.join("site")).unwrap().trim(), "home.jira.com", "acli back where it was");
+
+        // Held: the same match isn't queued twice.
+        assert_eq!(jira_pickup(&ctx, &cfg).await, None);
+        assert_eq!(pending().len(), 1);
+
+        // Done in Jira: let go.
+        std::fs::write(f.join("view-TKF-1.json"), issue(101, "TKF-1", "done", r#"{"accountId":"me1"}"#)).unwrap();
+        ctx.db(|d| d.move_event(&e.id, Disposition::Pending, Disposition::Dropped, "test")).unwrap();
+        std::fs::write(f.join("search.json"), "[]").unwrap();
+        assert_eq!(jira_pickup(&ctx, &cfg).await, None);
+        assert!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS)).unwrap().is_none());
+
+        // `new`: unassigned issues created since the source was first seen, claimed by assigning.
+        std::fs::write(&file, toml.replace("paths", "pickup = \"new\"\npaths")).unwrap();
+        std::fs::write(f.join("search.json"), format!("[{}]", issue(102, "TKF-2", "new", "null"))).unwrap();
+        assert_eq!(jira_pickup(&ctx, &cfg).await, None);
+        assert!(calls().contains("assignee is EMPTY AND (project = TKF) AND created >= -1m"), "{}", calls());
+        assert!(calls().contains("assign --key TKF-2 --yes --assignee @me"), "{}", calls());
+        assert_eq!(ctx.db(|d| jira_claim(d, &repo, JIRA_NUMBERS + 1)).unwrap().unwrap().issue.key, "TKF-2");
+    }
 
     #[test]
     fn claims_settle_by_their_own_job() {

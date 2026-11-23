@@ -171,7 +171,8 @@ fn jira_checks(paths: &Paths, cfg: &Config) -> Vec<Check> {
     }
     let mut out = broken;
     out.push(acli);
-    let logged_in = crate::jira::sites();
+    let client = crate::jira::Acli::new(paths);
+    let logged_in = client.sites();
     let mut sites: Vec<&str> = sources.iter().map(|(_, j)| j.site.as_str()).collect();
     sites.sort_unstable();
     sites.dedup();
@@ -184,7 +185,6 @@ fn jira_checks(paths: &Paths, cfg: &Config) -> Vec<Check> {
             fix: format!("acli jira auth login --site {site}"),
         });
     }
-    let client = crate::jira::Acli::new(paths);
     for (repo, j) in sources.iter().filter(|(_, j)| logged_in.contains(&j.site)) {
         let r = client.run(&j.site, &["workitem", "search", "--jql", &j.query(), "--count"]);
         out.push(Check {
@@ -538,6 +538,8 @@ mod tests {
             pickup: crate::config::JiraPickup::Assigned,
             verb: crate::forge::Verb::Fix,
             max_claimed: 2,
+            priority: 0,
+            reporters: vec![],
         };
         let found = |s: &[(String, crate::config::JiraSource)]| jira_overlaps(s).into_iter().map(|c| c.detail).collect::<Vec<_>>();
         // FE and BE projects, one folder each: fine.

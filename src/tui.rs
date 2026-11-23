@@ -98,6 +98,8 @@ struct App {
     undo_jobs: Vec<i64>,
     undo_events: Vec<String>,
     update: Option<String>,
+    /// The daemon's last Jira pickup error (see `daemon::JIRA_ERROR`).
+    jira_error: Option<String>,
     /// Loaded on opening the tab and after a change (one git call per clone).
     worktrees: Vec<crate::worktrees::Wt>,
 }
@@ -171,6 +173,7 @@ impl App {
             started: Instant::now(),
             undo_events: vec![],
             update: None,
+            jira_error: None,
             worktrees: vec![],
         }
     }
@@ -257,6 +260,7 @@ impl App {
         self.history.clone_from(&self.history_all);
         self.inbox = self.db.events_with(Disposition::Inbox).unwrap_or_default().into_iter().map(|(e, _)| e).collect();
         self.paused = actions::paused(&self.db);
+        self.jira_error = self.db.get(crate::daemon::JIRA_ERROR).ok().flatten();
         self.burst = actions::burst(&self.db);
         self.daemon_up = self.paths.daemon_running();
         if repos {
@@ -627,7 +631,7 @@ impl App {
             }
             KeyCode::Char('w') => match self.db.job(id) {
                 Ok(Some(j)) if j.mode == crate::improve::LEARN => open_url(&crate::notify::repo_url(&j.repo)),
-                Ok(Some(j)) => open_url(&crate::notify::web_url(&j.repo, j.target, j.number)),
+                Ok(Some(j)) => open_url(&j.url()),
                 _ => Ok("job not found".into()),
             },
             KeyCode::Char('y') => {
@@ -827,6 +831,9 @@ impl App {
         ];
         if self.update.is_some() {
             status.extend([Span::raw(" · "), Span::styled("update available", self.style(Style::new().fg(Color::Cyan)))]);
+        }
+        if self.jira_error.is_some() {
+            status.extend([Span::raw(" · "), Span::styled("JIRA ERROR (nightporter status)", self.style(bad))]);
         }
         Line::from(status)
     }
@@ -1109,7 +1116,11 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
 /// The date shown is the one the list is ordered by: created, or `by_updated` last updated.
 fn job_line(j: &Job, by_updated: bool) -> String {
     let when = crate::state::local_time(if by_updated { j.updated_at } else { j.created_at }, "%m-%d %H:%M");
-    let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { format!("{}#{:<5}", j.repo, j.number) };
+    let on = if j.mode == crate::improve::LEARN {
+        format!("{} learn", j.repo)
+    } else {
+        format!("{:<w$}", j.place(), w = j.repo.to_string().len() + 6)
+    };
     format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
 }
 
@@ -1118,23 +1129,13 @@ pub fn job_text(db: &Db, j: &Job) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     let when = |t: i64| crate::state::local_time(t, "%Y-%m-%d %H:%M");
-    let _ = writeln!(
-        s,
-        "Job {} — {} — {}#{} ({}) — level {} — attempt {}",
-        j.id,
-        j.status.label(),
-        j.repo,
-        j.number,
-        j.mode,
-        j.level,
-        j.attempt
-    );
+    let _ = writeln!(s, "Job {} — {} — {} ({}) — level {} — attempt {}", j.id, j.status.label(), j.place(), j.mode, j.level, j.attempt);
     let _ = writeln!(s, "Created {}, updated {}", when(j.created_at), when(j.updated_at));
     if j.mode == crate::improve::LEARN {
         let _ = writeln!(s, "Proposed instructions for {}: {}", j.repo, j.meta.prompt_path);
         let _ = writeln!(s, "a writes it (jobs on this repo use it from then on), e edits it first, r rejects.");
     } else {
-        let _ = writeln!(s, "{}", crate::notify::web_url(&j.repo, j.target, j.number));
+        let _ = writeln!(s, "{}", j.url());
     }
     if !j.summary.is_empty() {
         let _ = writeln!(s, "\nSummary: {}", j.summary);

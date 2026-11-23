@@ -164,6 +164,16 @@ pub enum Mode {
 pub enum Target {
     Pr,
     Issue,
+    /// A Jira Cloud issue (see `crate::jira`); `number` is its numeric id, the key and site are
+    /// in the job's `meta.jira`. Never sent to a forge.
+    Jira,
+}
+
+impl Target {
+    /// Work on an issue (forge or Jira), from the default branch, as opposed to a PR's branch.
+    pub fn is_issue(self) -> bool {
+        matches!(self, Self::Issue | Self::Jira)
+    }
 }
 
 /// One piece of activity, after polling. Bodies are untrusted until `trust::decide` says otherwise.
@@ -483,6 +493,13 @@ pub enum Forge {
 }
 
 /// The same expression on whichever forge this is; every forge has the same method names.
+/// A Jira issue goes through `crate::jira`, never a forge: refuse rather than post to the forge
+/// issue that happens to share its number.
+fn no_jira(target: Target) -> Result<()> {
+    anyhow::ensure!(target != Target::Jira, "a Jira issue isn't on the forge");
+    Ok(())
+}
+
 macro_rules! each {
     ($s:expr, $g:ident => $e:expr) => {
         match $s {
@@ -528,11 +545,13 @@ impl Forge {
     /// Comments on `number` posted after `since` by the token's own user that are job commands,
     /// oldest first.
     pub async fn controls(&self, repo: &RepoId, target: Target, number: u64, since: &str) -> Result<Vec<ControlComment>> {
+        no_jira(target)?;
         each!(self, g => g.controls(repo, target, number, since).await)
     }
 
     /// Acknowledge a command comment with a thumbs-up.
     pub async fn ack(&self, repo: &RepoId, target: Target, number: u64, comment: &str) -> Result<()> {
+        no_jira(target)?;
         each!(self, g => g.ack(repo, target, number, comment).await)
     }
 
@@ -619,6 +638,7 @@ impl Forge {
 
     /// Every open issue (`Target::Issue`) or PR/MR (`Target::Pr`) in `repo`.
     pub async fn open_items(&self, repo: &RepoId, target: Target) -> Result<Vec<Listed>> {
+        no_jira(target)?;
         each!(self, g => g.open_items(repo, target).await)
     }
 
@@ -628,6 +648,7 @@ impl Forge {
 
     /// Reply in the event's thread when it has one, else a top-level comment on the PR/issue.
     pub async fn reply(&self, repo: &RepoId, target: Target, number: u64, to: Option<&Event>, body: &str) -> Result<()> {
+        no_jira(target)?;
         each!(self, g => g.reply(repo, target, number, to, body).await)
     }
 
