@@ -514,7 +514,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
     let cfg = ctx.cfg();
     let groups = pending_groups(ctx)?;
     let now = crate::state::now();
-    let tz_now = jiff::Zoned::now();
+    let tz_now = jiff::ZonedDateTime::now();
     let sweep_cap = cfg.daily_job_cap - cfg.daily_job_cap / 4;
     for ((repo, n), evs, flags) in groups {
         let (now_, fresh_over) = crate::actions::retry_flags(&flags);

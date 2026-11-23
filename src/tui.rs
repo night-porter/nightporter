@@ -287,7 +287,7 @@ impl App {
                             subscribed: s.subscribed,
                             level: s.level.as_str().into(),
                             agent: s.agent.label().into(),
-                            window: window_note(&s, &s.clone().at(&jiff::Zoned::now())),
+                            window: window_note(&s, &s.clone().at(&jiff::ZonedDateTime::now())),
                             id,
                         },
                         Err(e) => RepoRow { subscribed: false, level: "ERROR".into(), agent: format!("{e:#}"), window: String::new(), id },
@@ -1460,7 +1460,7 @@ mod tests {
         )
         .unwrap();
         let base = cfg.resolve(None).unwrap();
-        let now = base.clone().at(&jiff::Zoned::now());
+        let now = base.clone().at(&jiff::ZonedDateTime::now());
         assert_eq!(window_note(&base, &now), "now auto, from window");
         assert_eq!(window_note(&base, &base), "");
         // The row shows the repo's own level, so `l` visibly moves it (draft -> auto asks first).

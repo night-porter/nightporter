@@ -902,7 +902,7 @@ impl Config {
 
     /// Effective settings for `repo` right now, reading its override file if present.
     pub fn settings_for(&self, paths: &Paths, repo: &RepoId) -> Result<RepoSettings> {
-        Ok(self.base_settings_for(paths, repo)?.at(&jiff::Zoned::now()))
+        Ok(self.base_settings_for(paths, repo)?.at(&jiff::ZonedDateTime::now()))
     }
 
     /// `repo`'s settings before any schedule window applies: what its files say.
@@ -985,7 +985,7 @@ impl RepoSettings {
     /// Apply the first schedule window active at `now` (its `level`, `agent`, `notify`), then
     /// the caps again: a window can't lift `trust.open`'s cap or raise maintainer jobs, and
     /// CI-failure jobs still stop at draft unless `ci_auto`.
-    pub fn at(mut self, now: &jiff::Zoned) -> Self {
+    pub fn at(mut self, now: &jiff::ZonedDateTime) -> Self {
         if let Ok(Some(w)) = crate::schedule::matching(&self.schedule, now) {
             let w = w.clone();
             if let Some(l) = w.level {

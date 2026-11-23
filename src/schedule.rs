@@ -2,16 +2,16 @@
 
 use crate::config::Window;
 use anyhow::{Context, Result, bail};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use jiff::civil::{Time, Weekday};
 
 /// True when `now` falls in any window. No windows = always active.
-pub fn is_active(windows: &[Window], now: &Zoned) -> Result<bool> {
+pub fn is_active(windows: &[Window], now: &ZonedDateTime) -> Result<bool> {
     Ok(windows.is_empty() || matching(windows, now)?.is_some())
 }
 
 /// The first window `now` falls in (its overrides win).
-pub fn matching<'a>(windows: &'a [Window], now: &Zoned) -> Result<Option<&'a Window>> {
+pub fn matching<'a>(windows: &'a [Window], now: &ZonedDateTime) -> Result<Option<&'a Window>> {
     for w in windows {
         let local = match &w.tz {
             Some(tz) => now.in_tz(tz).with_context(|| format!("unknown time zone {tz:?}"))?,
@@ -120,7 +120,7 @@ mod tests {
             ..Default::default()
         }
     }
-    fn at(s: &str) -> Zoned {
+    fn at(s: &str) -> ZonedDateTime {
         format!("{s}[Europe/Zurich]").parse().unwrap()
     }
 
