@@ -6,6 +6,21 @@ description: "What's new in Night Porter 0.7, 0.6, 0.5, 0.4 and 0.3: Jira issues
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
+## Next
+
+**Steer it from the PR.** `/nightporter stop` stops work on a PR until `/nightporter resume`, and
+`/nightporter do <what>` asks for something specific. Every push says how to undo it.
+
+**Ship a branch and walk away.** `nightporter ship` pushes your branch, opens a draft PR and
+subscribes the repo, so CI failures, conflicts and reviews on it are handled from then on.
+
+**Promotions it has earned.** After 10 jobs of a kind in a row that you approved unchanged,
+`nightporter stats` suggests the next level. `checks.hold` keeps chosen paths (`src/auth/**`)
+waiting for you at any level. See [Autonomy and permissions](/autonomy#paths-that-always-wait-for-you).
+
+**Reviews and spend.** `maintainer.review_depth = "deep"` double-checks every finding before it's
+posted; `quick` sticks to what blocks a merge. `max_monthly_usd` caps what a repo's jobs cost per month.
+
 ## 0.7
 
 ### Jira issues (0.7.0)

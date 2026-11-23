@@ -765,7 +765,8 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         log(ctx, id, &format!("merge{merge_note}"));
     }
     // Commits pushed to a PR come with how to take them back, on the first reply that goes out.
-    let mut undo = (has_code && j.target == Target::Pr && !j.meta.posted.contains(&0)).then(|| undo_note(&j));
+    // Not after a force-push over a rebuilt branch (`lease`): there's no range to revert.
+    let mut undo = (has_code && j.target == Target::Pr && j.meta.lease.is_empty() && !j.meta.posted.contains(&0)).then(|| undo_note(&j));
     for (i, r) in j.replies.clone().iter().enumerate() {
         if j.meta.posted.contains(&i) {
             continue;

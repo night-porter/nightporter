@@ -134,6 +134,15 @@ Jobs, cost, cost per pushed job, and how often you rejected, dismissed, edited, 
 over or retried, by repo, by kind of job and by agent and model. Use it to pick a cheaper model
 for a kind of job (`trigger_agent_args`), or to spot a repo that needs better instructions.
 
+It also tells you when a kind of job has earned a promotion: once the last 10 jobs of that kind
+on your PRs in a repo went out exactly as the agent wrote them (no edits, amends, takeovers or
+retries) at `suggest` or `draft`, it names the `levels` line for the next level up. The repo's view
+shows the same hint. Nothing changes until you add the line.
+
+`max_monthly_usd` caps what a repo's jobs cost per calendar month; after that its jobs wait until
+the next month (`nightporter run` still starts one). Costs are what the agent reports (Claude Code
+and Codex do; others count as 0).
+
 ### In the inbox
 
 Comments from people who aren’t trusted never reach the agent. They wait here.
@@ -173,9 +182,15 @@ Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Git
 | `/nightporter dismiss` | put the job away (like `x`) |
 | `/nightporter retry` | run a finished or failed job's requests again (like `t`, but never a job waiting for you) |
 | `/nightporter status` | Night Porter replies with the job's status |
+| `/nightporter stop` | no more work on this PR: a queued or running job stops, new comments and CI failures are left alone |
+| `/nightporter resume` | undo `stop`; what came in meanwhile is worked on |
+| `/nightporter do <what>` | a job that does what you wrote, e.g. `/nightporter do split the migration into two commits`. Everything after `do`, including later lines, is the request |
 
 The command acts on Night Porter's newest job for that PR, and only when the comment is newer
-than the job. Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
+than the job (so it works on PRs Night Porter has worked on).
+
+Every push to a PR comes with how to take it back: the first reply after it ends with
+`To undo this push: git revert --no-edit <from>..<to>, then push.` Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
 be (for example, nothing is waiting for approval). Each comment is acted on once.
 
 Only comments from your own account count: the user the token belongs to, checked by user ID.
@@ -209,6 +224,7 @@ nightporter handoff 42           # take over in herdr, Rex, tmux or Zellij
 nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
 nightporter events --json        # follow every job and inbox change
 nightporter stats                # cost and how often you fixed jobs (--repo, --days)
+nightporter ship                 # push this branch, open a draft PR and let Night Porter look after it
 nightporter learn acme/api       # propose better instructions from your fixes
 
 nightporter inbox list
