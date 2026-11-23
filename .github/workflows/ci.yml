@@ -94,3 +94,21 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm audit --audit-level=high
+
+  automerge:
+    # Dependabot patch and minor updates merge once every check above passes; majors wait for a
+    # person. The cooldown in dependabot.yml keeps brand-new releases out in the first place.
+    needs: [test, windows-build, msrv, audit, docs]
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      - if: contains(fromJSON('["version-update:semver-patch","version-update:semver-minor"]'), steps.meta.outputs.update-type)
+        run: gh pr merge --squash "$PR"
+        env:
+          PR: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
