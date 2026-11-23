@@ -167,6 +167,9 @@ pub fn stats(db: &Db, repo: Option<&RepoId>, days: u32) -> Result<String> {
         s,
         "\npushed: done jobs that pushed code. edited: you edited its replies or plan (e). amended: you changed its files (m) before they went out. took over: you opened it in your own session (h). retried: you ran it again (t)."
     );
+    for hint in promotions(&jobs) {
+        let _ = writeln!(s, "{hint}");
+    }
     let repos: BTreeSet<&RepoId> = jobs.iter().map(|j| &j.repo).collect();
     for r in repos {
         let n = fixes_in(&all, r).len();
@@ -182,6 +185,45 @@ pub fn stats(db: &Db, repo: Option<&RepoId>, days: u32) -> Result<String> {
     Ok(s)
 }
 
+/// Jobs in a row, newest first, that went out exactly as the agent wrote them before a kind of
+/// job on your own PRs is suggested for the next level up.
+const PROMOTE_AFTER: usize = 10;
+
+/// The trust ladder, from your own record: for each repo and kind of job on your PRs that waits
+/// for you (`suggest` or `draft`), a hint once its last [`PROMOTE_AFTER`] finished jobs all went
+/// out unchanged (done, no edits, amends, takeovers or retries).
+fn promotions(jobs: &[&Job]) -> Vec<String> {
+    let mut groups: BTreeMap<(String, String, &str), Vec<&Job>> = BTreeMap::new();
+    for &j in jobs.iter().filter(|j| j.mode == "my_prs" && matches!(j.level.as_str(), "suggest" | "draft")) {
+        if let Some(k) = j.meta.kind {
+            groups.entry((j.repo.path.clone(), crate::state::enum_str(&k), j.level.as_str())).or_default().push(j);
+        }
+    }
+    let mut out = Vec::new();
+    for ((repo, kind, level), mut js) in groups {
+        js.sort_by_key(|j| std::cmp::Reverse(j.created_at));
+        let clean = js
+            .iter()
+            .filter(|j| !j.status.is_active() && !j.status.needs_user())
+            .take_while(|j| {
+                j.status == JobStatus::Done
+                    && j.meta.drafted.is_empty()
+                    && j.meta.drafted_plan.is_empty()
+                    && j.meta.amend_diff.is_empty()
+                    && !j.meta.took_over
+                    && !j.meta.retried
+            })
+            .count();
+        if clean >= PROMOTE_AFTER {
+            let next = if level == "suggest" { "draft" } else { "auto" };
+            out.push(format!(
+                "{repo}: the last {clean} {kind} jobs went out as written at {level}. Ready for more? `levels = {{ {kind} = \"{next}\" }}` in its repo file"
+            ));
+        }
+    }
+    out
+}
+
 /// A few lines for one repo's detail view.
 pub fn repo_summary(db: &Db, repo: &RepoId) -> Result<String> {
     let since = now() - 30 * 86400;
@@ -194,6 +236,10 @@ pub fn repo_summary(db: &Db, repo: &RepoId) -> Result<String> {
         "Last 30 days: {} jobs, {} pushed, {} rejected, {} edited, {} amended, ${:.2}",
         r.jobs, r.pushed, r.rejected, r.edited, r.amended, r.cost
     );
+    let mine: Vec<&Job> = all.iter().filter(|j| j.repo == *repo && j.created_at >= since).collect();
+    for hint in promotions(&mine) {
+        let _ = write!(s, "\n{hint}");
+    }
     let n = fixes_in(&all, repo).len();
     if n > 0 {
         let _ =
@@ -392,6 +438,37 @@ pub fn nudge(ctx: &Ctx) -> Result<()> {
 mod tests {
     use super::*;
     use crate::forge::ForgeKind;
+
+    #[test]
+    fn promotion_after_ten_unchanged_jobs_in_a_row() {
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/a");
+        let add = |db: &mut Db, edited: bool| {
+            let id = db.create_job(&repo, Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+            let mut j = db.job(id).unwrap().unwrap();
+            j.status = JobStatus::Done;
+            j.meta.kind = Some(crate::config::JobKind::CiFailure);
+            if edited {
+                j.meta.drafted = "mine".into();
+            }
+            db.seed_job(&j).unwrap();
+        };
+        let hints = |db: &Db| {
+            let all = db.recent_jobs(SCAN).unwrap();
+            promotions(&all.iter().collect::<Vec<_>>())
+        };
+        add(&mut db, true);
+        for _ in 0..9 {
+            add(&mut db, false);
+        }
+        assert!(hints(&db).is_empty(), "nine in a row isn't enough");
+        add(&mut db, false);
+        let h = hints(&db);
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert!(h[0].contains("last 10 ci_failure jobs") && h[0].contains(r#"ci_failure = "auto""#), "{}", h[0]);
+        add(&mut db, true);
+        assert!(hints(&db).is_empty(), "an edit starts the count again");
+    }
 
     #[test]
     fn learn_never_writes_a_shared_file_or_over_your_change() {
