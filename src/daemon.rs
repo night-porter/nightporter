@@ -523,6 +523,18 @@ fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
     Ok(groups)
 }
 
+/// `max_monthly_usd` reached for `repo` this calendar month (warned about once an hour).
+fn over_monthly_budget(ctx: &Ctx, s: &crate::config::RepoSettings, repo: &RepoId, tz_now: &jiff::ZonedDateTime) -> Result<bool> {
+    let Some(cap) = s.max_monthly_usd else { return Ok(false) };
+    let month = tz_now.first_of_month()?.start_of_day()?.timestamp().as_second();
+    let spent = ctx.db(|d| d.cost_since(repo, month))?;
+    if spent >= cap {
+        let msg = format!("{repo}: monthly budget (${cap:.2}) used up (${spent:.2}); its jobs wait for next month");
+        ctx.warn_every(&format!("month:{repo}"), 3600, &msg);
+    }
+    Ok(spent >= cap)
+}
+
 /// Batch pending events into jobs: debounce, schedule, one job per PR, caps. A retry with
 /// `now` (`nightporter run`) skips pause, schedule, debounce and caps; a burst skips the
 /// schedule and caps.
@@ -555,7 +567,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         if !now_ && now - last < i64::try_from(s.debounce.as_secs()).unwrap_or(i64::MAX) {
             continue;
         }
-        if ctx.db(|d| d.pr_busy(&repo, n))? {
+        if ctx.db(|d| d.pr_busy(&repo, n))? || (!now_ && over_monthly_budget(ctx, &s, &repo, &tz_now)?) {
             continue;
         }
         let today = ctx.db(|d| d.jobs_since(now - 86400))?;
@@ -901,6 +913,24 @@ mod tests {
         dispatch(&ctx).unwrap();
         // The burst's 2, and nothing more: the daily cap (1) is already used up by them.
         assert_eq!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn monthly_budget_holds_a_repos_jobs() {
+        let (_d, ctx, repo) = setup("subscribed = true\nmax_monthly_usd = 5.0");
+        let cfg = ctx.cfg();
+        let spent = ctx.db(|d| d.create_job(&repo, crate::forge::Target::Pr, 9, "my_prs", "draft", &[])).unwrap();
+        let mut j = ctx.db(|d| d.job(spent)).unwrap().unwrap();
+        j.status = JobStatus::Done;
+        j.meta.cost_usd = Some(5.5);
+        ctx.db(|d| d.seed_job(&j)).unwrap();
+        intake(&ctx, &cfg, "me", ev(&repo, "1", "alice", Role::Member, Trigger::Comment)).await.unwrap();
+        dispatch(&ctx).unwrap();
+        assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty(), "over budget: it waits");
+        j.meta.cost_usd = Some(1.0);
+        ctx.db(|d| d.seed_job(&j)).unwrap();
+        dispatch(&ctx).unwrap();
+        assert_eq!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().len(), 1);
     }
 
     #[tokio::test]

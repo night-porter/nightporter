@@ -573,7 +573,8 @@ async fn cmd_ship(paths: &Paths, base: Option<String>, title: Option<String>, re
     anyhow::ensure!(!branch.is_empty(), "not on a branch: check out the branch to ship");
     // ponytail: origin only; forks that push elsewhere can open their PR by hand.
     let url = git_here(&["remote", "get-url", "origin"])?;
-    let repo = repos::parse_remote(&url, &cfg.accounts).with_context(|| format!("origin ({url}) isn't on a forge you have an account for"))?;
+    let repo =
+        repos::parse_remote(&url, &cfg.accounts).with_context(|| format!("origin ({url}) isn't on a forge you have an account for"))?;
     let base = match base {
         Some(b) => b,
         None => git_here(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])

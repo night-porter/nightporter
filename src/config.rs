@@ -493,6 +493,10 @@ pub struct RepoSettings {
     pub timeout: Duration,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
+    /// Most this repo's jobs may cost per calendar month (local time), in USD; then its jobs wait
+    /// for the next month (`nightporter run` still starts one). Agents that report no cost count 0.
+    #[serde(default)]
+    pub max_monthly_usd: Option<f64>,
     /// Claude Code's OS sandbox for the agent's shell commands (Seatbelt on macOS, bubblewrap on
     /// Linux). Fails closed: if it can't start, the job fails instead of running unsandboxed.
     /// Turn off for repos whose test commands need Docker/DDEV sockets.
@@ -776,6 +780,15 @@ impl Default for Checks {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDepth {
+    Quick,
+    #[default]
+    Standard,
+    Deep,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Env {
@@ -818,6 +831,10 @@ pub struct Maintainer {
     /// it. Off: they only read the code and don't wait for that approval (Claude Code, Gemini CLI).
     #[serde(default)]
     pub review_runs_code: bool,
+    /// How thorough a review is: `quick` (blockers only), `standard`, or `deep` (reads around
+    /// each change and tries to disprove every finding before reporting it).
+    #[serde(default)]
+    pub review_depth: ReviewDepth,
     /// A level per maintainer verb, over `level`: `{ triage = "auto", fix = "draft" }`.
     #[serde(default)]
     pub levels: std::collections::BTreeMap<JobKind, Level>,
@@ -1035,8 +1052,15 @@ impl RepoSettings {
 
 /// Arrays that combine (global ∪ repo) instead of being replaced: a repo file adding one trusted
 /// user must not drop the global lists, and must never be able to drop a global deny.
-const UNION: &[&str] =
-    &["trust.allow_users", "trust.deny_users", "trust.allow_teams", "trust.deny_teams", "trust.allow_bots", "checks.protected", "checks.hold"];
+const UNION: &[&str] = &[
+    "trust.allow_users",
+    "trust.deny_users",
+    "trust.allow_teams",
+    "trust.deny_teams",
+    "trust.allow_bots",
+    "checks.protected",
+    "checks.hold",
+];
 
 /// Deep-merge `over` into `base`: tables merge, [`UNION`] arrays combine, everything else
 /// (including other arrays) replaces.

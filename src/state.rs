@@ -701,6 +701,15 @@ impl Db {
         )?)
     }
 
+    /// What `repo`'s jobs created since `since` cost, as their agents reported it.
+    pub fn cost_since(&self, repo: &RepoId, since: i64) -> Result<f64> {
+        Ok(self.0.query_row(
+            "SELECT COALESCE(SUM(json_extract(meta, '$.cost_usd')), 0.0) FROM jobs WHERE repo=?1 AND created_at >= ?2",
+            params![repo.key(), since],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn jobs_since(&self, since: i64) -> Result<u32> {
         Ok(self.0.query_row("SELECT COUNT(*) FROM jobs WHERE created_at >= ?1", [since], |r| r.get(0))?)
     }
