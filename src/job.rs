@@ -764,9 +764,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if !merge_note.is_empty() {
         log(ctx, id, &format!("merge{merge_note}"));
     }
-    // Commits pushed to a PR come with how to take them back, on the first reply that goes out.
-    // Not after a force-push over a rebuilt branch (`lease`): there's no range to revert.
-    let mut undo = (has_code && j.target == Target::Pr && j.meta.lease.is_empty() && !j.meta.posted.contains(&0)).then(|| undo_note(&j));
+    let mut undo = if has_code { undo_note(&j).await } else { None };
     for (i, r) in j.replies.clone().iter().enumerate() {
         if j.meta.posted.contains(&i) {
             continue;
@@ -804,6 +802,9 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
         }
     }
     if let Some(u) = undo {
+        // Recorded first: a restart mid-delivery must not post it twice.
+        j.meta.posted.push(UNDO_POSTED);
+        ctx.db(|d| d.update_job(&j))?;
         let body = prompts::sign(&format!("Pushed {}.\n\n{u}", crate::git::short(&j.head_after)), s.reply.attribution(), s.agent);
         if let Err(e) = f.reply(&j.repo, j.target, j.number, None, &body).await {
             log(ctx, id, &format!("couldn't post how to undo the push: {e:#}"));
@@ -853,10 +854,24 @@ async fn push_code(ctx: &Ctx, j: &mut Job) -> Result<bool> {
     Ok(true)
 }
 
+/// In `meta.posted` once the standalone undo note went out (no reply index is ever this).
+const UNDO_POSTED: usize = usize::MAX;
+
 /// How to take back the commits a job pushed to a PR: a revert, so no one's history is rewritten.
-fn undo_note(j: &Job) -> String {
+/// `None` when a revert of the range wouldn't do it: not a PR, a force-push over a rebuilt branch
+/// (`lease`), or a merge in the range (a conflict fix brings in the base's commits); or when a
+/// reply or the note already went out.
+async fn undo_note(j: &Job) -> Option<String> {
+    if j.target != Target::Pr || !j.meta.lease.is_empty() || j.meta.posted.iter().any(|&i| i == 0 || i == UNDO_POSTED) {
+        return None;
+    }
+    let range = format!("{}..{}", j.head_before, j.head_after);
+    let merges = git::git(Path::new(&j.meta.clone), &["rev-list", "--merges", &range]).await.ok()?;
+    if !merges.trim().is_empty() {
+        return None;
+    }
     let (from, to) = (crate::git::short(&j.head_before), crate::git::short(&j.head_after));
-    format!("To undo this push: `git revert --no-edit {from}..{to}`, then push.")
+    Some(format!("To undo this push: `git revert --no-edit {from}..{to}`, then push."))
 }
 
 /// A reply on a Jira issue; for an issue fix, `pr` (its URL, and whether it's ready rather than

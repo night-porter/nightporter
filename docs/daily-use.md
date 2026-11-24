@@ -183,8 +183,8 @@ Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Git
 | `/nightporter retry` | run a finished or failed job's requests again (like `t`, but never a job waiting for you) |
 | `/nightporter status` | Night Porter replies with the job's status |
 | `/nightporter stop` | no more work on this PR: a queued or running job stops, new comments and CI failures are left alone |
-| `/nightporter resume` | undo `stop`; what came in meanwhile is worked on |
-| `/nightporter do <what>` | a job that does what you wrote, e.g. `/nightporter do split the migration into two commits`. Everything after `do`, including later lines, is the request |
+| `/nightporter resume` | undo `stop`. What was already waiting when you stopped goes ahead; comments and CI failures from while it was stopped aren't picked up |
+| `/nightporter do <what>` | on your own PRs: a job that does what you wrote, e.g. `/nightporter do split the migration into two commits`. Everything after `do`, including later lines, is the request |
 
 The command acts on Night Porter's newest job for that PR, and only when the comment is newer
 than the job (so it works on PRs Night Porter has worked on).

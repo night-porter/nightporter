@@ -958,7 +958,10 @@ async fn pr_commands_only_from_my_user_id_once() {
     assert!(p[1].2.contains("nothing to approve") && p[1].2.contains(crate::prompts::FOOTER_MARK));
     assert_eq!(p[2].1, "/repos/o/r/issues/comments/25/reactions");
     let pending = ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap();
-    assert!(pending.iter().any(|(e, _)| e.id == "do-25" && e.body == "add a changelog line" && e.author == "me"), "{pending:?}");
+    assert!(
+        pending.iter().any(|(e, _)| e.id == format!("do-{}-25", w.repo.key()) && e.body == "add a changelog line" && e.author == "me"),
+        "{pending:?}"
+    );
     // Each comment is acted on once.
     daemon::pr_commands(ctx, &key).await.unwrap();
     assert_eq!(posts(&w).len(), 3);

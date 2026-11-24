@@ -338,20 +338,23 @@ pub fn parse_control(body: &str) -> Option<Control> {
         if it.next() != Some("/nightporter") {
             continue;
         }
-        return match it.next()? {
-            "approve" => Some(Control::Approve),
-            "dismiss" => Some(Control::Dismiss),
-            "retry" => Some(Control::Retry),
-            "status" => Some(Control::Status),
-            "stop" => Some(Control::Stop),
-            "resume" => Some(Control::Resume),
-            "do" => {
+        let c = match it.next() {
+            Some("approve") => Some(Control::Approve),
+            Some("dismiss") => Some(Control::Dismiss),
+            Some("retry") => Some(Control::Retry),
+            Some("status") => Some(Control::Status),
+            Some("stop") => Some(Control::Stop),
+            Some("resume") => Some(Control::Resume),
+            Some("do") => {
                 let first = l.trim_start().trim_start_matches("/nightporter").trim_start().trim_start_matches("do").trim();
-                let what = std::iter::once(first).chain(lines).collect::<Vec<_>>().join("\n").trim().to_string();
+                let what = std::iter::once(first).chain(lines.by_ref()).collect::<Vec<_>>().join("\n").trim().to_string();
                 (!what.is_empty()).then_some(Control::Do(what))
             }
             _ => None,
         };
+        if c.is_some() {
+            return c;
+        }
     }
     None
 }
@@ -905,6 +908,7 @@ mod tests {
         assert_eq!(parse_control("/nightporter do rename it\nand fix the test"), Some(Control::Do("rename it\nand fix the test".into())));
         assert_eq!(parse_control("/nightporter do"), None, "do needs something to do");
         assert_eq!(parse_control("/nightporter merge"), None);
+        assert_eq!(parse_control("/nightporter thanks!\n/nightporter stop"), Some(Control::Stop), "a later line still counts");
         assert_eq!(parse_control("/nightporter fix"), None);
         assert_eq!(parse_control("please /nightporter approve"), None);
         assert_eq!(parse_control("/nightporterapprove"), None);

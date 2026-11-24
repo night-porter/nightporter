@@ -674,7 +674,9 @@ impl Db {
     pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!(
             "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs WHERE mode != 'learn' AND target != 'jira' GROUP BY repo, target, number)
-               AND (status IN ({}) OR updated_at >= ?1) ORDER BY id",
+               AND (status IN ({}) OR updated_at >= ?1
+                    OR EXISTS(SELECT 1 FROM kv WHERE k = 'stopped:' || jobs.repo || '#' || jobs.target || ':' || jobs.number))
+               ORDER BY id",
             JobStatus::sql(JobStatus::needs_user)
         ))?;
         let rows = st.query_map([since], row_job)?;

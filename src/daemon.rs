@@ -337,10 +337,15 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
             ctx.db(|d| d.set(&done_key, "1"))?;
             let res = match &c.control {
                 // Your own request, taken in like a review comment you'd want acted on.
+                // Only on your own PRs: anywhere else it would run outside maintainer mode's cap.
+                Control::Do(_) if j.target != crate::forge::Target::Pr || j.mode != "my_prs" => {
+                    Err(anyhow::anyhow!("`/nightporter do` works on your own PRs; here, comment as you would to a teammate"))
+                }
                 Control::Do(what) => {
-                    let e = Event::state(format!("do-{}", c.id), &j.repo, j.number, Trigger::Comment, forge.me(), what.clone());
+                    let id = format!("do-{}-{}", j.repo.key(), c.id);
+                    let e = Event::state(id, &j.repo, j.number, Trigger::Comment, forge.me(), what.clone());
                     ctx.db(|d| {
-                        d.del(&crate::actions::stop_key(&j.repo, j.number))?;
+                        d.del(&crate::actions::stop_key(&j.repo, j.target, j.number))?;
                         d.add_event(&e, Disposition::Pending, "asked with /nightporter do").map(|_| None)
                     })
                 }
@@ -402,7 +407,7 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     if crate::forge::parse_control(&e.body).is_some() {
         return drop("job command");
     }
-    if ctx.db(|d| d.get(&crate::actions::stop_key(&e.repo, e.number)))?.is_some() {
+    if ctx.db(|d| d.get(&crate::actions::stop_key(&e.repo, e.target, e.number)))?.is_some() {
         return drop("stopped with /nightporter stop");
     }
     match e.mode() {
@@ -502,7 +507,7 @@ fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
     let stopped = ctx.db(|d| d.prefixed("stopped:"))?;
     for (e, seen) in ctx.db(|d| d.events_with(Disposition::Pending))? {
         // Held by `/nightporter stop`; they go ahead after `/nightporter resume`.
-        if stopped.contains_key(crate::actions::stop_key(&e.repo, e.number).trim_start_matches("stopped:")) {
+        if stopped.contains_key(crate::actions::stop_key(&e.repo, e.target, e.number).trim_start_matches("stopped:")) {
             continue;
         }
         groups.entry((e.repo.clone(), e.number)).or_default().push((e, seen));

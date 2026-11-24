@@ -94,7 +94,7 @@ impl Row {
             _ => {}
         }
         self.pushed += u32::from(pushes(j));
-        self.edited += u32::from(!j.meta.drafted.is_empty() || !j.meta.drafted_plan.is_empty());
+        self.edited += u32::from(edited(j));
         self.amended += u32::from(!j.meta.amend_diff.is_empty());
         self.took_over += u32::from(j.meta.took_over);
         self.retried += u32::from(j.meta.retried);
@@ -185,6 +185,11 @@ pub fn stats(db: &Db, repo: Option<&RepoId>, days: u32) -> Result<String> {
     Ok(s)
 }
 
+/// You edited its replies or plan (`e`) before they went out.
+fn edited(j: &Job) -> bool {
+    !j.meta.drafted.is_empty() || !j.meta.drafted_plan.is_empty()
+}
+
 /// Jobs in a row, newest first, that went out exactly as the agent wrote them before a kind of
 /// job on your own PRs is suggested for the next level up.
 const PROMOTE_AFTER: usize = 10;
@@ -196,7 +201,7 @@ fn promotions(jobs: &[&Job]) -> Vec<String> {
     let mut groups: BTreeMap<(String, String, &str), Vec<&Job>> = BTreeMap::new();
     for &j in jobs.iter().filter(|j| j.mode == "my_prs" && matches!(j.level.as_str(), "suggest" | "draft")) {
         if let Some(k) = j.meta.kind {
-            groups.entry((j.repo.path.clone(), crate::state::enum_str(&k), j.level.as_str())).or_default().push(j);
+            groups.entry((j.repo.to_string(), crate::state::enum_str(&k), j.level.as_str())).or_default().push(j);
         }
     }
     let mut out = Vec::new();
@@ -206,12 +211,7 @@ fn promotions(jobs: &[&Job]) -> Vec<String> {
             .iter()
             .filter(|j| !j.status.is_active() && !j.status.needs_user())
             .take_while(|j| {
-                j.status == JobStatus::Done
-                    && j.meta.drafted.is_empty()
-                    && j.meta.drafted_plan.is_empty()
-                    && j.meta.amend_diff.is_empty()
-                    && !j.meta.took_over
-                    && !j.meta.retried
+                j.status == JobStatus::Done && !edited(j) && j.meta.amend_diff.is_empty() && !j.meta.took_over && !j.meta.retried
             })
             .count();
         if clean >= PROMOTE_AFTER {
