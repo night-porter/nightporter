@@ -15,8 +15,8 @@ hero:
       text: Configuration
       link: /configuration
 features:
-  - title: What's new in 0.7
-    details: Jira Cloud issues picked up, worked on and moved to In Review; CI fixes that see the real errors; plus 0.6's levels from draft to merge.
+  - title: What's new in 0.8
+    details: Steer it from the PR (stop, resume, do), ship a branch and walk away, promotions it has earned, paths that always wait for you; plus 0.7's Jira issues.
     link: /whats-new
   - title: Getting started
     details: Install, run the setup wizard, subscribe to a repo and see your first job.

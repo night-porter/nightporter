@@ -6,6 +6,8 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
 ### Added
 
 - Every push to a PR says how to undo it: the first reply after it (or a short note when there is none) ends with the `git revert` command that takes the job's commits back.
@@ -354,7 +356,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/night-porter/nightporter/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/night-porter/nightporter/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/night-porter/nightporter/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/night-porter/nightporter/compare/v0.5.0...v0.6.0

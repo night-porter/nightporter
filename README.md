@@ -71,8 +71,13 @@ Night Porter **never** merges by default, never force-pushes someone else's work
   done and dismissed jobs
 - One view per repo (`nightporter repo <owner/name>`) of everything that shapes its jobs: level,
   agent, prompt files, reply style, trust, hours and checks
-- Control jobs from your phone: comment `/nightporter approve`, `dismiss`, `retry` or `status` on
-  the PR or MR (only your own account counts)
+- Control jobs from your phone: comment `/nightporter approve`, `dismiss`, `retry`, `status`,
+  `stop`, `resume` or `do <what>` on the PR or MR (only your own account counts). Every push says
+  how to undo it
+- `nightporter ship`: push your branch, open a draft PR and let Night Porter look after it
+- Earned promotions: `nightporter stats` suggests the next level once a kind of job keeps going out
+  unchanged; `checks.hold` keeps chosen paths waiting for you at any level; a monthly budget per repo
+- Jira Cloud issues through `acli`: picked up, worked on, linked and moved to In Review
 - Start and stop from the TUI (`D`) or `nightporter start` / `nightporter stop`
 - A once-a-day, anonymous check for a new release (`check_updates`); it never updates itself
 - Leaves no files in your repositories (it uses its own branches and worktrees)

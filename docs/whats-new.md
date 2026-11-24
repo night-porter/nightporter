@@ -1,12 +1,14 @@
 ---
-description: "What's new in Night Porter 0.7, 0.6, 0.5, 0.4 and 0.3: Jira issues, release-aware triage, the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
+description: "What's new in Night Porter 0.8, 0.7, 0.6, 0.5, 0.4 and 0.3: steering from the PR, ship a branch, earned promotions, Jira issues, release-aware triage, the merge level, levels per kind of job, sprint pickup, run now and burst, plan first, learning from your fixes, real PR reviews and backlog sweeps."
 ---
 
 # What's new
 
 The full list is in the [changelog](https://github.com/night-porter/nightporter/blob/main/CHANGELOG.md).
 
-## Next
+## 0.8
+
+### Steer, ship and promote (0.8.0)
 
 **Steer it from the PR.** `/nightporter stop` stops work on a PR until `/nightporter resume`, and
 `/nightporter do <what>` asks for something specific. Every push says how to undo it.
@@ -20,6 +22,9 @@ waiting for you at any level. See [Autonomy and permissions](/autonomy#paths-tha
 
 **Reviews and spend.** `maintainer.review_depth = "deep"` double-checks every finding before it's
 posted; `quick` sticks to what blocks a merge. `max_monthly_usd` caps what a repo's jobs cost per month.
+
+**Easier to scan.** Every list in the TUI shows when things last changed and uses colour for
+status, level, dates and keys (same text with `NO_COLOR`).
 
 ## 0.7
 
