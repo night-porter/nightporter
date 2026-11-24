@@ -900,7 +900,7 @@ impl App {
                         .collect()
                 }
                 Tab::Inbox => {
-                    let aw = self.inbox.iter().map(|e| e.author.chars().count()).max().unwrap_or(0);
+                    let aw = self.inbox.iter().map(|e| e.author.chars().count()).max().unwrap_or(0).min(INBOX_AUTHOR_W);
                     self.inbox.iter().map(|e| ListItem::new(self.inbox_row(e, aw))).collect()
                 }
                 Tab::Repos => self.repo_items(),
@@ -915,10 +915,10 @@ impl App {
                 Tab::History if !self.filter.is_empty() || self.filtering => {
                     &format!(" History matching \"{}\" ({} of {}) ", self.filter, self.history.len(), self.history_all.len())
                 }
-                Tab::Queue => " Needs you / running (x dismiss what you don't want to act on) ",
+                Tab::Queue => " Needs you / running · date = last update (x dismiss what you don't want to act on) ",
                 Tab::Inbox => " Unknown authors waiting ",
-                Tab::History if self.by_updated => " History: every job, last updated first (o by created, / search) ",
-                Tab::History => " History: every job, newest first (o by last update, / search) ",
+                Tab::History if self.by_updated => " History: every job, last updated first · date = last update (o by created, / search) ",
+                Tab::History => " History: every job, newest first · date = last update (o by last update, / search) ",
                 Tab::Repos => {
                     let on = self.repos_all.iter().filter(|r| r.subscribed).count();
                     &format!(" Repos: {on} watched of {} (Enter details, space subscribe, / search) ", self.repos_all.len())
@@ -960,10 +960,10 @@ impl App {
             // m amend and h take over are in the detail footer and ? help.
             (_, Tab::Queue) => "Enter open|a approve|e edit|r reject|x dismiss|t retry|f force|w web|?|q quit",
             (_, Tab::History) => "Enter open|x dismiss|u restore|X delete|t retry|w web|/ search|o order|?|q quit",
-            (_, Tab::Inbox) => "o once|a trust|A trust-all|i ignore|u undo|d deny|w web|?|q quit",
+            (_, Tab::Inbox) => "o once|a trust|A trust-all|i ignore|u undo|d deny|w web|? help|q quit",
             (_, Tab::Repos) => "Enter details|space subscribe|l level|a agent|e edit|w web|L learn|/ search|?|q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
-            (_, Tab::Settings) => "Enter change|d default|e edit file|/ search|S setup|?|q",
+            (_, Tab::Settings) => "Enter change|d default|e edit file|/ search|S setup|? help|q quit",
             (_, Tab::Worktrees) => "Enter job|x remove|u bring back|h take over|? help|q quit",
             (_, Tab::Help) => "1-6 tabs|S setup wizard|D start/stop daemon|q quit",
         };
@@ -1004,7 +1004,7 @@ impl App {
             e.created_at.parse::<jiff::Timestamp>().map(|t| crate::state::local_time(t.as_second(), "%m-%d %H:%M")).unwrap_or_default();
         Line::from(vec![
             Span::styled(format!("{when:<11} "), self.style(DATE)),
-            Span::styled(format!("@{:<aw$} ", e.author), self.style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Span::styled(format!("@{:<aw$} ", clip(&e.author, aw)), self.style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
             // No role on the repo (most strangers) says nothing.
             Span::styled(
                 if e.role == crate::forge::Role::None { String::new() } else { format!("{:?} ", e.role) },
@@ -1184,6 +1184,14 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
     format!("{} {stage} {t}", FRAMES[(frame % 10) as usize])
 }
 
+/// Most columns an Inbox author gets; longer names end in `…`.
+const INBOX_AUTHOR_W: usize = 16;
+
+/// `s` cut to `n` characters, the last one `…` when it was longer.
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n.saturating_sub(1)).chain(['…']).collect() }
+}
+
 /// Dates in every list.
 const DATE: Style = Style::new().fg(Color::LightBlue);
 /// Keys in the footer and Help.
@@ -1216,7 +1224,10 @@ fn help_line(l: &str) -> Vec<(String, Style)> {
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let indent = l.len() - l.trim_start().len();
     let (head, rest, head_style) = match l.split_once(": ") {
-        Some((h, r)) if indent == 0 && (!h.contains(' ') || h.starts_with("Keys (")) => {
+        Some((h, r)) if indent == 0 && (h == "Checks" || h.starts_with("Keys (")) => {
+            return vec![(format!("{h}: "), bold), (r.to_string(), Style::new())];
+        }
+        Some((h, r)) if indent == 0 && !h.contains(' ') => {
             let r2 = r.trim_start();
             (format!("{h}: {}", &r[..r.len() - r2.len()]), r2, bold)
         }
@@ -1384,7 +1395,7 @@ Repos: Enter details   space subscribe/unsubscribe   l next level (observe → s
        w  open the repo in the browser   L learn from your fixes: a job proposes better instructions
           for the repo (from your edits, amends and rejections) and waits for your approval
        a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental)   e edit the repo's file   R rescan
-       l, a set the repo's own value; (now auto, from window) on a row: a schedule window overrides it
+       l  and a set the repo's own value; (now auto, from window) on a row: a window overrides it
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
        e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
           never saved, so a typo can't break the daemon.
@@ -1399,9 +1410,10 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject
        e edit the replies in $EDITOR before they're posted (checked again on save)
        m amend: after you change files in the job's worktree (by hand or in a take-over), the
           daemon commits them, signs and checks everything again, and asks you once more
-       A PLAN job (plan_first) waits with its plan: a builds it, e edits the plan, r rejects
+          A PLAN job (plan_first) waits with its plan: a builds it, e edits the plan, r rejects
 Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
-       changes; ignored files like node_modules aren't kept)   h take over   Enter the job
+          changes; ignored files like node_modules aren't kept)
+       h  take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny   w open the comment in the browser
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
@@ -1840,8 +1852,16 @@ mod tests {
         assert_eq!(keys("Status words are always shown as text: NEEDS APPROVAL").len(), 0);
         assert_eq!(help_line("Tabs"), vec![("Tabs".to_string(), Style::new().add_modifier(Modifier::BOLD))]);
         for l in HELP.lines() {
-            assert_eq!(help_line(l).iter().map(|(t, _)| t.as_str()).collect::<String>(), l, "the text is unchanged");
+            let parts = help_line(l);
+            assert_eq!(parts.iter().map(|(t, _)| t.as_str()).collect::<String>(), l, "the text is unchanged");
+            for (t, st) in &parts {
+                if *st == KEY {
+                    assert!(!t.ends_with([',', ';', ':', ']', ')']) && t.chars().count() <= 6, "{t:?} isn't a key, in: {l}");
+                }
+            }
         }
+        assert_eq!(keys("Checks: [ok] passed, [ASK] needs your approval"), Vec::<String>::new());
+        assert_eq!(clip("amazee-ai-automation[bot]", 16), "amazee-ai-autom…");
         let (_d, paths) = home();
         let app = App::new(&paths, Db::open(&paths.db()).unwrap());
         let line = app.keys_line("Enter open|a approve|?|q quit");
