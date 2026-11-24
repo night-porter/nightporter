@@ -743,33 +743,8 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let verb = j.meta.verb;
     let has_code = !j.head_after.is_empty() && j.head_after != j.head_before && pushes_code(verb);
 
-    let clone = PathBuf::from(&j.meta.clone);
-    if has_code {
-        // Push exactly the reviewed SHA from the clone, whatever the worktree holds now.
-        if !git::is_ancestor(&clone, &j.head_before, &j.head_after).await {
-            bail!("history rewrite detected; not pushing");
-        }
-        let remote = git::remote_head(&clone, &j.meta.push_url, &j.meta.push_ref).await?;
-        let fresh_branch = j.target.is_issue() && remote.is_none();
-        let already = remote.as_deref() == Some(j.head_after.as_str());
-        let lease = (!j.meta.lease.is_empty()).then_some(j.meta.lease.as_str());
-        let replaces = lease.is_some() && remote.as_deref() == lease;
-        if !already && !fresh_branch && !replaces && remote.as_deref() != Some(j.head_before.as_str()) {
-            // Someone pushed in the meantime: redo the work on the new head.
-            ctx.db(|d| d.requeue_events(id))?;
-            j.status = JobStatus::Failed;
-            j.error = "the branch moved while we worked; re-queued on the new head".into();
-            ctx.db(|d| d.update_job(&j))?;
-            return Ok(());
-        }
-        if already {
-            // A previous delivery attempt (before a restart) got this far.
-            log(ctx, id, "already pushed; continuing with replies");
-        } else {
-            log(ctx, id, &format!("pushing {} to {}", crate::git::short(&j.head_after), j.meta.push_ref));
-            // Other push failures (protected branch, auth) are real failures, not a retry loop.
-            git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref, lease.filter(|_| replaces)).await?;
-        }
+    if has_code && !push_code(ctx, &mut j).await? {
+        return Ok(());
     }
 
     let f = forge.lock().await;
@@ -789,6 +764,7 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     if !merge_note.is_empty() {
         log(ctx, id, &format!("merge{merge_note}"));
     }
+    let mut undo = if has_code { undo_note(&j).await } else { None };
     for (i, r) in j.replies.clone().iter().enumerate() {
         if j.meta.posted.contains(&i) {
             continue;
@@ -807,7 +783,11 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             f.review(&j.repo, j.number, v, &r.body).await.with_context(|| format!("post review ({})", crate::state::enum_str(&v)))?;
             log(ctx, id, &format!("posted review: {}", crate::state::enum_str(&v)));
         } else {
-            f.reply(&j.repo, j.target, j.number, ev, &r.body)
+            let body = match undo.take() {
+                Some(u) => prompts::sign(&format!("{}\n\n{u}", prompts::unsign(&r.body)), s.reply.attribution(), s.agent),
+                None => r.body.clone(),
+            };
+            f.reply(&j.repo, j.target, j.number, ev, &body)
                 .await
                 .with_context(|| format!("post reply to {}", r.event.as_deref().unwrap_or("PR")))?;
         }
@@ -821,6 +801,15 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
             log(ctx, id, &format!("could not resolve thread {t}: {e:#}"));
         }
     }
+    if let Some(u) = undo {
+        // Recorded first: a restart mid-delivery must not post it twice.
+        j.meta.posted.push(UNDO_POSTED);
+        ctx.db(|d| d.update_job(&j))?;
+        let body = prompts::sign(&format!("Pushed {}.\n\n{u}", crate::git::short(&j.head_after)), s.reply.attribution(), s.agent);
+        if let Err(e) = f.reply(&j.repo, j.target, j.number, None, &body).await {
+            log(ctx, id, &format!("couldn't post how to undo the push: {e:#}"));
+        }
+    }
     if has_code {
         ask_bots_again(ctx, &j, &s, &f, &events).await;
     }
@@ -831,6 +820,58 @@ pub async fn deliver(ctx: &Ctx, id: i64) -> Result<()> {
     let replies = format!("posted {} repl{}", j.replies.len(), if j.replies.len() == 1 { "y" } else { "ies" });
     note(ctx, &j, Kind::Done, &format!("{pushed}{replies}{merge_note}"));
     Ok(())
+}
+
+/// Push the job's reviewed commits. `false`: the branch moved meanwhile and the job was re-queued.
+async fn push_code(ctx: &Ctx, j: &mut Job) -> Result<bool> {
+    let id = j.id;
+    let clone = PathBuf::from(&j.meta.clone);
+    // Push exactly the reviewed SHA from the clone, whatever the worktree holds now.
+    if !git::is_ancestor(&clone, &j.head_before, &j.head_after).await {
+        bail!("history rewrite detected; not pushing");
+    }
+    let remote = git::remote_head(&clone, &j.meta.push_url, &j.meta.push_ref).await?;
+    let fresh_branch = j.target.is_issue() && remote.is_none();
+    let already = remote.as_deref() == Some(j.head_after.as_str());
+    let lease = (!j.meta.lease.is_empty()).then_some(j.meta.lease.as_str());
+    let replaces = lease.is_some() && remote.as_deref() == lease;
+    if !already && !fresh_branch && !replaces && remote.as_deref() != Some(j.head_before.as_str()) {
+        // Someone pushed in the meantime: redo the work on the new head.
+        ctx.db(|d| d.requeue_events(id))?;
+        j.status = JobStatus::Failed;
+        j.error = "the branch moved while we worked; re-queued on the new head".into();
+        ctx.db(|d| d.update_job(j))?;
+        return Ok(false);
+    }
+    if already {
+        // A previous delivery attempt (before a restart) got this far.
+        log(ctx, id, "already pushed; continuing with replies");
+    } else {
+        log(ctx, id, &format!("pushing {} to {}", crate::git::short(&j.head_after), j.meta.push_ref));
+        // Other push failures (protected branch, auth) are real failures, not a retry loop.
+        git::push(&clone, &j.meta.push_url, &j.head_after, &j.meta.push_ref, lease.filter(|_| replaces)).await?;
+    }
+    Ok(true)
+}
+
+/// In `meta.posted` once the standalone undo note went out (no reply index is ever this).
+const UNDO_POSTED: usize = usize::MAX;
+
+/// How to take back the commits a job pushed to a PR: a revert, so no one's history is rewritten.
+/// `None` when a revert of the range wouldn't do it: not a PR, a force-push over a rebuilt branch
+/// (`lease`), or a merge in the range (a conflict fix brings in the base's commits); or when a
+/// reply or the note already went out.
+async fn undo_note(j: &Job) -> Option<String> {
+    if j.target != Target::Pr || !j.meta.lease.is_empty() || j.meta.posted.iter().any(|&i| i == 0 || i == UNDO_POSTED) {
+        return None;
+    }
+    let range = format!("{}..{}", j.head_before, j.head_after);
+    let merges = git::git(Path::new(&j.meta.clone), &["rev-list", "--merges", &range]).await.ok()?;
+    if !merges.trim().is_empty() {
+        return None;
+    }
+    let (from, to) = (crate::git::short(&j.head_before), crate::git::short(&j.head_after));
+    Some(format!("To undo this push: `git revert --no-edit {from}..{to}`, then push."))
 }
 
 /// A reply on a Jira issue; for an issue fix, `pr` (its URL, and whether it's ready rather than

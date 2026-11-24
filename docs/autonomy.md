@@ -35,6 +35,23 @@ several kinds gets the lowest of their levels.
 CI output is untrusted text, so CI-failure jobs stop at `draft` unless `ci_failure` is set above
 `draft` here (or `ci_auto = true`).
 
+Not sure a kind of job is ready? Leave it at `draft` and let `nightporter stats` tell you: after
+10 jobs in a row that you approved without changing anything, it suggests the next level.
+
+## Paths that always wait for you
+
+Some code should never go out without you, whatever the level. `checks.hold` lists path globs a
+job may change, but a job that touches one waits for your approval, even at `auto` or `merge`:
+
+```toml
+[checks]
+hold = ["src/auth/**", "migrations/**", "**/billing/**"]
+```
+
+Unlike `checks.protected` (which the agent may not change at all), held paths can be changed; the
+"held paths" check just makes the job wait, and you can approve it as usual. A repo's file adds to
+the global list and can't remove from it.
+
 ## Maintainer mode
 
 Jobs on other people's issues and PRs (`/nightporter fix`, the `nightporter` label, review

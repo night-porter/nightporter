@@ -224,14 +224,14 @@ impl App {
     }
 
     /// A job's list row; a running job gets a spinner, its stage and how long it has been in it.
-    fn row(&self, j: &Job) -> String {
-        match self.live_stage(j) {
-            Some((st, since)) => {
-                let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
-                format!("{} {}", spin(frame, st, crate::state::now() - since), job_line(j, self.by_updated, self.place_w))
-            }
-            None => job_line(j, self.by_updated, self.place_w),
+    fn row(&self, j: &Job) -> Line<'static> {
+        let mut spans = Vec::new();
+        if let Some((st, since)) = self.live_stage(j) {
+            let frame = self.started.elapsed().as_millis() / SPIN_TICK.as_millis();
+            spans.push(Span::styled(format!("{} ", spin(frame, st, crate::state::now() - since)), status_style(JobStatus::Running)));
         }
+        spans.extend(job_spans(j, self.place_w));
+        Line::from(spans.into_iter().map(|s| Span::styled(s.content, self.style(s.style))).collect::<Vec<_>>())
     }
 
     fn refresh(&mut self, repos: bool) {
@@ -314,7 +314,7 @@ impl App {
         self.repos =
             self.repos_all.iter().filter(|r| format!("{}/{}", r.id.host, r.id.path).to_lowercase().contains(&f)).cloned().collect();
         self.settings = self.settings_all.iter().filter(|r| r.setting.key.contains(&f)).cloned().collect();
-        self.history = self.history_all.iter().filter(|j| job_line(j, self.by_updated, 0).to_lowercase().contains(&f)).cloned().collect();
+        self.history = self.history_all.iter().filter(|j| job_line(j, 0).to_lowercase().contains(&f)).cloned().collect();
         if self.sel.selected().is_some_and(|i| i >= self.len()) {
             self.sel.select(Some(0));
         }
@@ -881,7 +881,7 @@ impl App {
             self.draw_settings(f, body);
         } else if self.tab == Tab::Help {
             f.render_widget(
-                Paragraph::new(HELP)
+                Paragraph::new(self.help_text())
                     .wrap(Wrap { trim: false })
                     .scroll((self.scroll, 0))
                     .block(Block::default().borders(Borders::ALL).title(" Help (↑↓ scroll) ")),
@@ -891,22 +891,18 @@ impl App {
             let items: Vec<ListItem> = match self.tab {
                 Tab::Queue | Tab::History => {
                     let list = if self.tab == Tab::Queue { &self.queue } else { &self.history };
-                    list.iter().map(|j| ListItem::new(self.row(j)).style(self.style(status_style(j.status)))).collect()
+                    let put_away = |j: &Job| matches!(j.status, JobStatus::Dismissed | JobStatus::Rejected);
+                    list.iter()
+                        .map(|j| {
+                            let item = ListItem::new(self.row(j));
+                            if put_away(j) { item.style(Style::new().add_modifier(Modifier::DIM)) } else { item }
+                        })
+                        .collect()
                 }
-                Tab::Inbox => self
-                    .inbox
-                    .iter()
-                    .map(|e| {
-                        ListItem::new(format!(
-                            "@{:<18} {:?} on {}#{}: {}",
-                            e.author,
-                            e.role,
-                            e.repo,
-                            e.number,
-                            e.body.lines().next().unwrap_or_default()
-                        ))
-                    })
-                    .collect(),
+                Tab::Inbox => {
+                    let aw = self.inbox.iter().map(|e| e.author.chars().count()).max().unwrap_or(0).min(INBOX_AUTHOR_W);
+                    self.inbox.iter().map(|e| ListItem::new(self.inbox_row(e, aw))).collect()
+                }
                 Tab::Repos => self.repo_items(),
                 Tab::Worktrees => self.worktree_items(),
                 Tab::Settings | Tab::Help => vec![],
@@ -919,10 +915,10 @@ impl App {
                 Tab::History if !self.filter.is_empty() || self.filtering => {
                     &format!(" History matching \"{}\" ({} of {}) ", self.filter, self.history.len(), self.history_all.len())
                 }
-                Tab::Queue => " Needs you / running (x dismiss what you don't want to act on) ",
+                Tab::Queue => " Needs you / running · date = last update (x dismiss what you don't want to act on) ",
                 Tab::Inbox => " Unknown authors waiting ",
-                Tab::History if self.by_updated => " History: every job, last updated first (o by created, / search) ",
-                Tab::History => " History: every job, newest first (o by last update, / search) ",
+                Tab::History if self.by_updated => " History: every job, last updated first · date = last update (o by created, / search) ",
+                Tab::History => " History: every job, newest first · date = last update (o by last update, / search) ",
                 Tab::Repos => {
                     let on = self.repos_all.iter().filter(|r| r.subscribed).count();
                     &format!(" Repos: {on} watched of {} (Enter details, space subscribe, / search) ", self.repos_all.len())
@@ -949,7 +945,7 @@ impl App {
             }
         }
         let (keys, line2) = self.footer();
-        f.render_widget(Paragraph::new(vec![Line::from(keys), Line::from(line2)]).style(Style::new().add_modifier(Modifier::DIM)), foot);
+        f.render_widget(Paragraph::new(vec![self.keys_line(keys), Line::from(line2)]), foot);
     }
 }
 
@@ -958,18 +954,18 @@ impl App {
     fn footer(&self) -> (&'static str, String) {
         let keys = match (self.detail.is_some(), self.tab) {
             // Kept under 80 columns.
-            _ if self.repo_view.is_some() => "↑↓ scroll e edit this repo's file L learn from your fixes Esc back",
+            _ if self.repo_view.is_some() => "↑↓ scroll|e edit this repo's file|L learn from your fixes|Esc back",
             (false, Tab::Repos | Tab::Settings | Tab::History) if self.filtering => "type to search, Enter keep results, Esc clear search",
-            (true, _) => "↑↓ a approve e edit m amend r reject x dismiss t retry h take over w web Esc",
+            (true, _) => "↑↓|a approve|e edit|m amend|r reject|x dismiss|t retry|h take over|w web|Esc",
             // m amend and h take over are in the detail footer and ? help.
-            (_, Tab::Queue) => "Enter open a approve e edit r reject x dismiss t retry f force w web ? q quit",
-            (_, Tab::History) => "Enter open x dismiss u restore X delete t retry w web / search o order ? q quit",
-            (_, Tab::Inbox) => "o once a trust A trust-all i ignore u undo d deny w web ? q quit",
-            (_, Tab::Repos) => "Enter details space subscribe l level a agent e edit w web L learn / search ? q",
+            (_, Tab::Queue) => "Enter open|a approve|e edit|r reject|x dismiss|t retry|f force|w web|?|q quit",
+            (_, Tab::History) => "Enter open|x dismiss|u restore|X delete|t retry|w web|/ search|o order|?|q quit",
+            (_, Tab::Inbox) => "o once|a trust|A trust-all|i ignore|u undo|d deny|w web|? help|q quit",
+            (_, Tab::Repos) => "Enter details|space subscribe|l level|a agent|e edit|w web|L learn|/ search|?|q",
             (_, Tab::Settings) if self.input.is_some() => "type the value, Enter save, Esc cancel (empty = default)",
-            (_, Tab::Settings) => "Enter change d default e edit file / search S setup ? q",
-            (_, Tab::Worktrees) => "Enter job x remove u bring back h take over ? help q quit",
-            (_, Tab::Help) => "1-6 tabs S setup wizard D start/stop daemon q quit",
+            (_, Tab::Settings) => "Enter change|d default|e edit file|/ search|S setup|? help|q quit",
+            (_, Tab::Worktrees) => "Enter job|x remove|u bring back|h take over|? help|q quit",
+            (_, Tab::Help) => "1-6 tabs|S setup wizard|D start/stop daemon|q quit",
         };
         let line2 = match (&self.confirm, &self.input) {
             (Some((q, _)), _) => q.clone(),
@@ -984,8 +980,69 @@ impl App {
     }
 
     fn worktree_items(&self) -> Vec<ListItem<'static>> {
-        let dim = |w: &crate::worktrees::Wt| if w.trashed.is_some() { Style::new().add_modifier(Modifier::DIM) } else { Style::new() };
-        self.worktrees.iter().map(|w| ListItem::new(w.line()).style(self.style(dim(w)))).collect()
+        let cells: Vec<_> = self.worktrees.iter().map(|w| (w, w.cells())).collect();
+        let pw = cells.iter().map(|(_, c)| c.place.chars().count()).max().unwrap_or(0);
+        cells
+            .into_iter()
+            .map(|(w, c)| {
+                let state = if w.trashed.is_some() { Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::new() };
+                ListItem::new(Line::from(vec![
+                    Span::raw(c.id),
+                    Span::styled(format!("{:<pw$} ", c.place), self.style(Style::new().add_modifier(Modifier::BOLD))),
+                    Span::styled(c.state, self.style(state)),
+                    Span::styled(c.date, self.style(DATE)),
+                    Span::styled(c.path, Style::new().add_modifier(Modifier::DIM)),
+                ]))
+            })
+            .collect()
+    }
+
+    /// An inbox row: when, who (and their role), where, and the first line of what they wrote.
+    /// `aw`: the width authors are padded to.
+    fn inbox_row(&self, e: &Event, aw: usize) -> Line<'static> {
+        let when =
+            e.created_at.parse::<jiff::Timestamp>().map(|t| crate::state::local_time(t.as_second(), "%m-%d %H:%M")).unwrap_or_default();
+        Line::from(vec![
+            Span::styled(format!("{when:<11} "), self.style(DATE)),
+            Span::styled(format!("@{:<aw$} ", clip(&e.author, aw)), self.style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            // No role on the repo (most strangers) says nothing.
+            Span::styled(
+                if e.role == crate::forge::Role::None { String::new() } else { format!("{:?} ", e.role) },
+                self.style(Style::new().fg(Color::Magenta)),
+            ),
+            Span::raw("on "),
+            Span::styled(format!("{}#{}", e.repo, e.number), self.style(Style::new().add_modifier(Modifier::BOLD))),
+            Span::raw(format!(": {}", e.body.lines().next().unwrap_or_default())),
+        ])
+    }
+
+    /// The footer's keys: each `|`-separated entry is a key, then what it does. A line without
+    /// `|` (a prompt) is shown as it is.
+    fn keys_line(&self, keys: &str) -> Line<'static> {
+        if !keys.contains('|') {
+            return Line::from(keys.to_string());
+        }
+        let mut spans = Vec::new();
+        for (i, entry) in keys.split('|').enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let (k, what) = entry.split_once(' ').map_or((entry, ""), |(k, w)| (k, w));
+            spans.push(Span::styled(k.to_string(), self.style(KEY)));
+            if !what.is_empty() {
+                spans.push(Span::raw(format!(" {what}")));
+            }
+        }
+        Line::from(spans)
+    }
+
+    /// The Help tab, with keys and section names picked out (see [`help_line`]).
+    fn help_text(&self) -> Text<'static> {
+        Text::from(
+            HELP.lines()
+                .map(|l| Line::from(help_line(l).into_iter().map(|(t, s)| Span::styled(t, self.style(s))).collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn repo_items(&self) -> Vec<ListItem<'static>> {
@@ -1127,13 +1184,74 @@ fn spin(frame: u128, stage: &str, secs: i64) -> String {
     format!("{} {stage} {t}", FRAMES[(frame % 10) as usize])
 }
 
-/// The date shown is the one the list is ordered by: created, or `by_updated` last updated.
-/// `w`: the width its place is padded to.
-fn job_line(j: &Job, by_updated: bool, w: usize) -> String {
-    let when = crate::state::local_time(if by_updated { j.updated_at } else { j.created_at }, "%m-%d %H:%M");
+/// Most columns an Inbox author gets; longer names end in `…`.
+const INBOX_AUTHOR_W: usize = 16;
+
+/// `s` cut to `n` characters, the last one `…` when it was longer.
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n.saturating_sub(1)).chain(['…']).collect() }
+}
+
+/// Dates in every list.
+const DATE: Style = Style::new().fg(Color::LightBlue);
+/// Keys in the footer and Help.
+const KEY: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+
+/// A job's row: id, status, last update, where, level, first line of the summary. `w`: the width
+/// its place is padded to. Unstyled for the TUI to pass through its colour switch.
+fn job_spans(j: &Job, w: usize) -> Vec<Span<'static>> {
     let on = if j.mode == crate::improve::LEARN { format!("{} learn", j.repo) } else { j.place() };
-    let on = format!("{on:<w$}");
-    format!("#{:<4} {:<20} {} {on} {:<8} {}", j.id, j.status.label(), when, j.level, j.summary.lines().next().unwrap_or_default())
+    vec![
+        Span::raw(format!("#{:<4} ", j.id)),
+        Span::styled(format!("{:<20} ", j.status.label()), status_style(j.status)),
+        Span::styled(format!("{} ", crate::state::local_time(j.updated_at, "%m-%d %H:%M")), DATE),
+        Span::styled(format!("{on:<w$} "), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<8} ", j.level), level_style(&j.level)),
+        Span::raw(j.summary.lines().next().unwrap_or_default().to_string()),
+    ]
+}
+
+/// [`job_spans`] as plain text (for search).
+fn job_line(j: &Job, w: usize) -> String {
+    job_spans(j, w).iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// One line of [`HELP`] in styled pieces: a section name (`Jobs:`, or a line of its own like
+/// `Tabs`) in bold, and the first word of each entry (its key) in [`KEY`]. Entries follow a section
+/// name or a 7-space indent and are 3+ spaces apart; on a 2-space line (the tab list) only the
+/// first word is a key. Deeper indents and sentences are prose.
+fn help_line(l: &str) -> Vec<(String, Style)> {
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let indent = l.len() - l.trim_start().len();
+    let (head, rest, head_style) = match l.split_once(": ") {
+        Some((h, r)) if indent == 0 && (h == "Checks" || h.starts_with("Keys (")) => {
+            return vec![(format!("{h}: "), bold), (r.to_string(), Style::new())];
+        }
+        Some((h, r)) if indent == 0 && !h.contains(' ') => {
+            let r2 = r.trim_start();
+            (format!("{h}: {}", &r[..r.len() - r2.len()]), r2, bold)
+        }
+        _ if indent == 0 && !l.is_empty() && !l.contains(' ') => return vec![(l.to_string(), bold)],
+        _ if indent == 2 || indent == 7 => (l[..indent].to_string(), &l[indent..], Style::new()),
+        _ => return vec![(l.to_string(), Style::new())],
+    };
+    let mut entries = Vec::new();
+    let (mut start, mut from) = (0, 0);
+    while indent != 2
+        && let Some(p) = rest[from..].find("   ")
+    {
+        let end = rest.len() - rest[from + p..].trim_start().len();
+        entries.push(&rest[start..end]);
+        (start, from) = (end, end);
+    }
+    entries.push(&rest[start..]);
+    let mut out = vec![(head, head_style)];
+    for e in entries {
+        let k = e.split(' ').next().unwrap_or(e);
+        out.push((k.to_string(), KEY));
+        out.push((e[k.len()..].to_string(), Style::new()));
+    }
+    out
 }
 
 /// Full text of a job, used by the TUI detail view and `nightporter show`.
@@ -1269,7 +1387,7 @@ Tabs
   6 Worktrees the job worktrees still on disk, and removed ones you can bring back for 7 days
 
 Keys (everywhere): ↑/↓ or j/k move, PgUp/PgDn page, Enter open, Tab/←/→ switch tab, p pause, q quit
-       o  Queue and History: order jobs by creation or by last update (the date shown follows)
+       o  Queue and History: order jobs by creation or by last update (each row shows its last update)
        /  search the Repos, Settings or History list (Esc clears)
        S  run the setup wizard again (forges, agent, clone folder, level, hours, repos, service)
        D  start or stop the background daemon (the part that watches your PRs; asks before stopping)
@@ -1277,7 +1395,7 @@ Repos: Enter details   space subscribe/unsubscribe   l next level (observe → s
        w  open the repo in the browser   L learn from your fixes: a job proposes better instructions
           for the repo (from your edits, amends and rejections) and waits for your approval
        a  switch agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental)   e edit the repo's file   R rescan
-       l, a set the repo's own value; (now auto, from window) on a row: a schedule window overrides it
+       l  and a set the repo's own value; (now auto, from window) on a row: a window overrides it
 Settings: Enter change (switches on/off and choices, otherwise type a value)   d back to default
        e  edit config.toml in $EDITOR. Every change is checked first: an invalid value or file is
           never saved, so a typo can't break the daemon.
@@ -1292,9 +1410,10 @@ Jobs:  a approve   A approve despite blocking checks (asks first)   r reject
        e edit the replies in $EDITOR before they're posted (checked again on save)
        m amend: after you change files in the job's worktree (by hand or in a take-over), the
           daemon commits them, signs and checks everything again, and asks you once more
-       A PLAN job (plan_first) waits with its plan: a builds it, e edits the plan, r rejects
+          A PLAN job (plan_first) waits with its plan: a builds it, e edits the plan, r rejects
 Worktrees: x remove (asks first)   u bring back a KEPT one (its commits and uncommitted
-       changes; ignored files like node_modules aren't kept)   h take over   Enter the job
+          changes; ignored files like node_modules aren't kept)
+       h  take over   Enter the job
 Inbox: o allow once   a trust author on this repo   A trust everywhere   i ignore   u undo ignore   d deny   w open the comment in the browser
 
 Status words are always shown as text: NEEDS APPROVAL, NEEDS RUN APPROVAL, FAILED, ready to copy.
@@ -1721,6 +1840,33 @@ mod tests {
         press(&mut app, KeyCode::Backspace);
         assert!(app.detail.is_none());
         assert!(!app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), "Ctrl-C quits");
+    }
+
+    #[test]
+    fn help_and_footer_keys_are_picked_out() {
+        let keys = |l: &str| help_line(l).into_iter().filter(|(_, s)| *s == KEY).map(|(t, _)| t).collect::<Vec<_>>();
+        assert_eq!(keys("Jobs:  a approve   A approve despite blocking checks (asks first)   r reject"), ["a", "A", "r"]);
+        assert_eq!(keys("       t retry with today's config"), ["t"]);
+        assert_eq!(keys("  1 Queue    jobs that need you"), ["1"], "the tab list: only its number");
+        assert_eq!(keys("          for the repo (from your edits)").len(), 0, "a continuation is prose");
+        assert_eq!(keys("Status words are always shown as text: NEEDS APPROVAL").len(), 0);
+        assert_eq!(help_line("Tabs"), vec![("Tabs".to_string(), Style::new().add_modifier(Modifier::BOLD))]);
+        for l in HELP.lines() {
+            let parts = help_line(l);
+            assert_eq!(parts.iter().map(|(t, _)| t.as_str()).collect::<String>(), l, "the text is unchanged");
+            for (t, st) in &parts {
+                if *st == KEY {
+                    assert!(!t.ends_with([',', ';', ':', ']', ')']) && t.chars().count() <= 6, "{t:?} isn't a key, in: {l}");
+                }
+            }
+        }
+        assert_eq!(keys("Checks: [ok] passed, [ASK] needs your approval"), Vec::<String>::new());
+        assert_eq!(clip("amazee-ai-automation[bot]", 16), "amazee-ai-autom…");
+        let (_d, paths) = home();
+        let app = App::new(&paths, Db::open(&paths.db()).unwrap());
+        let line = app.keys_line("Enter open|a approve|?|q quit");
+        assert_eq!(line.to_string(), "Enter open a approve ? q quit");
+        assert_eq!(line.spans.iter().filter(|s| s.style == app.style(KEY)).count(), 4);
     }
 
     #[test]

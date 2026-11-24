@@ -13,15 +13,16 @@ the job pushes and replies or waits for you.
 
 ## The TUI
 
-Run `nightporter`. It has five tabs:
+Run `nightporter`. It has six tabs:
 
 | key | tab | shows |
 |---|---|---|
-| `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours. A running job shows a spinner, its stage and how long it has been in it, e.g. `⠹ checks 4m12s` |
-| `2` | Inbox | events from people you don’t trust yet |
-| `3` | History | every job, newest first, including done and dismissed ones; `/` searches (e.g. `dismissed`, a repo name) |
+| `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours, each with when it last changed. A running job shows a spinner, its stage and how long it has been in it, e.g. `⠹ checks 4m12s` |
+| `2` | Inbox | events from people you don’t trust yet: when they wrote, who (and their role on the repo), where, and the first line |
+| `3` | History | every job, newest first, with when it last changed, including done and dismissed ones; `o` orders by last update instead, `/` searches (e.g. `dismissed`, a repo name) |
 | `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental), `e` edits the repo file, `R` rescans. `l` and `a` change the repo’s own setting; when a [schedule window](/advanced#working-hours) overrides it right now, the row says so, e.g. `(now auto, from window)` |
 | `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
+| `6` | Worktrees | the job worktrees on disk, when each last changed, and removed ones (`KEPT`) you can bring back for a week |
 | `?` | Help | keys and commands |
 
 Move with the arrow keys or `j`/`k`, `g`/`G` for the first and last item. `Enter` opens a job and
@@ -31,7 +32,8 @@ daemon, or stops it after asking (see [Turning Night Porter off](/getting-starte
 quits the TUI; the daemon keeps running.
 
 The header counts are coloured by urgency, and the header says **update available** when there's
-a newer release. In Settings, on is green and off is red, `[set]` and `[default]` look different,
+a newer release. In the lists, statuses and levels have their own colours, dates are light blue and
+the PR or issue is bold; keys in the footer and the Help tab stand out from what they do. In Settings, on is green and off is red, `[set]` and `[default]` look different,
 and global keys are coloured differently from `defaults.*` keys. Every state is also written in
 words, so nothing depends on colour; set `NO_COLOR=1` to turn colours off.
 
@@ -134,6 +136,15 @@ Jobs, cost, cost per pushed job, and how often you rejected, dismissed, edited, 
 over or retried, by repo, by kind of job and by agent and model. Use it to pick a cheaper model
 for a kind of job (`trigger_agent_args`), or to spot a repo that needs better instructions.
 
+It also tells you when a kind of job has earned a promotion: once the last 10 jobs of that kind
+on your PRs in a repo went out exactly as the agent wrote them (no edits, amends, takeovers or
+retries) at `suggest` or `draft`, it names the `levels` line for the next level up. The repo's view
+shows the same hint. Nothing changes until you add the line.
+
+`max_monthly_usd` caps what a repo's jobs cost per calendar month; after that its jobs wait until
+the next month (`nightporter run` still starts one). Costs are what the agent reports (Claude Code
+and Codex do; others count as 0).
+
 ### In the inbox
 
 Comments from people who aren’t trusted never reach the agent. They wait here.
@@ -173,9 +184,15 @@ Away from the TUI, comment on the PR or MR (in the GitHub, GitLab or Forgejo/Git
 | `/nightporter dismiss` | put the job away (like `x`) |
 | `/nightporter retry` | run a finished or failed job's requests again (like `t`, but never a job waiting for you) |
 | `/nightporter status` | Night Porter replies with the job's status |
+| `/nightporter stop` | no more work on this PR: a queued or running job stops, new comments and CI failures are left alone |
+| `/nightporter resume` | undo `stop`. What was already waiting when you stopped goes ahead; comments and CI failures from while it was stopped aren't picked up |
+| `/nightporter do <what>` | on your own PRs: a job that does what you wrote, e.g. `/nightporter do split the migration into two commits`. Everything after `do`, including later lines, is the request |
 
 The command acts on Night Porter's newest job for that PR, and only when the comment is newer
-than the job. Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
+than the job (so it works on PRs Night Porter has worked on).
+
+Every push to a PR comes with how to take it back: the first reply after it ends with
+`To undo this push: git revert --no-edit <from>..<to>, then push.` Night Porter adds a 👍 when it's done, or replies with the reason when it couldn't
 be (for example, nothing is waiting for approval). Each comment is acted on once.
 
 Only comments from your own account count: the user the token belongs to, checked by user ID.
@@ -209,6 +226,7 @@ nightporter handoff 42           # take over in herdr, Rex, tmux or Zellij
 nightporter wait 42              # until done (0), failed (1), needs you (2) or timeout (3)
 nightporter events --json        # follow every job and inbox change
 nightporter stats                # cost and how often you fixed jobs (--repo, --days)
+nightporter ship                 # push this branch, open a draft PR and let Night Porter look after it
 nightporter learn acme/api       # propose better instructions from your fixes
 
 nightporter inbox list

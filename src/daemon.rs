@@ -1,7 +1,7 @@
 //! The daemon: poll forges, classify events, batch them into jobs, run jobs, deliver approvals.
 
 use crate::config::Config;
-use crate::forge::{Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
+use crate::forge::{Control, Cursor, Event, Forge, ForgeKind, Mode, RepoId, Trigger};
 use crate::http::{self, Api};
 use crate::notify::{self, Kind};
 use crate::paths::Paths;
@@ -335,7 +335,22 @@ pub(crate) async fn pr_commands(ctx: &Ctx, key: &(ForgeKind, String)) -> Result<
                 continue;
             }
             ctx.db(|d| d.set(&done_key, "1"))?;
-            let res = ctx.db(|d| crate::actions::pr_command(d, j.id, c.control));
+            let res = match &c.control {
+                // Your own request, taken in like a review comment you'd want acted on.
+                // Only on your own PRs: anywhere else it would run outside maintainer mode's cap.
+                Control::Do(_) if j.target != crate::forge::Target::Pr || j.mode != "my_prs" => {
+                    Err(anyhow::anyhow!("`/nightporter do` works on your own PRs; here, comment as you would to a teammate"))
+                }
+                Control::Do(what) => {
+                    let id = format!("do-{}-{}", j.repo.key(), c.id);
+                    let e = Event::state(id, &j.repo, j.number, Trigger::Comment, forge.me(), what.clone());
+                    ctx.db(|d| {
+                        d.del(&crate::actions::stop_key(&j.repo, j.target, j.number))?;
+                        d.add_event(&e, Disposition::Pending, "asked with /nightporter do").map(|_| None)
+                    })
+                }
+                other => ctx.db(|d| crate::actions::pr_command(d, j.id, other)),
+            };
             tracing::info!("job {}: {:?} from a PR comment: {res:?}", j.id, c.control);
             // The command already ran: a broken repo file must not cost it its reply.
             let s = ctx.cfg().settings_for(&ctx.paths, &j.repo).ok();
@@ -391,6 +406,9 @@ pub async fn intake(ctx: &Ctx, cfg: &Config, me: &str, e: Event) -> Result<()> {
     // they are never requests or review feedback.
     if crate::forge::parse_control(&e.body).is_some() {
         return drop("job command");
+    }
+    if ctx.db(|d| d.get(&crate::actions::stop_key(&e.repo, e.target, e.number)))?.is_some() {
+        return drop("stopped with /nightporter stop");
     }
     match e.mode() {
         Mode::MyPrs => {
@@ -486,7 +504,12 @@ type Group = ((RepoId, u64), Vec<(Event, i64)>, String);
 /// quarter of the daily cap, so a few hundred queued issues can't crowd out tonight's review comments.
 fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
     let mut groups: BTreeMap<(RepoId, u64), Vec<(Event, i64)>> = BTreeMap::new();
+    let stopped = ctx.db(|d| d.prefixed("stopped:"))?;
     for (e, seen) in ctx.db(|d| d.events_with(Disposition::Pending))? {
+        // Held by `/nightporter stop`; they go ahead after `/nightporter resume`.
+        if stopped.contains_key(crate::actions::stop_key(&e.repo, e.target, e.number).trim_start_matches("stopped:")) {
+            continue;
+        }
         groups.entry((e.repo.clone(), e.number)).or_default().push((e, seen));
     }
     let mut flags = ctx.db(|d| d.prefixed("retry:"))?;
@@ -503,6 +526,18 @@ fn pending_groups(ctx: &Ctx) -> Result<Vec<Group>> {
         ctx.db(|d| d.del(&format!("retry:{key}")))?;
     }
     Ok(groups)
+}
+
+/// `max_monthly_usd` reached for `repo` this calendar month (warned about once an hour).
+fn over_monthly_budget(ctx: &Ctx, s: &crate::config::RepoSettings, repo: &RepoId, tz_now: &jiff::ZonedDateTime) -> Result<bool> {
+    let Some(cap) = s.max_monthly_usd else { return Ok(false) };
+    let month = tz_now.first_of_month()?.start_of_day()?.timestamp().as_second();
+    let spent = ctx.db(|d| d.cost_since(repo, month))?;
+    if spent >= cap {
+        let msg = format!("{repo}: monthly budget (${cap:.2}) used up (${spent:.2}); its jobs wait for next month");
+        ctx.warn_every(&format!("month:{repo}"), 3600, &msg);
+    }
+    Ok(spent >= cap)
 }
 
 /// Batch pending events into jobs: debounce, schedule, one job per PR, caps. A retry with
@@ -537,7 +572,7 @@ pub fn dispatch(ctx: &Ctx) -> Result<()> {
         if !now_ && now - last < i64::try_from(s.debounce.as_secs()).unwrap_or(i64::MAX) {
             continue;
         }
-        if ctx.db(|d| d.pr_busy(&repo, n))? {
+        if ctx.db(|d| d.pr_busy(&repo, n))? || (!now_ && over_monthly_budget(ctx, &s, &repo, &tz_now)?) {
             continue;
         }
         let today = ctx.db(|d| d.jobs_since(now - 86400))?;
@@ -883,6 +918,24 @@ mod tests {
         dispatch(&ctx).unwrap();
         // The burst's 2, and nothing more: the daily cap (1) is already used up by them.
         assert_eq!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn monthly_budget_holds_a_repos_jobs() {
+        let (_d, ctx, repo) = setup("subscribed = true\nmax_monthly_usd = 5.0");
+        let cfg = ctx.cfg();
+        let spent = ctx.db(|d| d.create_job(&repo, crate::forge::Target::Pr, 9, "my_prs", "draft", &[])).unwrap();
+        let mut j = ctx.db(|d| d.job(spent)).unwrap().unwrap();
+        j.status = JobStatus::Done;
+        j.meta.cost_usd = Some(5.5);
+        ctx.db(|d| d.seed_job(&j)).unwrap();
+        intake(&ctx, &cfg, "me", ev(&repo, "1", "alice", Role::Member, Trigger::Comment)).await.unwrap();
+        dispatch(&ctx).unwrap();
+        assert!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().is_empty(), "over budget: it waits");
+        j.meta.cost_usd = Some(1.0);
+        ctx.db(|d| d.seed_job(&j)).unwrap();
+        dispatch(&ctx).unwrap();
+        assert_eq!(ctx.db(|d| d.jobs_with(JobStatus::Queued)).unwrap().len(), 1);
     }
 
     #[tokio::test]

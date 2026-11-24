@@ -116,6 +116,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.max_ci_attempts", Int, "Automatic CI-fix attempts before giving up."),
     risky("defaults.ci_auto", Bool, "true", "Let CI-failure jobs run at auto. CI output is untrusted text, so off by default."),
     s("defaults.max_budget_usd", Float, "Spending cap per run in USD (Claude Code only). Empty = none."),
+    s("defaults.max_monthly_usd", Float, "Most a repo's jobs may cost per calendar month in USD; then they wait. Empty = none."),
     risky("defaults.sandbox", Bool, "false", "OS sandbox for the agent's shell commands. Only turn off for Docker/DDEV repos."),
     s("defaults.sandbox_domains", List, "Domains sandboxed commands may reach."),
     s("defaults.sandbox_read_allow", List, "Extra folders in your home folder sandboxed commands may read, e.g. ~/.config/mytool"),
@@ -140,6 +141,7 @@ pub static SETTINGS: &[Setting] = &[
     ),
     s("defaults.reply.resolve_threads", Bool, "Resolve review threads after replying."),
     s("defaults.checks.protected", List, "Extra protected path globs (added to the built-in list)."),
+    s("defaults.checks.hold", List, "Path globs whose changes always wait for your approval, at any level."),
     s("defaults.checks.escalate_on", List, "Changes that always need your approval: deps, size."),
     risky("defaults.checks.allow_env_variants", Bool, "true", "Let jobs edit .env.* files such as .env.example (.env stays protected)."),
     s("defaults.checks.max_diff_lines", Int, "Diff size that counts as large (for escalate_on = size)."),
@@ -151,6 +153,11 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.maintainer.enabled", Bool, "Maintainer mode: triage, reproduce, fix or review others' issues and MRs on request."),
     s("defaults.maintainer.level", Choice(&["observe", "suggest", "draft"]), "Level for maintainer jobs (capped at draft)."),
     s("defaults.maintainer.label", Text, "Label that asks Night Porter to look at an issue or MR."),
+    s(
+        "defaults.maintainer.review_depth",
+        Choice(&["quick", "standard", "deep"]),
+        "How thorough reviews are: blockers only, standard, or deep (each finding double-checked).",
+    ),
     s(
         "defaults.maintainer.review_verdicts",
         List,
@@ -468,8 +475,8 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "\nSAFETY");
     let _ = writeln!(o, "  sandbox        {}   network: {}", on(s.sandbox), list(&s.sandbox_domains));
     let _ = writeln!(o, "  may run        {}", list(&s.allow_commands));
-    let esc: Vec<String> = s.checks.escalate_on.iter().map(crate::state::enum_str).collect();
-    let _ = writeln!(o, "  always ask on  {}   protected extra: {}", esc.join(", "), list(&s.checks.protected));
+    let esc = s.checks.escalate_on.iter().map(crate::state::enum_str).collect::<Vec<String>>().join(", ");
+    let _ = writeln!(o, "  always ask on  {esc}   protected extra: {}   held for you: {}", list(&s.checks.protected), list(&s.checks.hold));
     let _ = writeln!(o, "  env install    {}", on(s.env.install));
     let _ = writeln!(o, "  env setup      {}", list(&s.env.setup));
 

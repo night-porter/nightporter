@@ -81,6 +81,19 @@ enum Cmd {
     Subscribe { repo: String },
     /// Stop watching a repo.
     Unsubscribe { repo: String },
+    /// Push the current branch, open a draft PR/MR for it, and have Night Porter look after it:
+    /// CI failures, merge conflicts and review comments, at the repo's levels.
+    Ship {
+        /// Branch to merge into (default: origin's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// Title (default: the last commit's subject).
+        #[arg(long)]
+        title: Option<String>,
+        /// Open it ready for review instead of as a draft.
+        #[arg(long)]
+        ready: bool,
+    },
     /// Queue maintainer jobs for a repo's open issues (or PRs/MRs with --prs), oldest first.
     /// Each job stops at maintainer mode's level (at most draft) for you to review.
     Sweep {
@@ -491,6 +504,7 @@ fn run(paths: &Paths, cmd: Cmd, out: &mut dyn Write, tty: bool) -> Result<()> {
         Cmd::Token { cmd: TokenCmd::Set { forge, host } } => cmd_token_set(&forge, host),
         Cmd::Service { cmd } => cmd_service(paths, &cmd, out),
         c @ Cmd::Sweep { .. } => rt()?.block_on(cmd_sweep(paths, c)),
+        Cmd::Ship { base, title, ready } => rt()?.block_on(cmd_ship(paths, base, title, ready, out)),
         Cmd::Rescan { repo, since } => rt()?.block_on(cmd_rescan(paths, &repo, &since, out)),
         Cmd::Market { cmd } => rt()?.block_on(market(paths, cmd, out)),
         Cmd::Pack { cmd } => rt()?.block_on(pack(paths, cmd, out)),
@@ -539,6 +553,53 @@ async fn cmd_rescan(paths: &Paths, repo: &str, since: &str, out: &mut dyn Write)
         events.len()
     )?;
     if new > 0 && !paths.daemon_running() {
+        writeln!(out, "the daemon isn't running: start it with `nightporter start`")?;
+    }
+    Ok(())
+}
+
+/// `git <args>` in the current directory, trimmed stdout; an error with git's message.
+fn git_here(args: &[&str]) -> Result<String> {
+    let o = std::process::Command::new("git").args(args).output().context("run git")?;
+    anyhow::ensure!(o.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// `nightporter ship`: push this branch to origin, open a PR/MR and subscribe the repo, so its CI
+/// failures, conflicts and review comments become jobs like on any PR of yours.
+async fn cmd_ship(paths: &Paths, base: Option<String>, title: Option<String>, ready: bool, out: &mut dyn Write) -> Result<()> {
+    let cfg = config::Config::load(paths)?;
+    let branch = git_here(&["branch", "--show-current"])?;
+    anyhow::ensure!(!branch.is_empty(), "not on a branch: check out the branch to ship");
+    // ponytail: origin only; forks that push elsewhere can open their PR by hand.
+    let url = git_here(&["remote", "get-url", "origin"])?;
+    let repo =
+        repos::parse_remote(&url, &cfg.accounts).with_context(|| format!("origin ({url}) isn't on a forge you have an account for"))?;
+    let base = match base {
+        Some(b) => b,
+        None => git_here(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .ok()
+            .and_then(|r| r.strip_prefix("origin/").map(String::from))
+            .unwrap_or_else(|| "main".into()),
+    };
+    anyhow::ensure!(branch != base, "{branch} is the base branch: ship from a feature branch");
+    let title = match title {
+        Some(t) => t,
+        None => git_here(&["log", "-1", "--format=%s"])?,
+    };
+    let commits = git_here(&["log", "--reverse", "--format=- %s", &format!("origin/{base}..HEAD")]).unwrap_or_default();
+    let status = std::process::Command::new("git").args(["push", "-u", "origin", "HEAD"]).status().context("run git push")?;
+    anyhow::ensure!(status.success(), "git push failed");
+    let s = cfg.settings_for(paths, &repo)?;
+    let body = prompts::sign(&commits, s.reply.attribution(), s.agent);
+    let ctx = daemon::offline_ctx(paths, cfg).await?;
+    let pr = ctx.forge(&repo)?.lock().await.open_pr(&repo, &branch, &base, &title, &body, !ready).await?;
+    writeln!(out, "opened {}{pr}", if ready { "" } else { "draft " })?;
+    if !s.subscribed {
+        actions::set_subscribed(paths, &repo, true)?;
+        writeln!(out, "subscribed {repo}, so Night Porter looks after it")?;
+    }
+    if !paths.daemon_running() {
         writeln!(out, "the daemon isn't running: start it with `nightporter start`")?;
     }
     Ok(())

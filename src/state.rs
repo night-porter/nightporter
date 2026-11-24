@@ -674,7 +674,9 @@ impl Db {
     pub fn command_jobs(&self, since: i64) -> Result<Vec<Job>> {
         let mut st = self.0.prepare(&format!(
             "{JOB_LIST} WHERE id IN (SELECT MAX(id) FROM jobs WHERE mode != 'learn' AND target != 'jira' GROUP BY repo, target, number)
-               AND (status IN ({}) OR updated_at >= ?1) ORDER BY id",
+               AND (status IN ({}) OR updated_at >= ?1
+                    OR EXISTS(SELECT 1 FROM kv WHERE k = 'stopped:' || jobs.repo || '#' || jobs.target || ':' || jobs.number))
+               ORDER BY id",
             JobStatus::sql(JobStatus::needs_user)
         ))?;
         let rows = st.query_map([since], row_job)?;
@@ -697,6 +699,15 @@ impl Db {
                 JobStatus::sql(JobStatus::holds_pr)
             ),
             params![repo.key(), number.cast_signed()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// What `repo`'s jobs created since `since` cost, as their agents reported it.
+    pub fn cost_since(&self, repo: &RepoId, since: i64) -> Result<f64> {
+        Ok(self.0.query_row(
+            "SELECT COALESCE(SUM(json_extract(meta, '$.cost_usd')), 0.0) FROM jobs WHERE repo=?1 AND created_at >= ?2",
+            params![repo.key(), since],
             |r| r.get(0),
         )?)
     }

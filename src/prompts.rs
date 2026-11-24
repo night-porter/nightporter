@@ -75,6 +75,21 @@ pub struct Input<'a> {
     pub plan: &'a str,
 }
 
+/// What `review_depth` adds to a review's task.
+fn depth(d: crate::config::ReviewDepth) -> &'static str {
+    match d {
+        crate::config::ReviewDepth::Quick => {
+            "\nKeep this review short: only correctness and security problems that should block a merge. Skip style and nits.\n"
+        }
+        crate::config::ReviewDepth::Standard => "",
+        crate::config::ReviewDepth::Deep => {
+            "\nReview in depth: read the code around each change and its callers, not only the diff. Before you report a \
+             finding, try to disprove it: check whether other code already handles it, and drop what you can't confirm. \
+             Say which findings you confirmed by running code.\n"
+        }
+    }
+}
+
 pub fn build(i: &Input) -> Result<String> {
     let s = i.settings;
     let mut p = String::with_capacity(8 * 1024);
@@ -102,6 +117,9 @@ pub fn build(i: &Input) -> Result<String> {
     // The conflict step names the base ref; each PR has its own (see `git::base_ref`).
     let base_ref = i.pr.map(|pr| crate::git::base_ref(&crate::git::branch_name(crate::forge::Target::Pr, pr.number))).unwrap_or_default();
     p.push_str(&step(step_name).unwrap_or_default().replace("refs/nightporter/base", &base_ref));
+    if step_name == "review" {
+        p.push_str(depth(s.maintainer.review_depth));
+    }
     for extra in i.pack_prompts {
         p.push('\n');
         p.push_str(extra);
@@ -234,6 +252,14 @@ pub fn unsign(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_depth_adds_to_the_task() {
+        use crate::config::ReviewDepth;
+        assert_eq!(depth(ReviewDepth::Standard), "");
+        assert!(depth(ReviewDepth::Quick).contains("block a merge"));
+        assert!(depth(ReviewDepth::Deep).contains("try to disprove it"));
+    }
 
     #[test]
     fn sign_follows_attribution() {

@@ -192,7 +192,7 @@ pub fn burst(db: &Db) -> Option<Burst> {
 /// line to reply with, or `None` to just acknowledge. Stricter than the TUI: `approve` only
 /// releases a job waiting for push approval, never past blocking checks, and never approves
 /// running someone else's code (that needs the TUI, which shows the changed build files).
-pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
+pub fn pr_command(db: &Db, id: i64, c: &Control) -> Result<Option<String>> {
     let j = db.job(id)?.with_context(|| format!("no job {id}"))?;
     match c {
         Control::Approve if j.status != JobStatus::AwaitingApproval => bail!("job {id} is {}, nothing to approve here", j.status.label()),
@@ -206,7 +206,24 @@ pub fn pr_command(db: &Db, id: i64, c: Control) -> Result<Option<String>> {
         Control::Retry if j.status.needs_user() => bail!("job {id} is waiting for you; reject it first, or retry it in the TUI"),
         Control::Retry => retry(db, id, RetryOpts::default()).map(|_| None),
         Control::Status => Ok(Some(format!("Job {id}: {}", j.status.label()))),
+        Control::Stop => {
+            db.set(&stop_key(&j.repo, j.target, j.number), "1")?;
+            if matches!(j.status, JobStatus::Queued | JobStatus::Running | JobStatus::Approved) {
+                cancel(db, id)?;
+            }
+            Ok(Some("Stopped: Night Porter starts no work on this PR until you comment `/nightporter resume`.".into()))
+        }
+        Control::Resume => db.del(&stop_key(&j.repo, j.target, j.number)).map(|()| None),
+        // Needs the forge's user: queued by `daemon::pr_commands`.
+        Control::Do(_) => bail!("`/nightporter do` is handled by the daemon"),
     }
+}
+
+/// Set while `/nightporter stop` holds a PR: its events wait, and new ones are dropped. The
+/// target is part of it: on GitLab, MR !5 and issue #5 are different things.
+/// `state::Db::command_jobs` builds the same key in SQL.
+pub fn stop_key(repo: &RepoId, target: crate::forge::Target, n: u64) -> String {
+    format!("stopped:{}#{}:{n}", repo.key(), crate::state::enum_str(&target))
 }
 
 const REPLY_SEP: &str = "<!-- reply ";
@@ -542,10 +559,27 @@ mod tests {
         let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
         let id = db.create_job(&repo, crate::forge::Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
         db.set_status(id, JobStatus::AwaitingApproval).unwrap();
-        assert!(pr_command(&db, id, crate::forge::Control::Retry).is_err());
+        assert!(pr_command(&db, id, &crate::forge::Control::Retry).is_err());
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::AwaitingApproval);
         retry(&db, id, RetryOpts::default()).unwrap();
         assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Rejected, "the TUI/CLI retry rejects it first");
+    }
+
+    #[test]
+    fn pr_comment_stop_holds_the_pr_until_resume() {
+        use crate::forge::Control;
+        let mut db = Db::memory().unwrap();
+        let repo = RepoId::new(ForgeKind::GitHub, "github.com", "o/r");
+        let id = db.create_job(&repo, crate::forge::Target::Pr, 1, "my_prs", "draft", &[]).unwrap();
+        assert!(pr_command(&db, id, &Control::Stop).unwrap().unwrap().contains("/nightporter resume"));
+        assert!(db.get(&stop_key(&repo, crate::forge::Target::Pr, 1)).unwrap().is_some());
+        assert!(db.get(&stop_key(&repo, crate::forge::Target::Issue, 1)).unwrap().is_none(), "issue #1 isn't held");
+        assert_eq!(db.job(id).unwrap().unwrap().status, JobStatus::Rejected, "the queued job doesn't start");
+        let later = crate::state::now() + 10 * 86400;
+        assert_eq!(db.command_jobs(later).unwrap().len(), 1, "a stopped PR is still read for its resume, days later");
+        assert_eq!(pr_command(&db, id, &Control::Resume).unwrap(), None);
+        assert!(db.command_jobs(later).unwrap().is_empty());
+        assert!(db.get(&stop_key(&repo, crate::forge::Target::Pr, 1)).unwrap().is_none());
     }
 
     #[test]

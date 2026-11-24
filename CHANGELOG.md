@@ -6,6 +6,20 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Every push to a PR says how to undo it: the first reply after it (or a short note when there is none) ends with the `git revert` command that takes the job's commits back.
+- `/nightporter stop` holds a PR (a queued or running job stops, new events are dropped, pending ones wait), `/nightporter resume` lets it go again, and `/nightporter do <what>` queues a job for your own words. Your account only, like the other PR commands.
+- `nightporter ship` pushes the current branch, opens a draft PR/MR (`--ready`, `--base`, `--title`) and subscribes the repo, so Night Porter looks after it from then on.
+- `nightporter stats` and the repo view suggest the next level for a kind of job once its last 10 jobs on your PRs went out exactly as written at `suggest` or `draft`.
+- `checks.hold`: path globs whose changes always wait for your approval, at any level (a non-blocking "held paths" check). Repo files add to the global list.
+- `maintainer.review_depth`: `quick` (blockers only), `standard`, or `deep` (reads around each change and tries to disprove every finding before reporting it).
+- `max_monthly_usd`: a repo's jobs wait once they cost that much in a calendar month; `nightporter run` still starts one.
+
+### Changed
+
+- The TUI's lists are easier to scan: Queue and History rows always show when each job last changed (`o` still switches the order), the Inbox shows when each comment was written, Worktrees and the Inbox are coloured like the job lists, and keys in the footer and Help tab stand out from what they do. `NO_COLOR` turns it all off; the text is the same either way.
+
 ## [0.7.0] - 2026-11-23
 
 ### Added

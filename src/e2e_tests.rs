@@ -216,6 +216,8 @@ async fn draft_flow_end_to_end() {
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].1, "/repos/o/r/pulls/1/comments/5/replies");
     assert!(posts[0].2.contains("via Night Porter"));
+    let undo = format!("git revert --no-edit {}..{}", crate::git::short(&j.head_before), crate::git::short(&j.head_after));
+    assert!(posts[0].2.contains(&undo), "the reply says how to undo the push: {}", posts[0].2);
     // Nothing from Night Porter left in the worktree.
     assert!(!std::path::Path::new(&j.worktree).join(".nightporter").exists());
 
@@ -296,7 +298,7 @@ async fn plan_first_then_learn_from_the_edit() {
     assert!(j.meta.planning && j.meta.plan.contains("Rename it") && j.replies.is_empty() && j.summary.starts_with("PLAN:"), "{j:?}");
     assert_eq!(j.head_before, sh(&w.bare, "git rev-parse feature"));
     assert!(ctx.db(|d| actions::amend(d, id)).is_err(), "nothing to amend before the build");
-    let blind = ctx.db(|d| actions::pr_command(d, id, crate::forge::Control::Approve));
+    let blind = ctx.db(|d| actions::pr_command(d, id, &crate::forge::Control::Approve));
     assert!(blind.is_err_and(|e| e.to_string().contains("plan")), "a forge comment can't approve a plan it never showed");
 
     // Edit the plan; the agent's version is kept for learning.
@@ -919,13 +921,15 @@ async fn pr_commands_only_from_my_user_id_once() {
         {"id":21,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:00Z"},
         {"id":22,"user":{"login":"alice","id":2,"type":"User"},"author_association":"MEMBER","body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:01Z"},
         {"id":23,"user":{"login":"me","id":1,"type":"User"},"performed_via_github_app":{"id":9},"body":"/nightporter retry","html_url":"","created_at":"2099-01-01T00:00:02Z"},
-        {"id":24,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:03Z"}]"#;
+        {"id":24,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter approve","html_url":"","created_at":"2099-01-01T00:00:03Z"},
+        {"id":25,"user":{"login":"me","id":1,"type":"User"},"body":"/nightporter do add a changelog line","html_url":"","created_at":"2099-01-01T00:00:04Z"}]"#;
     let w = world_with(
         "",
         vec![
             ("GET", "/user", r#"{"login":"me","id":1,"type":"User"}"#.into()),
             ("GET", "/repos/o/r/issues/1/comments", comments.into()),
             ("POST", "/repos/o/r/issues/comments/21/reactions", "{}".into()),
+            ("POST", "/repos/o/r/issues/comments/25/reactions", "{}".into()),
         ],
     )
     .await;
@@ -946,14 +950,21 @@ async fn pr_commands_only_from_my_user_id_once() {
     assert_eq!(ctx.db(|d| d.job(id)).unwrap().unwrap().status, JobStatus::Approved);
     let posts = |w: &World| w.log.lock().unwrap().iter().filter(|(m, _, _)| m == "POST").cloned().collect::<Vec<_>>();
     let p = posts(&w);
-    // 21 approved (thumbs-up); 22 (alice) and 23 (an app as me) ignored; 24 can't approve twice.
-    assert_eq!(p.len(), 2, "{p:?}");
+    // 21 approved (thumbs-up); 22 (alice) and 23 (an app as me) ignored; 24 can't approve twice;
+    // 25 queues what it asks for.
+    assert_eq!(p.len(), 3, "{p:?}");
     assert_eq!(p[0].1, "/repos/o/r/issues/comments/21/reactions");
     assert_eq!(p[1].1, "/repos/o/r/issues/1/comments");
     assert!(p[1].2.contains("nothing to approve") && p[1].2.contains(crate::prompts::FOOTER_MARK));
+    assert_eq!(p[2].1, "/repos/o/r/issues/comments/25/reactions");
+    let pending = ctx.db(|d| d.events_with(crate::state::Disposition::Pending)).unwrap();
+    assert!(
+        pending.iter().any(|(e, _)| e.id == format!("do-{}-25", w.repo.key()) && e.body == "add a changelog line" && e.author == "me"),
+        "{pending:?}"
+    );
     // Each comment is acted on once.
     daemon::pr_commands(ctx, &key).await.unwrap();
-    assert_eq!(posts(&w).len(), 2);
+    assert_eq!(posts(&w).len(), 3);
 }
 
 #[tokio::test]
