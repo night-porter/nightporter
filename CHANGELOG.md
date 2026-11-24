@@ -16,6 +16,10 @@ All notable changes to Night Porter. The format follows
 - `maintainer.review_depth`: `quick` (blockers only), `standard`, or `deep` (reads around each change and tries to disprove every finding before reporting it).
 - `max_monthly_usd`: a repo's jobs wait once they cost that much in a calendar month; `nightporter run` still starts one.
 
+### Changed
+
+- The TUI's lists are easier to scan: Queue and History rows always show when each job last changed (`o` still switches the order), the Inbox shows when each comment was written, Worktrees and the Inbox are coloured like the job lists, and keys in the footer and Help tab stand out from what they do. `NO_COLOR` turns it all off; the text is the same either way.
+
 ## [0.7.0] - 2026-11-23
 
 ### Added

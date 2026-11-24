@@ -22,17 +22,33 @@ pub struct Wt {
 }
 
 impl Wt {
-    /// One line for the TUI and `nightporter worktrees`.
+    /// One line for `nightporter worktrees`.
     pub fn line(&self) -> String {
+        let c = self.cells();
+        format!("{}{:<30} {}{}{}", c.id, c.place, c.state, c.date, c.path)
+    }
+
+    /// The parts of [`Wt::line`], padded, for the TUI to colour.
+    pub fn cells(&self) -> WtCells {
         let day = |t: i64| crate::state::local_time(t, "%m-%d %H:%M");
-        let state = if let Some((at, _)) = &self.trashed {
-            format!("KEPT {}, restorable until {}", day(*at), day(at + KEEP_SECS))
+        let (state, date) = if let Some((at, _)) = &self.trashed {
+            ("KEPT ".to_string(), format!("{:<40} ", format!("{}, restorable until {}", day(*at), day(at + KEEP_SECS))))
         } else {
             let used = self.path.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-            format!("last changed {}", used.map(|d| day(d.as_secs().cast_signed())).unwrap_or_default())
+            ("last changed ".to_string(), format!("{:<32} ", used.map(|d| day(d.as_secs().cast_signed())).unwrap_or_default()))
         };
-        format!("#{:<4} {}#{:<5} {:<45} {}", self.job.id, self.job.repo, self.job.number, state, self.path.display())
+        WtCells { id: format!("#{:<4} ", self.job.id), place: self.job.place(), state, date, path: self.path.display().to_string() }
     }
+}
+
+pub struct WtCells {
+    pub id: String,
+    /// Not padded: the caller lines it up.
+    pub place: String,
+    /// `KEPT ` (removed, restorable) or `last changed `.
+    pub state: String,
+    pub date: String,
+    pub path: String,
 }
 
 /// Every worktree that's still there, then every removed one that can still be restored, newest

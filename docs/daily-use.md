@@ -13,15 +13,16 @@ the job pushes and replies or waits for you.
 
 ## The TUI
 
-Run `nightporter`. It has five tabs:
+Run `nightporter`. It has six tabs:
 
 | key | tab | shows |
 |---|---|---|
-| `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours. A running job shows a spinner, its stage and how long it has been in it, e.g. `⠹ checks 4m12s` |
-| `2` | Inbox | events from people you don’t trust yet |
-| `3` | History | every job, newest first, including done and dismissed ones; `/` searches (e.g. `dismissed`, a repo name) |
+| `1` | Queue | jobs that need you, running jobs, and failures from the last 24 hours, each with when it last changed. A running job shows a spinner, its stage and how long it has been in it, e.g. `⠹ checks 4m12s` |
+| `2` | Inbox | events from people you don’t trust yet: when they wrote, who (and their role on the repo), where, and the first line |
+| `3` | History | every job, newest first, with when it last changed, including done and dismissed ones; `o` orders by last update instead, `/` searches (e.g. `dismissed`, a repo name) |
 | `4` | Repos | subscribed repos first, `[x]` when subscribed; `Enter` shows [everything about one repo](#one-repo-at-a-glance), space (or `s`) toggles the subscription, `l` cycles the level, `a` switches the agent (Claude Code → OpenCode → Codex → Gemini CLI, experimental), `e` edits the repo file, `R` rescans. `l` and `a` change the repo’s own setting; when a [schedule window](/advanced#working-hours) overrides it right now, the row says so, e.g. `(now auto, from window)` |
 | `5` | Settings | every `config.toml` setting, its value and whether it's `[set]` or `[default]` |
+| `6` | Worktrees | the job worktrees on disk, when each last changed, and removed ones (`KEPT`) you can bring back for a week |
 | `?` | Help | keys and commands |
 
 Move with the arrow keys or `j`/`k`, `g`/`G` for the first and last item. `Enter` opens a job and
@@ -31,7 +32,8 @@ daemon, or stops it after asking (see [Turning Night Porter off](/getting-starte
 quits the TUI; the daemon keeps running.
 
 The header counts are coloured by urgency, and the header says **update available** when there's
-a newer release. In Settings, on is green and off is red, `[set]` and `[default]` look different,
+a newer release. In the lists, statuses and levels have their own colours, dates are light blue and
+the PR or issue is bold; keys in the footer and the Help tab stand out from what they do. In Settings, on is green and off is red, `[set]` and `[default]` look different,
 and global keys are coloured differently from `defaults.*` keys. Every state is also written in
 words, so nothing depends on colour; set `NO_COLOR=1` to turn colours off.
 
