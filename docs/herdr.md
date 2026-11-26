@@ -23,7 +23,7 @@ Where it opens:
 
 ```toml
 # ~/.config/nightporter/config.toml
-handoff = "auto"   # or "herdr", "rex", "tmux", "zellij", "terminal" or "print"
+handoff = "auto"   # or "herdr", "rex", "tmux", "zellij", "t3", "terminal" or "print"
 ```
 
 | Value | Opens |
@@ -32,6 +32,7 @@ handoff = "auto"   # or "herdr", "rex", "tmux", "zellij", "terminal" or "print"
 | `rex` | a new Rex session |
 | `tmux` | a new window when you’re inside tmux, else a detached session (`tmux attach -t …`) |
 | `zellij` | a new pane when you’re inside Zellij, else a background session (`zellij attach …`) |
+| `t3` | the worktree in [T3 Code](https://t3.codes)'s desktop app (`t3 app <worktree>`); start a thread there with the briefing, which is on your clipboard (macOS) and in `handoff-brief.md`. T3 Code picks the agent, so `handoff_agent` doesn't apply. Never chosen by `auto` |
 | `terminal` | a new window: iTerm2 or Terminal on macOS; `$TERMINAL`, then `x-terminal-emulator`, Ghostty, kitty, WezTerm, GNOME Terminal or Konsole on Linux |
 | `print` | nothing: it prints the `cd … && <agent> …` command for you to run |
 
@@ -63,7 +64,7 @@ per-command allow list, a sandbox, no repo-level config from an untrusted branch
 run with `agent`. `nightporter doctor` checks the handoff agent is installed. In herdr, the agent
 is started with `herdr agent start --kind <binary>`, so herdr has to know it.
 
-For tmux, Zellij, terminal and print, the briefing is written to `handoff-brief.md` in the job’s
+For tmux, Zellij, T3 Code, terminal and print, the briefing is written to `handoff-brief.md` in the job’s
 directory and read from there when the agent starts; it is never pasted into a command line.
 Rex’s `rex` command lives inside the app on macOS; Night Porter finds it there, or set `REX_BIN`.
 

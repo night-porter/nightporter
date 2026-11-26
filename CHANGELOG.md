@@ -6,6 +6,15 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `env.share`: ignored folders (`vendor`, `node_modules`, `target`) cloned copy-on-write from your clone into each new worktree, so dependency installs start warm and the copies take no disk space until changed. APFS, or btrfs/XFS with reflink; skipped elsewhere.
+- `handoff = "t3"` opens a job's worktree in T3 Code's desktop app, with the briefing on the clipboard.
+
+### Changed
+
+- `nightporter gc` (and the daemon's hourly cleanup) also removes the worktree of an issue job once the issue is closed, as it already did for merged or closed PRs.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added

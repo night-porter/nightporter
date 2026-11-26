@@ -42,6 +42,7 @@ pub fn take_over(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
     let res = match target {
         Handoff::Herdr => crate::herdr::handoff(db, j, agent),
         Handoff::Rex => rex(db, j, agent),
+        Handoff::T3 => t3(paths, db, j),
         t => launch(paths, db, j, agent, t),
     };
     match res {
@@ -122,11 +123,29 @@ fn shell_line(worktree: &str, agent: HandoffAgent, brief_file: &Path) -> String 
 
 /// tmux, Zellij, a new terminal window, or printing: all run (or show) a small script in the
 /// job's directory that starts the briefed agent at the worktree.
-fn launch(paths: &Paths, db: &Db, j: &Job, agent: HandoffAgent, target: Handoff) -> Result<String> {
+/// The briefing as `handoff-brief.md` in the job's directory.
+fn write_brief(paths: &Paths, db: &Db, j: &Job) -> Result<PathBuf> {
     let dir = paths.job_dir(j.id);
     std::fs::create_dir_all(&dir)?;
     let brief = dir.join("handoff-brief.md");
     std::fs::write(&brief, crate::herdr::briefing(db, j))?;
+    Ok(brief)
+}
+
+/// T3 Code picks its own agent: open the worktree in its app, the briefing on the clipboard
+/// (macOS) and in a file, to start a thread with.
+fn t3(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
+    let brief = write_brief(paths, db, j)?;
+    run("t3", &["app", &j.worktree]).context("T3 Code's `t3` CLI (https://t3.codes)")?;
+    let copied = cfg!(target_os = "macos")
+        && std::fs::File::open(&brief).is_ok_and(|f| Command::new("pbcopy").stdin(f).status().is_ok_and(|s| s.success()));
+    let clip = if copied { " (copied to the clipboard)" } else { "" };
+    Ok(format!("opened the worktree in T3 Code; start a thread there with the briefing in {}{clip}", brief.display()))
+}
+
+fn launch(paths: &Paths, db: &Db, j: &Job, agent: HandoffAgent, target: Handoff) -> Result<String> {
+    let brief = write_brief(paths, db, j)?;
+    let dir = paths.job_dir(j.id);
     let line = shell_line(&j.worktree, agent, &brief);
     if target == Handoff::Print {
         return Ok(format!("run this in a terminal to take over: {line}"));

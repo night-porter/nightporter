@@ -476,6 +476,10 @@ async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_d
 async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Path) -> Result<()> {
     stage(ctx, j.id, "env")?;
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
+    let shared = git::share_dirs(&w.clone, &w.wt, &s.env.share).await;
+    if !shared.is_empty() {
+        log(ctx, j.id, &format!("cloned from your clone (copy-on-write): {}", shared.join(", ")));
+    }
     // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
     // install doesn't stop the job; the job log keeps the error, the reply says "not verified locally".
     for cmd in lockfile_installs(&w.wt).into_iter().filter(|_| s.env.install) {
@@ -1036,11 +1040,11 @@ pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
             continue;
         }
         let old = wt.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e > idle);
-        let closed = j.target == Target::Pr
-            && match ctx.forge(&j.repo) {
-                Ok(f) => f.lock().await.pr(&j.repo, j.number).await.is_ok_and(|p| p.state != PrState::Open),
-                Err(_) => false,
-            };
+        let closed = match (j.target, ctx.forge(&j.repo)) {
+            (Target::Pr, Ok(f)) => f.lock().await.pr(&j.repo, j.number).await.is_ok_and(|p| p.state != PrState::Open),
+            (Target::Issue, Ok(f)) => f.lock().await.issue(&j.repo, j.number).await.is_ok_and(|i| !i.open),
+            _ => false,
+        };
         if (all || old || closed)
             && let Err(e) = remove(&ctx.paths, &cfg, &j).await
         {
