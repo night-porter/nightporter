@@ -169,6 +169,7 @@ pub async fn run(ctx: &Ctx, id: i64) -> Result<()> {
         s.env.setup.clear();
         s.env.install = false;
         s.env.teardown.clear();
+        s.env.share.clear();
         log(ctx, id, "reviewing someone else's code without running it: no tests, no env setup");
     } else if await_run_approval(ctx, &mut j, &w).await? {
         return Ok(());
@@ -476,6 +477,10 @@ async fn filter_gates(ctx: &Ctx, j: &mut Job, s: &RepoSettings, wt: &Path, job_d
 async fn setup_env(ctx: &Ctx, j: &Job, s: &RepoSettings, w: &Work, job_dir: &Path) -> Result<()> {
     stage(ctx, j.id, "env")?;
     let vars = Vars { repo: &j.repo.path, n: j.number, forge: j.repo.forge.as_str(), wt: &w.wt, branch: &w.branch };
+    let shared = git::share_dirs(&w.clone, &w.wt, &s.env.share).await;
+    if !shared.is_empty() {
+        log(ctx, j.id, &format!("cloned from your clone (copy-on-write): {}", shared.join(", ")));
+    }
     // Your own lockfiles, your own tools and registry logins: what you'd run by hand. A failed
     // install doesn't stop the job; the job log keeps the error, the reply says "not verified locally".
     for cmd in lockfile_installs(&w.wt).into_iter().filter(|_| s.env.install) {
@@ -945,14 +950,18 @@ async fn merge_gate(j: &Job, f: &crate::forge::Forge) -> Option<String> {
     f.merge_gate(&j.repo, &j.meta.base).await.unwrap_or_else(|e| Some(format!("its rules couldn't be read: {e:#}")))
 }
 
+/// The PR a job works on, or the one it opened for an issue.
+fn pr_number(j: &Job) -> Option<u64> {
+    match j.target {
+        Target::Pr => Some(j.number),
+        Target::Issue | Target::Jira => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
+    }
+}
+
 /// `merge` level, once the branch's rules passed: turn on the forge's auto-merge for this push.
 /// Returns what happened, for the log and the notification; an error leaves it as at `auto`.
 async fn auto_merge(j: &Job, f: &crate::forge::Forge) -> String {
-    let n = match j.target {
-        Target::Pr => Some(j.number),
-        Target::Issue | Target::Jira => j.meta.pr_url.rsplit('/').next().and_then(|n| n.parse().ok()),
-    };
-    let Some(n) = n else { return "; couldn't tell the PR's number, left open".into() };
+    let Some(n) = pr_number(j) else { return "; couldn't tell the PR's number, left open".into() };
     match f.enable_auto_merge(&j.repo, n, &j.head_after).await {
         Ok(()) => "; set to merge once checks pass and someone else approves".into(),
         Err(e) => format!("; couldn't set it to merge ({e:#}), left open"),
@@ -1036,11 +1045,18 @@ pub async fn gc(ctx: &Ctx, all: bool) -> Result<()> {
             continue;
         }
         let old = wt.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e > idle);
-        let closed = j.target == Target::Pr
-            && match ctx.forge(&j.repo) {
-                Ok(f) => f.lock().await.pr(&j.repo, j.number).await.is_ok_and(|p| p.state != PrState::Open),
-                Err(_) => false,
-            };
+        // An issue's worktree stays while the PR it opened is open.
+        let closed = match (j.target, ctx.forge(&j.repo)) {
+            (Target::Jira, _) | (_, Err(_)) => false,
+            (t, Ok(f)) => {
+                let f = f.lock().await;
+                let pr_done = match pr_number(&j) {
+                    Some(n) => f.pr(&j.repo, n).await.is_ok_and(|p| p.state != PrState::Open),
+                    None => true,
+                };
+                pr_done && (t == Target::Pr || f.issue(&j.repo, j.number).await.is_ok_and(|i| !i.open))
+            }
+        };
         if (all || old || closed)
             && let Err(e) = remove(&ctx.paths, &cfg, &j).await
         {

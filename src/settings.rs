@@ -55,7 +55,7 @@ pub static SETTINGS: &[Setting] = &[
     s("min_free_gb", Int, "Jobs wait while free disk space is below this many GB."),
     s("retention_days", Int, "Days of job history kept."),
     s("worktree_idle_days", Int, "Idle worktrees are removed after this many days."),
-    s("handoff", Choice(&["auto", "herdr", "rex", "tmux", "zellij", "terminal", "print"]), "Where h (take over) opens a job."),
+    s("handoff", Choice(&["auto", "herdr", "rex", "tmux", "zellij", "t3", "terminal", "print"]), "Where h (take over) opens a job."),
     s(
         "handoff_agent",
         Choice(crate::config::HandoffAgent::NAMES),
@@ -149,6 +149,7 @@ pub static SETTINGS: &[Setting] = &[
     s("defaults.env.setup", List, "Commands run before the agent, e.g. ddev start"),
     s("defaults.env.teardown", List, "Commands run after the job."),
     s("defaults.env.cleanup", List, "Commands run when the worktree is removed."),
+    s("defaults.env.share", List, "Ignored folders cloned copy-on-write from your clone into new worktrees, e.g. vendor"),
     s("defaults.env.prompt", Text, "Extra instructions file for the environment."),
     s("defaults.maintainer.enabled", Bool, "Maintainer mode: triage, reproduce, fix or review others' issues and MRs on request."),
     s("defaults.maintainer.level", Choice(&["observe", "suggest", "draft"]), "Level for maintainer jobs (capped at draft)."),
@@ -477,7 +478,7 @@ pub fn repo_text(paths: &Paths, cfg: &Config, repo: &crate::forge::RepoId, clone
     let _ = writeln!(o, "  may run        {}", list(&s.allow_commands));
     let esc = s.checks.escalate_on.iter().map(crate::state::enum_str).collect::<Vec<String>>().join(", ");
     let _ = writeln!(o, "  always ask on  {esc}   protected extra: {}   held for you: {}", list(&s.checks.protected), list(&s.checks.hold));
-    let _ = writeln!(o, "  env install    {}", on(s.env.install));
+    let _ = writeln!(o, "  env install    {}   shared from your clone: {}", on(s.env.install), list(&s.env.share));
     let _ = writeln!(o, "  env setup      {}", list(&s.env.setup));
 
     let _ = writeln!(o, "\nChange: `e` in the TUI's Repos tab, or edit {}", file.display());

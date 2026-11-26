@@ -41,10 +41,10 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `max_concurrent_jobs` | `2` | across all repos |
 | `daily_job_cap` | `50` | jobs per 24h |
 | `retention_days` | `30` | history kept in the state db |
-| `worktree_idle_days` | `14` | idle worktrees are removed after this |
+| `worktree_idle_days` | `14` | idle worktrees are removed after this; a merged or closed PR's or issue's worktree goes sooner |
 | `marketplaces` | `[]` | extra marketplace git URLs |
 | `handoff_agent` | `job` | which agent a handoff starts: `job` (the one that ran it), `claude`, `opencode`, `codex`, `gemini`, or a handoff-only agent: `pi`, `cursor`, `copilot`, `goose`, `qwen`, `droid`, `kiro` ([details](/herdr#choose-the-agent)) |
-| `handoff` | `auto` | where `h` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print` ([details](/herdr#take-over-a-job)) |
+| `handoff` | `auto` | where `h` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `t3`, `terminal` or `print` ([details](/herdr#take-over-a-job)) |
 | `pr_commands` | `true` | act on `/nightporter approve`, `dismiss`, `retry` and `status` in your own comments on a PR or MR (see [From your phone](/daily-use#from-your-phone)). Only the token's own user, checked by user id |
 | `check_updates` | `true` | once a day, ask GitHub's public releases API for the latest version number; the TUI header and `nightporter status` then say when there's a new one. Anonymous: GitHub sees your IP and a `nightporter/<version>` user agent, nothing about you or your repos. Night Porter never updates itself |
 | `[[accounts]]` | | `forge = "github" \| "gitlab" \| "forgejo"` (`"gitea"` works too), `host` (default github.com / gitlab.com / codeberg.org), `token = "cli" \| "keyring"` (`cli` asks `gh`/`glab`/`tea`; store a keyring token with `nightporter token set <forge> [host]`), `aliases` (other host names your clone remotes use, such as an SSH `Host` alias from `~/.ssh/config`: `["github-work"]`; `git.drupal.org` is built in for `git.drupalcode.org`). See [Forgejo and Gitea](#forgejo-and-gitea) |
@@ -82,7 +82,7 @@ config stays active. Unknown keys are errors, so typos don't fail silently.
 | `[[schedule]]` | always | `days` (`mon-fri`, `sat,sun`, `weekdays`, `weekends`, `daily`), `windows` (`["08:00-09:00", "22:00-06:00"]`), `tz`, and optionally `level`, `agent`, `notify` for that window; see [Working hours](/advanced#working-hours) |
 | `[reply]` | | `style`, `language` (`en`), `footer` (`true`), `attribution` (`footer`: the visible "via Night Porter" line plus a hidden `<!-- nightporter -->` marker; `marker`: the hidden marker only, same as `footer = false`; `none`: no trace at all, replies and status replies read as if you typed them; overrides `footer`; applies to new posts only, old comments keep their marker), `resolve_threads` (`false`; Gitea only on Forgejo/Gitea, see below) |
 | `[checks]` | | `protected` (extra globs), `hold` (globs a job may change but that always wait for your approval, at any level; see [Paths that always wait for you](/autonomy#paths-that-always-wait-for-you)), `escalate_on` (`["deps", "size"]`), `max_diff_lines` (`500`), `allow_env_variants` (`false`; `true` lets jobs edit `.env.*` such as `.env.example`, while `.env` stays protected) |
-| `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file) |
+| `[env]` | | `install` (`false`; `true` installs dependencies from the root lockfiles before the agent: composer, npm, pnpm, yarn, cargo), `setup`, `teardown`, `cleanup` (commands), `prompt` (file), `share` (ignored folders such as `vendor` or `node_modules` cloned copy-on-write from your clone into each new worktree, [details](#share-dependency-folders)) |
 | `[maintainer]` | | `enabled` (`false`), `level` (`draft`, capped at draft unless `allow_above_draft`), `levels` (a level per verb: `triage`, `reproduce`, `fix`, `review`), `pickup` (`label`, `milestone` (`"@current"`) or, on GitHub, `project` + `iteration` (`"@current"`); `verb` (`fix`), `max_claimed` (`2`): claim and work on unassigned issues; see [Pick up the sprint](/advanced#pick-up-the-sprint)), `triage_new`, `review_new` (`false`: triage every new issue, review every new ready PR/MR by others; see [Triage and review what's new](/advanced#triage-and-review-what-s-new)), `allow_above_draft` (`false`; only in a repo's own file: lets maintainer jobs on that repo go above `draft` through `level` or `levels`), `label` (`nightporter`), `review_requests` (`false`: review PRs when your review is requested, GitHub), `review_verdicts` (`[]`: post reviews as a real review with the agent's outcome when it's listed here: `comment`, `request_changes`, `approve`; always waits for your approval; GitLab has no request-changes API, so that one is a comment), `watch_prs` (`false`: put others' ready, non-draft PRs/MRs in the inbox every `sweep_interval`; allow once queues a review), `review_runs_code` (`false`: reviews only read the code), `review_depth` (`standard`; `quick`: only problems that block a merge; `deep`: reads around each change and tries to disprove each finding before reporting it) |
 | `[[jira]]` | | only in a repo's own file, one per source: `site` (as `acli` knows it, e.g. `"acme.atlassian.net"`), `jql`, `paths` (`[]`: the whole repo), `pickup` (`assigned` or `new`), `verb` (`fix`), `max_claimed` (`2`), `priority` (`0`), `creators` (`[]`: anyone), `in_progress`, `in_review` (status names); see [Jira issues](/advanced#jira-issues) |
 
@@ -260,3 +260,27 @@ token = "keyring"          # or "cli" to use your `tea` login for this host
 - **Merge conflicts** fire after two sweeps in a row see one at the same commit, because the
   server also reports "not mergeable" while it is still checking a new push.
 - **Draft PRs** (maintainer `fix`) are opened with a `WIP:` title prefix.
+
+## Share dependency folders
+
+Each job has its own worktree, so `env.install` or `env.setup` would otherwise install a
+repo's dependencies from scratch in every one. `env.share` names ignored folders to clone from
+your own clone into a new worktree first, so the install only updates what differs:
+
+```toml
+[env]
+share = ["vendor", "web/core", "node_modules"]
+install = true
+```
+
+The clone is copy-on-write (APFS on macOS; btrfs or XFS with reflink on Linux): it takes no
+extra disk space until the job changes a file, and your own folders are never touched. A
+folder is only shared when your clone has it, git ignores it there, the worktree doesn't have
+it yet, the job's branch ignores it too (so it can't be committed), nothing in it links outside
+it (an `npm link` into your own code), and both are on the same volume; otherwise it's skipped
+(never fully copied). Plain relative paths only. On Windows it does nothing.
+
+Share dependency folders, not build output: Cargo's `target/` and similar caches decide what to
+rebuild by modification time, and a cloned copy can look newer than the branch's sources.
+Read-only reviews of someone else's code never get shared folders.
+

@@ -84,6 +84,96 @@ pub async fn prepare_worktree(
     Ok((sha, gitfile, kept))
 }
 
+/// Copy-on-write clone the ignored folders `dirs` (`vendor`, `node_modules`, `target`) from your
+/// clone into a worktree that lacks them, so a dependency install only updates what changed.
+/// APFS (`cp -c`) or btrfs/XFS (`cp --reflink=always`), same volume only: never a full copy.
+/// Returns the folders shared.
+pub async fn share_dirs(clone: &Path, wt: &Path, dirs: &[String]) -> Vec<String> {
+    let mut shared = Vec::new();
+    for d in dirs {
+        if share_dir(clone, wt, d).await.unwrap_or(false) {
+            shared.push(d.clone());
+        }
+    }
+    shared
+}
+
+#[cfg(not(unix))]
+async fn share_dir(_: &Path, _: &Path, _: &str) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+async fn share_dir(clone: &Path, wt: &Path, d: &str) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let rel = Path::new(d);
+    if d.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Ok(false);
+    }
+    let (src, dst) = (clone.join(rel), wt.join(rel));
+    let meta = std::fs::symlink_metadata(&src)?;
+    // No symlink on the way in either tree: the branch can't steer the copy out of the worktree.
+    let mut prefix = PathBuf::new();
+    for c in rel.parent().into_iter().flat_map(Path::components) {
+        prefix.push(c);
+        for root in [clone, wt] {
+            if std::fs::symlink_metadata(root.join(&prefix)).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Ok(false);
+            }
+        }
+    }
+    if !meta.is_dir()
+        || std::fs::symlink_metadata(&dst).is_ok()
+        || meta.dev() != std::fs::metadata(wt)?.dev()
+        // Ignored in your clone and on the job's branch, so it can never be committed.
+        // (The trailing `/` matches `vendor/` patterns before the worktree has the folder.)
+        || git(clone, &["check-ignore", "-q", "--", &format!("{d}/")]).await.is_err()
+        || git(wt, &["check-ignore", "-q", "--", &format!("{d}/")]).await.is_err()
+        || links_out(&src, &src)?
+    {
+        return Ok(false);
+    }
+    if let Some(p) = dst.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let flag = if cfg!(target_os = "macos") { "-cR" } else { "-R --reflink=always" };
+    let ok = Command::new("cp").args(flag.split(' ')).arg(&src).arg(&dst).status().await.is_ok_and(|s| s.success());
+    if !ok {
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+    Ok(ok)
+}
+
+/// Whether any symlink under `dir` is absolute or leads outside `root` (an `npm link` into your
+/// own code): installs in the worktree would write through it.
+#[cfg(unix)]
+fn links_out(root: &Path, dir: &Path) -> Result<bool> {
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let t = e.file_type()?;
+        if t.is_symlink() {
+            let mut at = dir.to_path_buf();
+            for c in std::fs::read_link(e.path())?.components() {
+                match c {
+                    std::path::Component::Normal(n) => at.push(n),
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if at != root => {
+                        at.pop();
+                    }
+                    _ => return Ok(true),
+                }
+            }
+            if !at.starts_with(root) {
+                return Ok(true);
+            }
+        } else if t.is_dir() && links_out(root, &e.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// `wt/.git` is a regular file naming a git dir directly inside the clone's `worktrees/`.
 pub async fn gitfile_points_into(clone: &Path, wt: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(wt.join(".git")) else { return false };
@@ -410,6 +500,37 @@ pub(crate) mod tests {
         assert_eq!(run(&["rev-parse", &format!("{head}^")]), map[0].1, "re-parented onto the signed commit");
         assert_eq!(run(&["rev-parse", &format!("{head}~2")]), before);
         assert_eq!(run(&["log", "-1", "--format=%s|%an|%T", head]), run(&["log", "-1", "--format=%s|%an|%T", &after]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_ignored_self_contained_folders_of_your_clone_are_shared() {
+        let d = tempfile::tempdir().unwrap();
+        let clone = d.path().join("clone");
+        std::fs::create_dir(&clone).unwrap();
+        repo(&clone);
+        let sh = |cmd: &str| assert!(std::process::Command::new("sh").args(["-c", cmd]).current_dir(&clone).status().unwrap().success());
+        sh(
+            "printf 'vendor/\nout/\n' > .gitignore && git add .gitignore && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm ig",
+        );
+        // Ignored in your clone only (uncommitted), so not on the job's branch.
+        sh(
+            "echo onlyhere/ >> .gitignore && mkdir -p vendor/pkg out onlyhere notignored && touch vendor/pkg/lib.php onlyhere/f notignored/f",
+        );
+        sh("ln -s ../pkg/lib.php vendor/pkg/rel && ln -s \"$PWD/vendor\" out/abs");
+        let wt = d.path().join("wt");
+        git(&clone, &["worktree", "add", "-q", &wt.to_string_lossy()]).await.unwrap();
+        let want = ["vendor", "out", "onlyhere", "notignored", "../clone/vendor", "/etc", "a.txt"].map(String::from);
+        let shared = share_dirs(&clone, &wt, &want).await;
+        // Copy-on-write is guaranteed on APFS; Linux CI may run on ext4 (then nothing is shared).
+        if cfg!(target_os = "macos") {
+            assert_eq!(shared, ["vendor"]);
+            assert!(wt.join("vendor/pkg/lib.php").is_file() && wt.join("vendor/pkg/rel").is_symlink());
+        }
+        assert!(!wt.join("out").exists(), "a link out of the folder");
+        assert!(!wt.join("onlyhere").exists(), "not ignored on the branch: it would be committed");
+        assert!(!wt.join("notignored").exists());
+        assert!(share_dirs(&clone, &wt, &want).await.is_empty(), "never over what the worktree has");
     }
 
     #[tokio::test]

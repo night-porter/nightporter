@@ -47,7 +47,7 @@ pub struct Config {
     /// Take `/nightporter approve|dismiss|retry|status` from your own comments on PRs/MRs.
     #[serde(default = "yes")]
     pub pr_commands: bool,
-    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `terminal` or `print`.
+    /// Where `h` / `nightporter handoff` opens a job: `auto`, `herdr`, `rex`, `tmux`, `zellij`, `t3`, `terminal` or `print`.
     #[serde(default)]
     pub handoff: Handoff,
     /// Which agent a handoff starts: `job` (the one that ran it) or any interactive agent,
@@ -193,6 +193,8 @@ pub enum Handoff {
     Rex,
     Tmux,
     Zellij,
+    /// T3 Code's desktop app (`t3 app <worktree>`).
+    T3,
     /// A new terminal window (iTerm2 or Terminal on macOS; `$TERMINAL` or a common one on Linux).
     Terminal,
     /// Print the command to run yourself.
@@ -804,6 +806,10 @@ pub struct Env {
     pub cleanup: Vec<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Ignored folders (`vendor`, `node_modules`) copy-on-write cloned from your clone
+    /// into a new worktree, so installs start warm and share disk space.
+    #[serde(default)]
+    pub share: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
