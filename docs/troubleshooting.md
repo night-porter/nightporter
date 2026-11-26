@@ -27,7 +27,8 @@ Work through these in order:
 
 - **Is the daemon running?** `nightporter doctor` says, and the TUI header says **NOT RUNNING**.
   Start it with `nightporter start` (or `D` in the TUI); `nightporter service install` also starts
-  it at login. To watch it, run `nightporter daemon` in a terminal (if one is already running, it
+  it at login and restarts it if it exits; with the service installed, `doctor` fails while the
+  daemon is down. To watch it, run `nightporter daemon` in a terminal (if one is already running, it
   says so and exits).
 - **Is the repo subscribed?** `nightporter repos` (or `nightporter repo <owner/name>` for
   everything that applies to it). `nightporter repos --all` lists unwatched clones too. If the repo is missing, check `code_dir` and

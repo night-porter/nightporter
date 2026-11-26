@@ -6,6 +6,12 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The background service now restarts the daemon however it exits, not only after a crash: a daemon ended by another program stayed down until the next login. `nightporter stop` takes it down through the service, so it stays down until `start`.
+- `nightporter start` right after `stop` failed with "the daemon didn't start" on macOS; it now reloads the service (retrying while launchd finishes unloading), which also brings an older service file up to date.
+- With the background service installed, `nightporter doctor` fails while the daemon isn't running.
+
 ## [0.8.1] - 2026-11-26
 
 ### Added

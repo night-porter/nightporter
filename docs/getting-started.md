@@ -191,7 +191,8 @@ the next time it starts. Your repos and config are not touched.
 To turn it back on, press `D` again (the header says **NOT RUNNING (D starts it)** while it's
 off) or run `nightporter start`.
 
-If you installed the background service, it also starts again when you log in. To stop that:
+If you installed the background service, it restarts the daemon whenever it exits for any other
+reason (a crash, or another program ending it), and starts it again when you log in. To stop that:
 
 ```sh
 nightporter service uninstall
