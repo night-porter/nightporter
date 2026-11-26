@@ -34,7 +34,7 @@ pub fn plist(exe: &str, path: &str, log: &str) -> String {
   <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log}</string>
@@ -47,7 +47,7 @@ pub fn plist(exe: &str, path: &str, log: &str) -> String {
 
 pub fn unit(exe: &str, path: &str) -> String {
     format!(
-        "[Unit]\nDescription=Night Porter daemon\nAfter=network-online.target\n\n[Service]\nExecStart=\"{exe}\" daemon\nEnvironment=\"PATH={path}\"\nRestart=on-failure\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Night Porter daemon\nAfter=network-online.target\n\n[Service]\nExecStart=\"{exe}\" daemon\nEnvironment=\"PATH={path}\"\nRestart=always\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -59,15 +59,31 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+fn uid() -> Result<String> {
+    Ok(String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string())
+}
+
+/// Write the service file and (re)load it, which starts the daemon. Always restarts it after it
+/// exits, however it exits: only `nightporter stop` (which unloads it) keeps it down.
 pub fn install(log: &std::path::Path) -> Result<String> {
     let exe = exe()?;
     if cfg!(target_os = "macos") {
         let p = home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
         std::fs::create_dir_all(p.parent().unwrap())?;
         std::fs::write(&p, plist(&exe, &path_env(), &log.to_string_lossy()))?;
-        let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
+        let uid = uid()?;
         let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
-        run(Command::new("launchctl").args(["bootstrap", &format!("gui/{uid}")]).arg(&p))?;
+        // `bootout` finishes in the background: loading again too soon fails ("5: Input/output error").
+        let load = || run(Command::new("launchctl").args(["bootstrap", &format!("gui/{uid}")]).arg(&p));
+        let mut r = load();
+        for _ in 0..10 {
+            if r.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            r = load();
+        }
+        r?;
         Ok(format!("installed launchd agent {}", p.display()))
     } else if cfg!(target_os = "linux") {
         let p = home()?.join(".config/systemd/user/nightporter.service");
@@ -107,19 +123,14 @@ fn wait_for(paths: &crate::paths::Paths, running: bool) -> bool {
     false
 }
 
-/// Start the daemon in the background: through the login service if it's installed, otherwise
-/// as a detached process logging to `daemon.log`.
+/// Start the daemon in the background: through the login service if it's installed (rewritten
+/// and reloaded, so an older service file is brought up to date and launchd's restart throttle
+/// doesn't apply), otherwise as a detached process logging to `daemon.log`.
 pub fn start(paths: &crate::paths::Paths) -> Result<String> {
     if paths.daemon_running() {
         return Ok("Night Porter is already running".into());
     }
-    let via_service = installed()
-        && if cfg!(target_os = "macos") {
-            let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
-            run(Command::new("launchctl").args(["kickstart", &format!("gui/{uid}/{LABEL}")])).is_ok()
-        } else {
-            run(Command::new("systemctl").args(["--user", "start", "nightporter.service"])).is_ok()
-        };
+    let via_service = installed() && install(&paths.log_file()).is_ok();
     if !via_service {
         paths.ensure()?;
         let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;
@@ -146,8 +157,16 @@ pub fn stop(paths: &crate::paths::Paths) -> Result<String> {
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .context("can't find the daemon's process id; stop it with your system's task manager")?;
+    // The service restarts the daemon whenever it exits: take it down through the service.
+    if installed() {
+        if cfg!(target_os = "macos") {
+            let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", uid()?)]).output();
+        } else {
+            let _ = Command::new("systemctl").args(["--user", "stop", "nightporter.service"]).output();
+        }
+    }
     #[cfg(unix)]
-    {
+    if paths.daemon_running() {
         let pid = libc::pid_t::try_from(pid)?;
         // SAFETY: plain syscall; SIGTERM makes the daemon exit cleanly.
         if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
@@ -170,8 +189,7 @@ pub fn stop(paths: &crate::paths::Paths) -> Result<String> {
 pub fn uninstall() -> Result<String> {
     if cfg!(target_os = "macos") {
         let p = home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
-        let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
-        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
+        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", uid()?)]).output();
         let _ = std::fs::remove_file(&p);
         Ok("removed launchd agent".into())
     } else if cfg!(target_os = "linux") {
@@ -197,7 +215,7 @@ mod tests {
     fn systemd_unit_runs_the_daemon_with_path() {
         let u = super::unit("/opt/my bin/nightporter", "/usr/bin:/bin");
         assert!(u.contains("ExecStart=\"/opt/my bin/nightporter\" daemon\n") && u.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
-        assert!(u.contains("Restart=on-failure") && u.ends_with("WantedBy=default.target\n"));
+        assert!(u.contains("Restart=always") && u.ends_with("WantedBy=default.target\n"));
     }
 
     #[test]

@@ -396,11 +396,17 @@ fn collect(paths: &Paths, tools: impl Fn(&[(ForgeKind, String)], &[AgentKind]) -
     }
     checks.extend(claude);
     let running = paths.daemon_running();
+    // Installed as a service but down: nothing is being watched, and it won't come back alone.
+    let service = crate::service::installed();
     checks.push(Check {
         name: "daemon".into(),
         ok: running,
-        optional: true,
-        detail: if running { "running".into() } else { "not running".into() },
+        optional: !service,
+        detail: match (running, service) {
+            (true, _) => "running".into(),
+            (false, true) => "not running, though it's installed to run in the background".into(),
+            (false, false) => "not running".into(),
+        },
         fix: "nightporter start   (and `nightporter service install` to start it at login)".into(),
     });
     checks
@@ -627,7 +633,7 @@ mod tests {
         let by = |n: &str| checks.iter().find(|c| c.name == n).unwrap();
         assert!(!by("code dir").ok, "code dir doesn't exist yet");
         assert!(by("disk").ok && by("disk").detail.ends_with("GB free (min 0)"));
-        assert!(!by("daemon").ok && by("daemon").optional);
+        assert!(!by("daemon").ok && by("daemon").optional != crate::service::installed(), "required once installed as a service");
 
         std::fs::create_dir_all(&code).unwrap();
         std::fs::write(paths.config_file(), format!("code_dir = {:?}\n", code.display().to_string())).unwrap();
