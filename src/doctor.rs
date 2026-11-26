@@ -363,7 +363,9 @@ fn collect(paths: &Paths, tools: impl Fn(&[(ForgeKind, String)], &[AgentKind]) -
         }
         checks.extend(tools(&forges, &agents));
         let h = cfg.handoff_agent;
-        if h != crate::config::HandoffAgent::Job && !agents.iter().any(|a| a.bin() == h.bin()) {
+        if cfg.handoff == crate::config::Handoff::T3 {
+            checks.push(tool("t3", "--version", "install T3 Code (https://t3.codes) or change handoff", false));
+        } else if h != crate::config::HandoffAgent::Job && !agents.iter().any(|a| a.bin() == h.bin()) {
             checks.push(tool(h.bin(), "--version", &format!("install {} or set handoff_agent = \"job\"", h.label()), false));
         }
         let dir = cfg.code_dir();

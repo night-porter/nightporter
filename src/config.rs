@@ -806,7 +806,7 @@ pub struct Env {
     pub cleanup: Vec<String>,
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Ignored folders (`vendor`, `node_modules`, `target`) copy-on-write cloned from your clone
+    /// Ignored folders (`vendor`, `node_modules`) copy-on-write cloned from your clone
     /// into a new worktree, so installs start warm and share disk space.
     #[serde(default)]
     pub share: Vec<String>,

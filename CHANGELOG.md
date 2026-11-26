@@ -6,9 +6,11 @@ All notable changes to Night Porter. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-26
+
 ### Added
 
-- `env.share`: ignored folders (`vendor`, `node_modules`, `target`) cloned copy-on-write from your clone into each new worktree, so dependency installs start warm and the copies take no disk space until changed. APFS, or btrfs/XFS with reflink; skipped elsewhere.
+- `env.share`: ignored dependency folders (`vendor`, `node_modules`) cloned copy-on-write from your clone into each new worktree, so dependency installs start warm and the copies take no disk space until changed. APFS, or btrfs/XFS with reflink; skipped elsewhere.
 - `handoff = "t3"` opens a job's worktree in T3 Code's desktop app, with the briefing on the clipboard.
 
 ### Changed
@@ -365,7 +367,8 @@ First release.
   and marketplaces.
 - Handoff to herdr or Rex, a herdr plugin, `events` and `wait` for scripts, and an agent skill.
 
-[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/night-porter/nightporter/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/night-porter/nightporter/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/night-porter/nightporter/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/night-porter/nightporter/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/night-porter/nightporter/compare/v0.6.0...v0.6.1

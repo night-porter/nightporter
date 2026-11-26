@@ -8,6 +8,16 @@ The full list is in the [changelog](https://github.com/night-porter/nightporter/
 
 ## 0.8
 
+### Warm worktrees and T3 Code (0.8.1)
+
+**Dependencies without the reinstall.** `env.share = ["vendor", "node_modules"]` clones those
+folders from your own clone into each new worktree, copy-on-write, so installs only update what
+changed and the copies take no disk space until a job edits them. See
+[Share dependency folders](/configuration#share-dependency-folders).
+
+**Take over in T3 Code.** `handoff = "t3"` opens the job's worktree in T3 Code with the briefing
+on your clipboard. Worktrees of closed issues are now cleaned up too, once their PR is done.
+
 ### Steer, ship and promote (0.8.0)
 
 **Steer it from the PR.** `/nightporter stop` stops work on a PR until `/nightporter resume`, and

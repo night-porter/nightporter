@@ -276,6 +276,11 @@ install = true
 The clone is copy-on-write (APFS on macOS; btrfs or XFS with reflink on Linux): it takes no
 extra disk space until the job changes a file, and your own folders are never touched. A
 folder is only shared when your clone has it, git ignores it there, the worktree doesn't have
-it yet, and both are on the same volume; otherwise it's skipped (never fully copied). Plain
-relative paths only. On Windows it does nothing.
+it yet, the job's branch ignores it too (so it can't be committed), nothing in it links outside
+it (an `npm link` into your own code), and both are on the same volume; otherwise it's skipped
+(never fully copied). Plain relative paths only. On Windows it does nothing.
+
+Share dependency folders, not build output: Cargo's `target/` and similar caches decide what to
+rebuild by modification time, and a cloned copy can look newer than the branch's sources.
+Read-only reviews of someone else's code never get shared folders.
 

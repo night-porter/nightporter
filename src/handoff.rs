@@ -121,8 +121,6 @@ fn shell_line(worktree: &str, agent: HandoffAgent, brief_file: &Path) -> String 
     format!("cd {} && {}", sh_quote(worktree), cmd.join(" "))
 }
 
-/// tmux, Zellij, a new terminal window, or printing: all run (or show) a small script in the
-/// job's directory that starts the briefed agent at the worktree.
 /// The briefing as `handoff-brief.md` in the job's directory.
 fn write_brief(paths: &Paths, db: &Db, j: &Job) -> Result<PathBuf> {
     let dir = paths.job_dir(j.id);
@@ -136,13 +134,22 @@ fn write_brief(paths: &Paths, db: &Db, j: &Job) -> Result<PathBuf> {
 /// (macOS) and in a file, to start a thread with.
 fn t3(paths: &Paths, db: &Db, j: &Job) -> Result<String> {
     let brief = write_brief(paths, db, j)?;
-    run("t3", &["app", &j.worktree]).context("T3 Code's `t3` CLI (https://t3.codes)")?;
+    // It may stay attached to the app: don't wait for it.
+    Command::new("t3")
+        .args(["app", &j.worktree])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("run T3 Code's `t3` CLI (https://t3.codes)")?;
     let copied = cfg!(target_os = "macos")
         && std::fs::File::open(&brief).is_ok_and(|f| Command::new("pbcopy").stdin(f).status().is_ok_and(|s| s.success()));
     let clip = if copied { " (copied to the clipboard)" } else { "" };
     Ok(format!("opened the worktree in T3 Code; start a thread there with the briefing in {}{clip}", brief.display()))
 }
 
+/// tmux, Zellij, a new terminal window, or printing: all run (or show) a small script in the
+/// job's directory that starts the briefed agent at the worktree.
 fn launch(paths: &Paths, db: &Db, j: &Job, agent: HandoffAgent, target: Handoff) -> Result<String> {
     let brief = write_brief(paths, db, j)?;
     let dir = paths.job_dir(j.id);
